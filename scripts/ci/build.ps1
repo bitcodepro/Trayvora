@@ -26,6 +26,17 @@ dotnet test VoiceAgent.slnx -c Release --no-build --artifacts-path $artifacts --
 if ($LASTEXITCODE) { throw 'Tests failed; no package/release will be produced' }
 dotnet publish src/VoiceAgent.Desktop -c Release -r win-x64 --self-contained true --artifacts-path $artifacts -o $package -p:Version=$version -p:ContinuousIntegrationBuild=true
 if ($LASTEXITCODE) { throw 'Publish failed' }
+# Whisper.net.Runtime bundles other architectures as content; keep only Windows x64.
+$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $package 'runtimes'))
+if (Test-Path $runtimeRoot) {
+    foreach($dir in Get-ChildItem -LiteralPath $runtimeRoot -Directory) {
+        if ($dir.Name -eq 'win-x64') { continue }
+        $resolved = [IO.Path]::GetFullPath($dir.FullName)
+        if ([IO.Path]::GetDirectoryName($resolved) -cne $runtimeRoot) { throw 'Unexpected runtime path' }
+        Remove-Item -LiteralPath $resolved -Recurse -Force
+    }
+}
+if (!(Test-Path (Join-Path $runtimeRoot 'win-x64/whisper.dll'))) { throw 'Missing Windows x64 Whisper native library' }
 Copy-Item scripts/portable/START.txt $package
 Copy-Item docs/setup.md (Join-Path $package 'Setup.md')
 foreach($name in @('Trayvora.exe','Trayvora.dll','Trayvora.runtimeconfig.json','hostfxr.dll','coreclr.dll')) {
@@ -47,3 +58,4 @@ $metadata.sha256=$hash
 $metadata | ConvertTo-Json | Set-Content (Join-Path $release 'release.json') -Encoding utf8
 "$hash  trayvora-win-x64.zip" | Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
 Write-Host "Validated Trayvora $version from $sha ($hash)"
+
