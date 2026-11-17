@@ -167,7 +167,7 @@ internal sealed class App : Avalonia.Application
         menu.Items.Add(open);
         menu.Items.Add(sessions);
         menu.Items.Add(record);
-        using var iconStream = typeof(App).Assembly.GetManifestResourceStream("VoiceAgent.Desktop.Assets.tray.png")
+        using var iconStream = typeof(App).Assembly.GetManifestResourceStream("VoiceAgent.Desktop.Assets.trayvora.ico")
             ?? throw new InvalidOperationException("Missing tray icon.");
         var tray = new TrayIcon
         {

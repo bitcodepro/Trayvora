@@ -1716,6 +1716,7 @@ internal sealed class VoiceOverlay : Window
                 var notice = new Window
                 {
                     Title = "Action blocked",
+                    Icon = TrayvoraTheme.AppIcon,
                     Width = 420,
                     SizeToContent = SizeToContent.Height,
                     WindowStartupLocation = WindowStartupLocation.CenterOwner,
