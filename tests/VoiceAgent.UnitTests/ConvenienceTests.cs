@@ -263,4 +263,62 @@ public sealed class ComputerSoundTests
         // Only the recorded part counts.
         Assert.Equal(1, VoiceAgent.Speech.WasapiRecorder.Loudest([headset, Pcm(10, 10, 0, 0)], [0, 4]));
     }
+
+    private static readonly short[] Speech = [1200, -900, 1500, -1100];
+
+    private static Task<int> Fill(byte[] buffer, short[] samples)
+    {
+        var bytes = samples.SelectMany(BitConverter.GetBytes).ToArray();
+        bytes.CopyTo(buffer, 0);
+        return Task.FromResult(bytes.Length);
+    }
+
+    [Fact]
+    public async Task AFailedDeviceNeverWinsOverASilentWorkingOne()
+    {
+        var pcm = new byte[64];
+        var count = await VoiceAgent.Speech.WasapiRecorder.RecordLoudestAsync(2, (index, buffer) => index == 0
+            ? Task.FromException<int>(new InvalidOperationException("device lost"))
+            : Task.FromResult(0), pcm, CancellationToken.None);
+        Assert.Equal(0, count);
+
+        count = await VoiceAgent.Speech.WasapiRecorder.RecordLoudestAsync(3, (index, buffer) => index switch
+        {
+            0 => Task.FromException<int>(new InvalidOperationException("device lost")),
+            1 => Fill(buffer, [0, 0, 0, 0]),
+            _ => Fill(buffer, Speech),
+        }, pcm, CancellationToken.None);
+        Assert.Equal(8, count);
+        Assert.Equal(1200, BitConverter.ToInt16(pcm, 0));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => VoiceAgent.Speech.WasapiRecorder.RecordLoudestAsync(2,
+            (_, _) => Task.FromException<int>(new InvalidOperationException("no device")), pcm, CancellationToken.None));
+    }
+
+    [Fact]
+    public async Task ExtraBuffersAreClearedOnSuccessCancellationAndFailure()
+    {
+        var seen = new List<byte[]>();
+        Task<int> Record(int index, byte[] buffer)
+        {
+            seen.Add(buffer);
+            return Fill(buffer, Speech);
+        }
+        await VoiceAgent.Speech.WasapiRecorder.RecordLoudestAsync(2, Record, new byte[64], CancellationToken.None);
+
+        using var cancelled = new CancellationTokenSource();
+        await cancelled.CancelAsync();
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() =>
+            VoiceAgent.Speech.WasapiRecorder.RecordLoudestAsync(2, Record, new byte[64], cancelled.Token));
+
+        await Assert.ThrowsAsync<InvalidOperationException>(() => VoiceAgent.Speech.WasapiRecorder.RecordLoudestAsync(2, (index, buffer) =>
+        {
+            seen.Add(buffer);
+            Fill(buffer, Speech);
+            return Task.FromException<int>(new InvalidOperationException("failed after capturing"));
+        }, new byte[64], CancellationToken.None));
+
+        Assert.Equal(6, seen.Count);
+        Assert.All(seen, buffer => Assert.All(buffer, value => Assert.Equal(0, value)));
+    }
 }

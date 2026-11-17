@@ -313,8 +313,12 @@ internal sealed class App : Avalonia.Application
             try
             {
                 if (await GitHubUpdate.CheckAsync() is { } found) Offer(found);
-                else if (!quiet)
+                else
                 {
+                    // Nothing newer (or the offered release was withdrawn): back to a plain check.
+                    offered = null;
+                    updateItem.Header = "Check for updates";
+                    if (quiet) return;
                     var current = GitHubUpdate.CurrentVersion();
                     updateItem.Header = current is null ? "Check for updates · up to date" : $"Check for updates · {current} is the latest";
                 }
@@ -339,7 +343,9 @@ internal sealed class App : Avalonia.Application
             updateBusy = false;
             if (message is not null && !message.StartsWith("Updating", StringComparison.Ordinal))
             {
-                updateItem.Header = $"Install update {chosen.Version} · failed, try again";
+                // Forget the cached offer so the next click checks GitHub again instead of retrying the same download.
+                offered = null;
+                updateItem.Header = "Check for updates · last install failed";
                 tray.ToolTipText = "Trayvora · " + message;
             }
         };
@@ -348,7 +354,7 @@ internal sealed class App : Avalonia.Application
         updates.Tick += async (_, _) =>
         {
             updates.Interval = TimeSpan.FromHours(12);
-            if (offered is null) await CheckUpdatesAsync(quiet: true);
+            await CheckUpdatesAsync(quiet: true);
         };
         if (OperatingSystem.IsWindows()) updates.Start();
         // For checking the built-in terminal: TRAYVORA_OPEN_TERMINAL=powershell|claude|codex opens it at startup.

@@ -41,26 +41,40 @@ public sealed class WasapiRecorder : IAudioRecorder
                 using (device) ids.Add(device.ID);
         }
         if (ids.Count <= 1) return await RecordCoreAsync(ids.FirstOrDefault(), pcm, peak, stop, cancel, loopback: true).ConfigureAwait(false);
-
         var levels = new double[ids.Count];
-        var buffers = ids.Select(_ => new byte[pcm.Length]).ToArray();
-        var runs = ids.Select((id, index) => RecordCoreAsync(id, buffers[index], new Progress<double>(level =>
+        return await RecordLoudestAsync(ids.Count, (index, buffer) => RecordCoreAsync(ids[index], buffer, new Progress<double>(level =>
         {
             levels[index] = level;
             peak.Report(levels.Max());
-        }), stop, cancel, loopback: true)).ToArray();
-        try { await Task.WhenAll(runs).ConfigureAwait(false); }
-        catch (Exception) when (!cancel.IsCancellationRequested && runs.Any(run => run.IsCompletedSuccessfully)) { }
-        cancel.ThrowIfCancellationRequested();
-        if (!runs.Any(run => run.IsCompletedSuccessfully)) await runs[0].ConfigureAwait(false);
-
-        var best = Loudest(buffers, runs.Select(run => run.IsCompletedSuccessfully ? run.Result : 0).ToArray());
-        var count = runs[best].Result;
-        buffers[best].AsSpan(0, count).CopyTo(pcm);
-        foreach (var buffer in buffers) Array.Clear(buffer);
-        return count;
+        }), stop, cancel, loopback: true), pcm, cancel).ConfigureAwait(false);
     }
 
+    /// <summary>
+    /// Runs <paramref name="count"/> recordings into separate buffers and copies the loudest successful one into
+    /// <paramref name="pcm"/>. Failed devices never win; if every device failed the first failure is thrown.
+    /// Every extra buffer is cleared afterwards, also on cancellation and errors.
+    /// </summary>
+    public static async Task<int> RecordLoudestAsync(int count, Func<int, byte[], Task<int>> record, byte[] pcm, CancellationToken cancel)
+    {
+        var buffers = Enumerable.Range(0, count).Select(_ => new byte[pcm.Length]).ToArray();
+        try
+        {
+            var runs = buffers.Select((buffer, index) => record(index, buffer)).ToArray();
+            try { await Task.WhenAll(runs).ConfigureAwait(false); }
+            catch (Exception) when (!cancel.IsCancellationRequested && runs.Any(run => run.IsCompletedSuccessfully)) { }
+            cancel.ThrowIfCancellationRequested();
+            var usable = Enumerable.Range(0, count).Where(index => runs[index].IsCompletedSuccessfully).ToArray();
+            if (usable.Length == 0) await runs[0].ConfigureAwait(false);
+            var best = usable[Loudest(usable.Select(index => buffers[index]).ToArray(), usable.Select(index => runs[index].Result).ToArray())];
+            var recorded = runs[best].Result;
+            buffers[best].AsSpan(0, recorded).CopyTo(pcm);
+            return recorded;
+        }
+        finally
+        {
+            foreach (var buffer in buffers) System.Security.Cryptography.CryptographicOperations.ZeroMemory(buffer);
+        }
+    }
     /// <summary>Index of the recording with the most sound energy (16-bit mono PCM).</summary>
     public static int Loudest(IReadOnlyList<byte[]> buffers, IReadOnlyList<int> counts)
     {
