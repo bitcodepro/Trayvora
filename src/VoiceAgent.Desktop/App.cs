@@ -289,6 +289,29 @@ internal sealed class App : Avalonia.Application
         pendingChats.Tick += (_, _) => { if (!exiting && OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats(); };
         pendingChats.Start();
         if (OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats();
+        // A minute after start and then twice a day: look for a newer release on GitHub and offer it in the tray menu.
+        NativeMenuItem? updateItem = null;
+        var updates = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
+        updates.Tick += async (_, _) =>
+        {
+            updates.Interval = TimeSpan.FromHours(12);
+            if (exiting) return;
+            AvailableUpdate? found;
+            try { found = await GitHubUpdate.CheckAsync(); }
+            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or InvalidOperationException) { return; }
+            if (found is null || exiting) return;
+            overlay.OfferUpdate(found);
+            tray.ToolTipText = $"Trayvora · update {found.Version} available";
+            if (updateItem is null)
+            {
+                updateItem = new NativeMenuItem();
+                updateItem.Click += (_, _) => { if (!exiting) overlay.ShowReadiness(); };
+                menu.Items.Insert(0, updateItem);
+                menu.Items.Insert(1, new NativeMenuItemSeparator());
+            }
+            updateItem.Header = $"Update to Trayvora {found.Version}…";
+        };
+        if (OperatingSystem.IsWindows()) updates.Start();
         // For checking the built-in terminal: TRAYVORA_OPEN_TERMINAL=powershell|claude|codex opens it at startup.
         if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("TRAYVORA_OPEN_TERMINAL") is { Length: > 0 } openTerminal
             && Enum.TryParse<TerminalKind>(openTerminal, ignoreCase: true, out var terminalKind))

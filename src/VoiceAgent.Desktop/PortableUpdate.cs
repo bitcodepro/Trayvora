@@ -14,7 +14,7 @@ internal static class PortableUpdate
     private const string ExeName = "Trayvora.exe";
 
     /// <summary>Folders with the user's data, kept as they are.</summary>
-    internal static readonly string[] DataFolders = ["settings", "history", "codex-data", "Memory", "temp", "appdata", "localappdata", "logs"];
+    internal static readonly string[] DataFolders = ["settings", "history", "codex-data", "Memory", "temp", "tmp", "appdata", "localappdata", "LocalLow", "logs"];
 
     public static string StagingRoot(string appDirectory) => Path.Combine(appDirectory, "settings", "update-staging");
 
@@ -76,6 +76,7 @@ internal static class PortableUpdate
             try
             {
                 CopyProgram(source, appDirectory);
+                RemoveStale(source, appDirectory);
                 last = null;
                 break;
             }
@@ -106,6 +107,48 @@ internal static class PortableUpdate
             File.Copy(file, destination, overwrite: true);
         }
     }
+
+    /// <summary>The list of program files Trayvora installed last time, so files dropped by a newer version can be removed.</summary>
+    internal static string ManifestFile(string appDirectory) => Path.Combine(appDirectory, "settings", "program-files.txt");
+
+    /// <summary>
+    /// Deletes program files of the old version that the new one no longer has and records the new list.
+    /// Without an earlier list only libraries, symbols and the runtimes folder are treated as program files;
+    /// data folders, models and any other file the user put there are never deleted.
+    /// </summary>
+    internal static void RemoveStale(string source, string target)
+    {
+        var current = ProgramFiles(source).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var manifest = ManifestFile(target);
+        IEnumerable<string> previous = File.Exists(manifest)
+            ? File.ReadAllLines(manifest).Where(line => line.Length > 0)
+            : ProgramFiles(target).Where(LooksLikeProgramFile).ToList();
+        var root = Path.GetFullPath(target) + Path.DirectorySeparatorChar;
+        foreach (var relative in previous.Where(relative => !current.Contains(relative)))
+        {
+            var path = Path.GetFullPath(Path.Combine(target, relative));
+            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
+        File.WriteAllLines(manifest, current.Order(StringComparer.OrdinalIgnoreCase));
+    }
+
+    /// <summary>Files under <paramref name="folder"/> that belong to the program (not data folders or models).</summary>
+    private static IEnumerable<string> ProgramFiles(string folder) =>
+        Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories)
+            .Select(file => Path.GetRelativePath(folder, file))
+            .Where(relative =>
+            {
+                var top = relative.Split(Path.DirectorySeparatorChar, 2)[0];
+                return !relative.Contains(Path.DirectorySeparatorChar)
+                    || !(DataFolders.Contains(top, StringComparer.OrdinalIgnoreCase) || top.Equals("models", StringComparison.OrdinalIgnoreCase));
+            });
+
+    private static bool LooksLikeProgramFile(string relative) =>
+        relative.StartsWith("runtimes" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
+        || (!relative.Contains(Path.DirectorySeparatorChar) && Path.GetExtension(relative).ToLowerInvariant() is ".dll" or ".pdb");
 
     /// <summary>Removes a finished staging folder (called by the updated app).</summary>
     public static void CleanUp(string appDirectory)

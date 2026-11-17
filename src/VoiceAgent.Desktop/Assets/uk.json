@@ -605,5 +605,8 @@
   "⏸ interrupted": "⏸ перервано",
   "■  Stop": "■  Зупинити",
   "▶  Play": "▶  Відтворити",
-  "✓ final answer": "✓ остаточна відповідь"
+  "✓ final answer": "✓ остаточна відповідь",
+  "Check for updates": "Перевірити оновлення",
+  "Checking GitHub…": "Перевіряю GitHub…",
+  "Unpacking…": "Розпаковую…"
 }

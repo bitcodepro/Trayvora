@@ -6,3 +6,4 @@
 3. Optional: tray menu -> More -> Start with Windows.
 4. Choose Codex in the sidebar, type a short question and send it.
 All settings, history, sessions, the Whisper model and Trayvora's own ChatGPT profile are stored in this folder.
+Updates: Trayvora checks GitHub for new versions and offers them in the tray menu and in Get started -> Update. Updating keeps all settings and data.
