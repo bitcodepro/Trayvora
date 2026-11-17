@@ -43,7 +43,7 @@ internal sealed class ActivityLog
         lock (_gate)
         {
             _entries.Add(entry);
-            if (_entries.Count > Limit) _entries.RemoveRange(0, _entries.Count - Limit);
+            Trim(_entries);
             Save();
         }
         Changed?.Invoke();
@@ -70,13 +70,42 @@ internal sealed class ActivityLog
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
     }
 
+    /// <summary>The kind that starts a press; every later line until the next one belongs to it.</summary>
+    public const string PressKind = "Shortcut";
+
+    /// <summary>Upper bound on lines, so steps started without a shortcut (window buttons) cannot grow the file forever.</summary>
+    internal const int MaxLines = Limit * 12;
+
+    /// <summary>
+    /// Keeps the last <see cref="Limit"/> presses with all their steps: everything before the oldest kept press is dropped,
+    /// so a result never loses the press that started it.
+    /// </summary>
+    internal static void Trim(List<ActivityEntry> entries)
+    {
+        var presses = 0;
+        var oldestKept = -1;
+        for (var i = entries.Count - 1; i >= 0; i--)
+        {
+            if (entries[i].Kind != PressKind) continue;
+            if (++presses <= Limit) { oldestKept = i; continue; }
+            entries.RemoveRange(0, oldestKept);
+            break;
+        }
+        if (entries.Count <= MaxLines) return;
+        var start = entries.Count - MaxLines;
+        // Cut on a press boundary when possible so the first kept line still starts a press.
+        var boundary = entries.FindIndex(start, entry => entry.Kind == PressKind);
+        entries.RemoveRange(0, boundary >= 0 ? boundary : start);
+    }
+
     private static List<ActivityEntry> Load(string? file)
     {
         try
         {
             if (file is null || !File.Exists(file)) return [];
             var list = JsonSerializer.Deserialize<List<ActivityEntry>>(File.ReadAllText(file)) ?? [];
-            return list.Count > Limit ? list[^Limit..] : list;
+            Trim(list);
+            return list;
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { return []; }
     }
