@@ -60,14 +60,14 @@ internal sealed class ReadinessView : ToolPage
             TrayvoraTheme.Primary(_install);
             updateButton.Click += async (_, _) =>
             {
-                updateButton.IsEnabled = false;
+                SetUpdating(true);
                 try { if (await update() is { } message) _updateStatus.Text = message; }
-                finally { updateButton.IsEnabled = true; }
+                finally { SetUpdating(false); }
             };
             checkButton.Click += async (_, _) =>
             {
                 if (checkOnline is null) return;
-                checkButton.IsEnabled = false;
+                SetUpdating(true);
                 _updateStatus.Text = "Checking GitHub…";
                 try
                 {
@@ -78,24 +78,23 @@ internal sealed class ReadinessView : ToolPage
                 {
                     _updateStatus.Text = $"Could not check for updates: {error.Message}";
                 }
-                finally { checkButton.IsEnabled = true; }
+                finally { SetUpdating(false); }
             };
             _install.Click += async (_, _) =>
             {
                 if (install is null || _available is not { } chosen) return;
-                _install.IsEnabled = false;
-                checkButton.IsEnabled = false;
+                SetUpdating(true);
                 try
                 {
                     var progress = new Progress<string>(text => _updateStatus.Text = text);
                     if (await install(chosen, progress) is { } message) _updateStatus.Text = message;
                 }
-                finally
-                {
-                    _install.IsEnabled = true;
-                    checkButton.IsEnabled = true;
-                }
+                finally { SetUpdating(false); }
             };
+            void SetUpdating(bool busy)
+            {
+                foreach (var button in new[] { _install, checkButton, updateButton }) button.IsEnabled = !busy;
+            }
             var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _install, checkButton, updateButton } };
             body.Children.Insert(0, TrayvoraTheme.Card(TrayvoraTheme.Heading("Update"), _updateStatus, buttons));
         }

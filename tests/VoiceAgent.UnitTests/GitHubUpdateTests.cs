@@ -49,52 +49,97 @@ public sealed class GitHubUpdateTests
         }
     }
 
+    private static void Put(string folder, string relative, string text = "x")
+    {
+        var path = Path.Combine(folder, relative);
+        Directory.CreateDirectory(Path.GetDirectoryName(path)!);
+        File.WriteAllText(path, text);
+    }
+
     [Fact]
-    public void UpdateRemovesOldProgramFilesButKeepsSettingsModelsAndUserFiles()
+    public void FirstUpdateDeletesNothingItDoesNotOwnAndLaterUpdatesRemoveDroppedProgramFiles()
     {
         var root = Directory.CreateTempSubdirectory("trayvora-stale-");
         try
         {
             var app = Directory.CreateDirectory(Path.Combine(root.FullName, "app")).FullName;
             var update = Directory.CreateDirectory(Path.Combine(root.FullName, "new")).FullName;
-            void Put(string folder, string relative, string text = "x")
-            {
-                var path = Path.Combine(folder, relative);
-                Directory.CreateDirectory(Path.GetDirectoryName(path)!);
-                File.WriteAllText(path, text);
-            }
             Put(app, "Trayvora.exe", "old");
             Put(app, "Old.Library.dll");
-            Put(app, Path.Combine("runtimes", "win-x86", "old.dll"));
+            Put(app, "MyOwnLibrary.dll", "mine");
+            Put(app, Path.Combine("runtimes", "personal", "notes.txt"), "mine");
             Put(app, Path.Combine("settings", "speech.json"), "mine");
-            Put(app, Path.Combine("history", "chat.db"), "mine");
             Put(app, Path.Combine("models", "ggml-base.bin"), "model");
-            Put(app, "my-notes.txt", "mine");
             Put(update, "Trayvora.exe", "new");
             Put(update, "New.Library.dll");
             Put(update, Path.Combine("runtimes", "win-x64", "whisper.dll"));
 
+            // No inventory yet: ownership is unknown, so nothing is deleted.
             PortableUpdate.CopyProgram(update, app);
-            PortableUpdate.RemoveStale(update, app);
-
+            Assert.Empty(PortableUpdate.RemoveStale(update, app));
             Assert.Equal("new", File.ReadAllText(Path.Combine(app, "Trayvora.exe")));
-            Assert.True(File.Exists(Path.Combine(app, "New.Library.dll")));
-            Assert.False(File.Exists(Path.Combine(app, "Old.Library.dll")));
-            Assert.False(File.Exists(Path.Combine(app, "runtimes", "win-x86", "old.dll")));
+            Assert.True(File.Exists(Path.Combine(app, "Old.Library.dll")));
+            Assert.True(File.Exists(Path.Combine(app, "MyOwnLibrary.dll")));
+            Assert.True(File.Exists(Path.Combine(app, "runtimes", "personal", "notes.txt")));
             Assert.Equal("mine", File.ReadAllText(Path.Combine(app, "settings", "speech.json")));
-            Assert.Equal("mine", File.ReadAllText(Path.Combine(app, "history", "chat.db")));
             Assert.Equal("model", File.ReadAllText(Path.Combine(app, "models", "ggml-base.bin")));
-            Assert.True(File.Exists(Path.Combine(app, "my-notes.txt")));
 
-            // The next update uses the recorded list, so a dropped non-library program file goes too.
+            // The next update knows what it installed and removes only that.
             File.Delete(Path.Combine(update, "New.Library.dll"));
-            PortableUpdate.RemoveStale(update, app);
+            Assert.Empty(PortableUpdate.RemoveStale(update, app));
             Assert.False(File.Exists(Path.Combine(app, "New.Library.dll")));
-            Assert.True(File.Exists(Path.Combine(app, "my-notes.txt")));
+            Assert.True(File.Exists(Path.Combine(app, "MyOwnLibrary.dll")));
+            Assert.True(File.Exists(Path.Combine(app, "runtimes", "personal", "notes.txt")));
+            Assert.True(File.Exists(Path.Combine(app, "runtimes", "win-x64", "whisper.dll")));
         }
         finally
         {
             root.Delete(recursive: true);
         }
+    }
+
+    [Fact]
+    public void StaleFileThatCannotBeDeletedStaysListedAndIsRetried()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var root = Directory.CreateTempSubdirectory("trayvora-locked-");
+        try
+        {
+            var app = Directory.CreateDirectory(Path.Combine(root.FullName, "app")).FullName;
+            var update = Directory.CreateDirectory(Path.Combine(root.FullName, "new")).FullName;
+            Put(update, "Trayvora.exe");
+            Put(update, "Dropped.dll");
+            PortableUpdate.CopyProgram(update, app);
+            PortableUpdate.RemoveStale(update, app);
+            File.Delete(Path.Combine(update, "Dropped.dll"));
+
+            using (new FileStream(Path.Combine(app, "Dropped.dll"), FileMode.Open, FileAccess.Read, FileShare.None))
+                Assert.Equal(["Dropped.dll"], PortableUpdate.RemoveStale(update, app));
+            Assert.Contains("Dropped.dll", File.ReadAllLines(PortableUpdate.ManifestFile(app)));
+
+            Assert.Empty(PortableUpdate.RemoveStale(update, app));
+            Assert.False(File.Exists(Path.Combine(app, "Dropped.dll")));
+            Assert.DoesNotContain("Dropped.dll", File.ReadAllLines(PortableUpdate.ManifestFile(app)));
+        }
+        finally
+        {
+            root.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void OnlyOneUpdateCanRunAtATime()
+    {
+        Assert.True(PortableUpdate.TryBegin());
+        try
+        {
+            Assert.False(PortableUpdate.TryBegin());
+        }
+        finally
+        {
+            PortableUpdate.End();
+        }
+        Assert.True(PortableUpdate.TryBegin());
+        PortableUpdate.End();
     }
 }

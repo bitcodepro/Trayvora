@@ -871,6 +871,7 @@ internal sealed class VoiceOverlay : Window
     private async Task<string?> InstallUpdateAsync(AvailableUpdate update, IProgress<string> progress)
     {
         if (_operation is not null || _discussion?.IsRunning == true) return "Wait until the current request finishes.";
+        if (!PortableUpdate.TryBegin()) return "Another update is already in progress.";
         var app = AppContext.BaseDirectory;
         try
         {
@@ -885,6 +886,7 @@ internal sealed class VoiceOverlay : Window
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or HttpRequestException
             or TaskCanceledException or System.ComponentModel.Win32Exception)
         {
+            PortableUpdate.End();
             return $"Could not update: {error.Message}";
         }
         ExitRequested?.Invoke();
@@ -901,6 +903,7 @@ internal sealed class VoiceOverlay : Window
             FileTypeFilter = [new Avalonia.Platform.Storage.FilePickerFileType("Trayvora zip") { Patterns = ["*.zip"] }],
         });
         if (picked.Count == 0 || Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(picked[0]) is not { } zip) return null;
+        if (!PortableUpdate.TryBegin()) return "Another update is already in progress.";
         var app = AppContext.BaseDirectory;
         try
         {
@@ -909,6 +912,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or System.ComponentModel.Win32Exception)
         {
+            PortableUpdate.End();
             return $"Could not update: {error.Message}";
         }
         ExitRequested?.Invoke();

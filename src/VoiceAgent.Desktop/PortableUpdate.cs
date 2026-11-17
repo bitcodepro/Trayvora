@@ -76,7 +76,9 @@ internal static class PortableUpdate
             try
             {
                 CopyProgram(source, appDirectory);
-                RemoveStale(source, appDirectory);
+                var pendingCleanup = Path.Combine(appDirectory, "settings", "update-cleanup-pending.txt");
+                if (RemoveStale(source, appDirectory) is { Count: > 0 } locked) File.WriteAllLines(pendingCleanup, locked);
+                else File.Delete(pendingCleanup);
                 last = null;
                 break;
             }
@@ -113,26 +115,27 @@ internal static class PortableUpdate
 
     /// <summary>
     /// Deletes program files of the old version that the new one no longer has and records the new list.
-    /// Without an earlier list only libraries, symbols and the runtimes folder are treated as program files;
-    /// data folders, models and any other file the user put there are never deleted.
+    /// Only files listed by an earlier update count as Trayvora's: without that list (the first update) nothing is deleted,
+    /// so files the user added are never removed. Files that cannot be deleted stay in the list and are retried next time.
     /// </summary>
-    internal static void RemoveStale(string source, string target)
+    /// <returns>Relative paths of stale files that could not be deleted.</returns>
+    internal static IReadOnlyList<string> RemoveStale(string source, string target)
     {
         var current = ProgramFiles(source).ToHashSet(StringComparer.OrdinalIgnoreCase);
         var manifest = ManifestFile(target);
-        IEnumerable<string> previous = File.Exists(manifest)
-            ? File.ReadAllLines(manifest).Where(line => line.Length > 0)
-            : ProgramFiles(target).Where(LooksLikeProgramFile).ToList();
+        var previous = File.Exists(manifest) ? File.ReadAllLines(manifest).Where(line => line.Length > 0).ToList() : [];
         var root = Path.GetFullPath(target) + Path.DirectorySeparatorChar;
-        foreach (var relative in previous.Where(relative => !current.Contains(relative)))
+        var failed = new List<string>();
+        foreach (var relative in previous.Where(relative => !current.Contains(relative)).Distinct(StringComparer.OrdinalIgnoreCase))
         {
             var path = Path.GetFullPath(Path.Combine(target, relative));
             if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
             try { if (File.Exists(path)) File.Delete(path); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { failed.Add(relative); }
         }
         Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
-        File.WriteAllLines(manifest, current.Order(StringComparer.OrdinalIgnoreCase));
+        File.WriteAllLines(manifest, current.Concat(failed).Order(StringComparer.OrdinalIgnoreCase));
+        return failed;
     }
 
     /// <summary>Files under <paramref name="folder"/> that belong to the program (not data folders or models).</summary>
@@ -146,10 +149,13 @@ internal static class PortableUpdate
                     || !(DataFolders.Contains(top, StringComparer.OrdinalIgnoreCase) || top.Equals("models", StringComparison.OrdinalIgnoreCase));
             });
 
-    private static bool LooksLikeProgramFile(string relative) =>
-        relative.StartsWith("runtimes" + Path.DirectorySeparatorChar, StringComparison.OrdinalIgnoreCase)
-        || (!relative.Contains(Path.DirectorySeparatorChar) && Path.GetExtension(relative).ToLowerInvariant() is ".dll" or ".pdb");
+    private static int _busy;
 
+    /// <summary>Claims the single update slot shared by online and zip installs; false while another update runs.</summary>
+    public static bool TryBegin() => Interlocked.CompareExchange(ref _busy, 1, 0) == 0;
+
+    /// <summary>Releases the update slot (only when an install failed; a successful one exits the app).</summary>
+    public static void End() => Volatile.Write(ref _busy, 0);
     /// <summary>Removes a finished staging folder (called by the updated app).</summary>
     public static void CleanUp(string appDirectory)
     {
