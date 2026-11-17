@@ -286,33 +286,69 @@ internal sealed class App : Avalonia.Application
         menu.Items.Add(emergency);
         menu.Items.Add(exit);
         tray.Clicked += async (_, _) => await ShowOverlayAsync(toggleRecording: false);
+        overlay.QuietNotice += text => tray.ToolTipText = "Trayvora · " + text;
         TrayIcon.SetIcons(this, new TrayIcons { tray });
         _ = overlay.CheckAccountsAsync();
         var pendingChats = new DispatcherTimer { Interval = TimeSpan.FromSeconds(15) };
         pendingChats.Tick += (_, _) => { if (!exiting && OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats(); };
         pendingChats.Start();
         if (OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats();
-        // A minute after start and then twice a day: look for a newer release on GitHub and offer it in the tray menu.
-        NativeMenuItem? updateItem = null;
+        // Tray → "Check for updates": checks GitHub; when a newer release exists the same item installs it.
+        // Also checked a minute after start and then twice a day.
+        var updateItem = new NativeMenuItem("Check for updates");
+        AvailableUpdate? offered = null;
+        var updateBusy = false;
+        void Offer(AvailableUpdate found)
+        {
+            offered = found;
+            overlay.OfferUpdate(found);
+            updateItem.Header = $"Install update {found.Version}";
+            tray.ToolTipText = $"Trayvora · update {found.Version} available";
+        }
+        async Task CheckUpdatesAsync(bool quiet)
+        {
+            if (updateBusy || exiting) return;
+            updateBusy = true;
+            if (!quiet) updateItem.Header = "Checking for updates…";
+            try
+            {
+                if (await GitHubUpdate.CheckAsync() is { } found) Offer(found);
+                else if (!quiet)
+                {
+                    var current = GitHubUpdate.CurrentVersion();
+                    updateItem.Header = current is null ? "Check for updates · up to date" : $"Check for updates · {current} is the latest";
+                }
+            }
+            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or InvalidOperationException)
+            {
+                if (!quiet) updateItem.Header = "Check for updates · could not reach GitHub";
+            }
+            finally { updateBusy = false; }
+        }
+        updateItem.Click += async (_, _) =>
+        {
+            if (exiting || updateBusy) return;
+            if (offered is not { } chosen)
+            {
+                await CheckUpdatesAsync(quiet: false);
+                return;
+            }
+            updateBusy = true;
+            updateItem.Header = $"Installing {chosen.Version}…";
+            var message = await overlay.InstallUpdateFromTrayAsync(chosen, new Progress<string>(text => tray.ToolTipText = "Trayvora · " + text));
+            updateBusy = false;
+            if (message is not null && !message.StartsWith("Updating", StringComparison.Ordinal))
+            {
+                updateItem.Header = $"Install update {chosen.Version} · failed, try again";
+                tray.ToolTipText = "Trayvora · " + message;
+            }
+        };
+        menu.Items.Insert(menu.Items.IndexOf(exit), updateItem);
         var updates = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         updates.Tick += async (_, _) =>
         {
             updates.Interval = TimeSpan.FromHours(12);
-            if (exiting) return;
-            AvailableUpdate? found;
-            try { found = await GitHubUpdate.CheckAsync(); }
-            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or InvalidOperationException) { return; }
-            if (found is null || exiting) return;
-            overlay.OfferUpdate(found);
-            tray.ToolTipText = $"Trayvora · update {found.Version} available";
-            if (updateItem is null)
-            {
-                updateItem = new NativeMenuItem();
-                updateItem.Click += (_, _) => { if (!exiting) overlay.ShowReadiness(); };
-                menu.Items.Insert(0, updateItem);
-                menu.Items.Insert(1, new NativeMenuItemSeparator());
-            }
-            updateItem.Header = $"Update to Trayvora {found.Version}…";
+            if (offered is null) await CheckUpdatesAsync(quiet: true);
         };
         if (OperatingSystem.IsWindows()) updates.Start();
         // For checking the built-in terminal: TRAYVORA_OPEN_TERMINAL=powershell|claude|codex opens it at startup.

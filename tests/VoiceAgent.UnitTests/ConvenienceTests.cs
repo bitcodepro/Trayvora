@@ -248,3 +248,19 @@ public sealed class RecognitionChoiceTests
         Assert.False(VoiceOverlay.UsesLongMemory(null, longModeSelected: false));
     }
 }
+
+[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+public sealed class ComputerSoundTests
+{
+    [Fact]
+    public void TheOutputDeviceThatCarriedTheCallIsChosen()
+    {
+        static byte[] Pcm(params short[] samples) => samples.SelectMany(BitConverter.GetBytes).ToArray();
+        var speakers = Pcm(0, 0, 0, 0);
+        var headset = Pcm(1200, -900, 1500, -1100);
+        Assert.Equal(1, VoiceAgent.Speech.WasapiRecorder.Loudest([speakers, headset], [8, 8]));
+        Assert.Equal(0, VoiceAgent.Speech.WasapiRecorder.Loudest([headset, speakers], [8, 8]));
+        // Only the recorded part counts.
+        Assert.Equal(1, VoiceAgent.Speech.WasapiRecorder.Loudest([headset, Pcm(10, 10, 0, 0)], [0, 4]));
+    }
+}

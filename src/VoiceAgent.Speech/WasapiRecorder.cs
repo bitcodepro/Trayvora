@@ -27,8 +27,62 @@ public sealed class WasapiRecorder : IAudioRecorder
     public Task<int> RecordAsync(string? deviceId, byte[] pcm, IProgress<double> peak,
         CancellationToken stop, CancellationToken cancel) => RecordCoreAsync(deviceId, pcm, peak, stop, cancel, loopback: false);
 
-    public Task<int> RecordOutputAsync(byte[] pcm, IProgress<double> peak, CancellationToken stop, CancellationToken cancel) =>
-        RecordCoreAsync(null, pcm, peak, stop, cancel, loopback: true);
+    /// <summary>
+    /// Records what plays on the computer. Every active output device is recorded at once (calls often play
+    /// through a headset that is not the default device) and the loudest recording is returned.
+    /// </summary>
+    public async Task<int> RecordOutputAsync(byte[] pcm, IProgress<double> peak, CancellationToken stop, CancellationToken cancel)
+    {
+        cancel.ThrowIfCancellationRequested();
+        var ids = new List<string>();
+        using (var devices = new MMDeviceEnumerator())
+        {
+            foreach (var device in devices.EnumerateAudioEndPoints(DataFlow.Render, DeviceState.Active))
+                using (device) ids.Add(device.ID);
+        }
+        if (ids.Count <= 1) return await RecordCoreAsync(ids.FirstOrDefault(), pcm, peak, stop, cancel, loopback: true).ConfigureAwait(false);
+
+        var levels = new double[ids.Count];
+        var buffers = ids.Select(_ => new byte[pcm.Length]).ToArray();
+        var runs = ids.Select((id, index) => RecordCoreAsync(id, buffers[index], new Progress<double>(level =>
+        {
+            levels[index] = level;
+            peak.Report(levels.Max());
+        }), stop, cancel, loopback: true)).ToArray();
+        try { await Task.WhenAll(runs).ConfigureAwait(false); }
+        catch (Exception) when (!cancel.IsCancellationRequested && runs.Any(run => run.IsCompletedSuccessfully)) { }
+        cancel.ThrowIfCancellationRequested();
+        if (!runs.Any(run => run.IsCompletedSuccessfully)) await runs[0].ConfigureAwait(false);
+
+        var best = Loudest(buffers, runs.Select(run => run.IsCompletedSuccessfully ? run.Result : 0).ToArray());
+        var count = runs[best].Result;
+        buffers[best].AsSpan(0, count).CopyTo(pcm);
+        foreach (var buffer in buffers) Array.Clear(buffer);
+        return count;
+    }
+
+    /// <summary>Index of the recording with the most sound energy (16-bit mono PCM).</summary>
+    public static int Loudest(IReadOnlyList<byte[]> buffers, IReadOnlyList<int> counts)
+    {
+        var best = 0;
+        double bestEnergy = -1;
+        for (var index = 0; index < buffers.Count; index++)
+        {
+            double energy = 0;
+            var samples = buffers[index].AsSpan(0, counts[index] & ~1);
+            for (var offset = 0; offset < samples.Length; offset += 2)
+            {
+                double value = BinaryPrimitives.ReadInt16LittleEndian(samples[offset..]);
+                energy += value * value;
+            }
+            if (energy > bestEnergy)
+            {
+                bestEnergy = energy;
+                best = index;
+            }
+        }
+        return best;
+    }
 
     private static async Task<int> RecordCoreAsync(string? deviceId, byte[] pcm, IProgress<double> peak,
         CancellationToken stop, CancellationToken cancel, bool loopback)
