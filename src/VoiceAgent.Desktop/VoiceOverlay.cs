@@ -855,6 +855,13 @@ internal sealed class VoiceOverlay : Window
         _ = Task.Run(() => CodexDesktopChats.ApplyPending(profile, settings, CodexDesktopChats.DesktopRunning()));
     }
 
+    /// <summary>Stops every reply being read aloud (Windows or OpenAI voice) and Text to audio playback.</summary>
+    public void StopSpeech()
+    {
+        _replyAudio?.Stop();
+        if (OperatingSystem.IsWindows()) _textToAudio?.StopListening();
+    }
+
     /// <summary>Asks the app to close (after an update is staged).</summary>
     public event Action? ExitRequested;
 
