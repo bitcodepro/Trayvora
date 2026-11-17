@@ -1,0 +1,25 @@
+<Project Sdk="Microsoft.NET.Sdk">
+  <PropertyGroup>
+    <OutputType>WinExe</OutputType>
+    <PlatformTarget>x64</PlatformTarget>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <AssemblyName>Trayvora</AssemblyName>
+    <RootNamespace>VoiceAgent.Desktop</RootNamespace>
+    <Product>Trayvora</Product>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+  </PropertyGroup>
+  <ItemGroup>
+    <ProjectReference Include="../VoiceAgent.Application/VoiceAgent.Application.csproj" />
+    <ProjectReference Include="../VoiceAgent.Codex/VoiceAgent.Codex.csproj" />
+    <ProjectReference Include="../VoiceAgent.Infrastructure/VoiceAgent.Infrastructure.csproj" />
+    <ProjectReference Include="../VoiceAgent.Speech/VoiceAgent.Speech.csproj" />
+    <PackageReference Include="System.Security.Cryptography.ProtectedData" />
+    <PackageReference Include="Avalonia.Desktop" />
+    <PackageReference Include="Avalonia.Themes.Fluent" />
+    <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
+    <PackageReference Include="Markdig" />
+    <EmbeddedResource Include="Assets/tray.png" />
+    <EmbeddedResource Include="Assets/uk.json" Condition="Exists('Assets/uk.json')" />
+    <InternalsVisibleTo Include="VoiceAgent.UnitTests" />
+  </ItemGroup>
+</Project>

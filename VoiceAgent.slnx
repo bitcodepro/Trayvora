@@ -1,0 +1,14 @@
+<Solution>
+  <Folder Name="/src/">
+    <Project Path="src/VoiceAgent.Application/VoiceAgent.Application.csproj" />
+    <Project Path="src/VoiceAgent.Codex/VoiceAgent.Codex.csproj" />
+    <Project Path="src/VoiceAgent.Desktop/VoiceAgent.Desktop.csproj" />
+    <Project Path="src/VoiceAgent.Domain/VoiceAgent.Domain.csproj" />
+    <Project Path="src/VoiceAgent.Infrastructure/VoiceAgent.Infrastructure.csproj" />
+    <Project Path="src/VoiceAgent.Security/VoiceAgent.Security.csproj" />
+    <Project Path="src/VoiceAgent.Speech/VoiceAgent.Speech.csproj" />
+  </Folder>
+  <Folder Name="/tests/">
+    <Project Path="tests/VoiceAgent.UnitTests/VoiceAgent.UnitTests.csproj" />
+  </Folder>
+</Solution>

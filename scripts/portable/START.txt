@@ -1,0 +1,8 @@
+1. Unpack this folder anywhere you can write to (for example Downloads\Trayvora) and double-click Trayvora.exe.
+   Trayvora appears in the notification area (tray). Click the icon to open it.
+2. First time only: in the left sidebar, under Accounts, click ChatGPT and Claude and choose Sign in.
+   Your browser opens; finish the sign-in there. No commands need to be typed.
+   (Codex needs the Codex app or Codex CLI installed; Claude needs Claude Desktop or Claude Code.)
+3. Optional: tray menu -> More -> Start with Windows.
+4. Choose Codex in the sidebar, type a short question and send it.
+All settings, history, sessions, the Whisper model and Trayvora's own ChatGPT profile are stored in this folder.

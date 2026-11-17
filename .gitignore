@@ -1,0 +1,22 @@
+bin/
+obj/
+TestResults/
+.vs/
+*.user
+
+# Local runtime data and credentials
+.env
+.env.*
+!.env.example
+*.pfx
+*.p12
+*.key
+*.pem
+/settings/
+/history/
+/Memory/
+/models/
+/codex-data/
+/logs/
+/artifacts/
+*.log
