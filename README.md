@@ -47,7 +47,9 @@ While a request runs, use **Stop everything** in the tray to terminate the owned
 
 ## Voice shortcuts and recognition
 
-**Ctrl+Alt+Shift+W** records the Windows default playback device through WASAPI loopback. Press again to stop and send to the active mode. Set the calling app to play through the same default device. Loopback can capture other sounds playing on that device. The existing background shortcut records your microphone. Both bindings are editable in Settings. Use headphones for private playback.
+**Ctrl+Alt+Shift+W** (Settings → Shortcuts → Computer sound) records what plays on the Windows default playback device through WASAPI loopback. Press again to stop: the speech is recognized (OpenAI by default when a key is saved; Settings → Speech recognition → Computer-sound shortcut uses), sent to OpenAI as a quick question, and the answer is shown and read aloud. **Ctrl+Alt+Shift+S** stops reading.
+
+Settings → **OpenAI API key** holds the one key used by OpenAI recognition, Quick and Deep questions, the computer-sound shortcut, OpenAI voices and Text to audio; after saving, the field is cleared and the last characters of the key are shown. Sessions (next to Voice mode) and the Questions modes (next to New conversation) each have a recognizer chooser: Automatic, Local Whisper or OpenAI.
 
 Hold **Alt** and scroll vertically to adjust Trayvora speech playback in 5-point steps. The control works with Trayvora in the tray and saves the playback level.
 

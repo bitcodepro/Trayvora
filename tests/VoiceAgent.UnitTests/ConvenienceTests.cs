@@ -175,3 +175,76 @@ public sealed class TargetChipTests
         Assert.Equal((false, false), DiscussionWindow.RelayAfterSwitch(DiscussionWindow.DiscussionTarget.Codex, false, true));
     }
 }
+
+[System.Runtime.Versioning.SupportedOSPlatform("windows")]
+public sealed class RecognitionChoiceTests
+{
+    [Fact]
+    public void EachPlaceUsesItsOwnRecognizerOrTheDefault()
+    {
+        var whisperDefault = new SpeechOptions(Cloud: false, ProtectedKey: "k");
+        Assert.False(SpeechSettings.Resolve(whisperDefault, RecognitionPlace.Main));
+        Assert.False(SpeechSettings.Resolve(whisperDefault, RecognitionPlace.Sessions));
+        Assert.True(SpeechSettings.Resolve(whisperDefault with { QuestionCloud = true }, RecognitionPlace.Questions));
+        Assert.False(SpeechSettings.Resolve(whisperDefault with { Cloud = true, SessionCloud = false }, RecognitionPlace.Sessions));
+        // Computer sound goes to OpenAI by default whenever a key is saved.
+        Assert.True(SpeechSettings.Resolve(whisperDefault, RecognitionPlace.ComputerSound));
+        Assert.False(SpeechSettings.Resolve(new SpeechOptions(), RecognitionPlace.ComputerSound));
+        Assert.False(SpeechSettings.Resolve(whisperDefault with { ComputerSoundCloud = false }, RecognitionPlace.ComputerSound));
+    }
+
+    [Fact]
+    public void SavedKeyIsShownOnlyAsAShortHint()
+    {
+        Assert.Equal("sk-…WXYZ", SpeechSettings.Hint("sk-proj-1234567890WXYZ"));
+        Assert.Equal("saved", SpeechSettings.Hint("short"));
+        Assert.Equal([null, false, true], new[] { 0, 1, 2 }.Select(Recognizers.Value));
+        Assert.Equal(2, Recognizers.Index(true));
+    }
+
+    [Fact]
+    public void ChosenOpenAiRecognizerIsReadyEvenWhenTheDefaultWhisperModelIsMissing()
+    {
+        var options = new SpeechOptions(Cloud: false, ProtectedKey: "k", QuestionCloud: true);
+        Assert.True(SpeechSettings.ReadyFor(options, RecognitionPlace.Questions, modelReady: false));
+        Assert.False(SpeechSettings.ReadyFor(options, RecognitionPlace.Main, modelReady: false));
+        Assert.False(SpeechSettings.ReadyFor(options with { ProtectedKey = null }, RecognitionPlace.Questions, modelReady: true));
+        Assert.True(SpeechSettings.ReadyFor(options with { QuestionCloud = false }, RecognitionPlace.Questions, modelReady: true));
+    }
+
+    [Fact]
+    public void FreshInstallSelectingOpenAiThenSavingTheKeyTurnsOpenAiOn()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-speech-");
+        try
+        {
+            var speech = new SpeechSettings(folder.FullName, folder.FullName);
+            Assert.Throws<InvalidOperationException>(() => speech.Save(true, 0, 0, ""));
+            Assert.False(speech.Current.Cloud);
+            // The user also picked a non-default OpenAI model before the key existed.
+            Assert.Throws<InvalidOperationException>(() => speech.Save(true, 0, 1, ""));
+            speech.Save(true, 0, 1, "sk-test-0000000000ABCD", "");
+            Assert.True(speech.Current.Cloud);
+            Assert.Equal(1, speech.Current.Remote);
+            Assert.Equal(1, new SpeechSettings(folder.FullName, folder.FullName).Current.Remote);
+            Assert.True(speech.CloudFor(RecognitionPlace.Main));
+            Assert.True(SpeechSettings.ReadyFor(speech.Current, RecognitionPlace.Main, modelReady: false));
+            Assert.Equal("sk-…ABCD", speech.Current.KeyHint);
+            Assert.True(new SpeechSettings(folder.FullName, folder.FullName).Current.Cloud);
+            speech.SaveKey("sk-test-1111111111WXYZ");
+            Assert.True(speech.Current.Cloud);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ComputerSoundQuestionsNeverUseLongMemory()
+    {
+        Assert.False(VoiceOverlay.UsesLongMemory(false, longModeSelected: true));
+        Assert.True(VoiceOverlay.UsesLongMemory(null, longModeSelected: true));
+        Assert.False(VoiceOverlay.UsesLongMemory(null, longModeSelected: false));
+    }
+}
