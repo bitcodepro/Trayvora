@@ -24,25 +24,16 @@ dotnet build VoiceAgent.slnx -c Release --artifacts-path $artifacts -p:Version=$
 if ($LASTEXITCODE) { throw 'Build failed' }
 dotnet test VoiceAgent.slnx -c Release --no-build --artifacts-path $artifacts --results-directory $results --logger 'trx;LogFileName=tests.trx'
 if ($LASTEXITCODE) { throw 'Tests failed; no package/release will be produced' }
-dotnet publish src/VoiceAgent.Desktop -c Release -r win-x64 --self-contained true --artifacts-path $artifacts -o $package -p:Version=$version -p:ContinuousIntegrationBuild=true
+dotnet publish src/VoiceAgent.Desktop -c Release -r win-x64 --self-contained true -p:PublishProfile=CompactWinX64 --artifacts-path $artifacts -o $package -p:Version=$version -p:ContinuousIntegrationBuild=true
 if ($LASTEXITCODE) { throw 'Publish failed' }
-# Whisper.net.Runtime bundles other architectures as content; keep only Windows x64.
-$runtimeRoot = [IO.Path]::GetFullPath((Join-Path $package 'runtimes'))
-if (Test-Path $runtimeRoot) {
-    foreach($dir in Get-ChildItem -LiteralPath $runtimeRoot -Directory) {
-        if ($dir.Name -eq 'win-x64') { continue }
-        $resolved = [IO.Path]::GetFullPath($dir.FullName)
-        if ([IO.Path]::GetDirectoryName($resolved) -cne $runtimeRoot) { throw 'Unexpected runtime path' }
-        Remove-Item -LiteralPath $resolved -Recurse -Force
-    }
-}
-if (!(Test-Path (Join-Path $runtimeRoot 'win-x64/whisper.dll'))) { throw 'Missing Windows x64 Whisper native library' }
+# Keep the portable root small; Whisper's explicit-path native loader needs this one directory.
+$expected = @('Trayvora.exe', 'runtimes/win-x64/whisper.dll', 'runtimes/win-x64/ggml-whisper.dll',
+    'runtimes/win-x64/ggml-base-whisper.dll', 'runtimes/win-x64/ggml-cpu-whisper.dll')
+$actual = @(Get-ChildItem $package -File -Recurse | ForEach-Object { [IO.Path]::GetRelativePath($package, $_.FullName).Replace('\','/') })
+if (@(Compare-Object $expected $actual).Count) { throw "Unexpected compact package layout: $($actual -join ', ')" }
 Copy-Item scripts/portable/START.txt $package
 Copy-Item docs/setup.md (Join-Path $package 'Setup.md')
-foreach($name in @('Trayvora.exe','Trayvora.dll','Trayvora.runtimeconfig.json','hostfxr.dll','coreclr.dll')) {
-    if (!(Test-Path (Join-Path $package $name))) { throw "Missing package file $name" }
-}
-$metadata = @{version=$version;commit=$sha;runtime='win-x64';selfContained=$true}
+$metadata = @{version=$version;commit=$sha;runtime='win-x64';selfContained=$true;singleFile=$true}
 $metadata | ConvertTo-Json | Set-Content (Join-Path $package 'release.json') -Encoding utf8
 $zip = Join-Path $release 'trayvora-win-x64.zip'
 Compress-Archive -Path "$package/*" -DestinationPath $zip
@@ -53,6 +44,18 @@ foreach($file in Get-ChildItem $package -File -Recurse) {
     $relative = [IO.Path]::GetRelativePath($package,$file.FullName)
     if ((Get-FileHash $file.FullName).Hash -ne (Get-FileHash (Join-Path $check $relative)).Hash) { throw "Corrupt package: $relative" }
 }
+# Exercise the shipped executable (not dotnet/testhost), including extracted .NET/Skia/SQLite
+# libraries and Whisper's sidecar libraries. Never initialize a user's profile or microphone.
+$report = Join-Path $results 'package-smoke.json'
+$previousBundleCache = $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR
+$env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = Join-Path $OutputRoot 'bundle-cache'
+try {
+    $process = Start-Process -FilePath (Join-Path $check 'Trayvora.exe') -ArgumentList @('--verify-package', "`"$report`"") -WorkingDirectory $check -PassThru -WindowStyle Hidden
+    if (!$process.WaitForExit(60000)) { $process.Kill($true); throw 'Packaged executable smoke test timed out' }
+    if ($process.ExitCode -ne 0 -or !(Test-Path $report)) { throw 'Packaged executable smoke test failed' }
+    $smoke = Get-Content -Raw $report | ConvertFrom-Json
+    if (!$smoke.success -or !$smoke.singleFile) { throw 'Packaged native/single-file checks failed' }
+} finally { $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $previousBundleCache }
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
 $metadata.sha256=$hash
 $metadata | ConvertTo-Json | Set-Content (Join-Path $release 'release.json') -Encoding utf8
