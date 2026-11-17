@@ -7,6 +7,7 @@
     <RootNamespace>VoiceAgent.Desktop</RootNamespace>
     <Product>Trayvora</Product>
     <ApplicationManifest>app.manifest</ApplicationManifest>
+    <ApplicationIcon>Assets\trayvora.ico</ApplicationIcon>
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../VoiceAgent.Application/VoiceAgent.Application.csproj" />
@@ -19,6 +20,7 @@
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Markdig" />
     <EmbeddedResource Include="Assets/tray.png" />
+    <EmbeddedResource Include="Assets/trayvora.ico" />
     <EmbeddedResource Include="Assets/uk.json" Condition="Exists('Assets/uk.json')" />
     <InternalsVisibleTo Include="VoiceAgent.UnitTests" />
   </ItemGroup>

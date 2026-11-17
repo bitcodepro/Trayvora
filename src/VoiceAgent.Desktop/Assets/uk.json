@@ -605,5 +605,10 @@
   "⏸ interrupted": "⏸ перервано",
   "■  Stop": "■  Зупинити",
   "▶  Play": "▶  Відтворити",
-  "✓ final answer": "✓ остаточна відповідь"
+  "✓ final answer": "✓ остаточна відповідь",
+  "Check for updates": "Перевірити оновлення",
+  "Checking GitHub…": "Перевіряю GitHub…",
+  "Unpacking…": "Розпаковую…",
+  "Stop reading aloud": "Зупинити читання вголос",
+  "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.": "Одразу зупиняє відповідь, яку читають уголос, незалежно від голосу (Windows чи OpenAI), а також відтворення в «Текст в аудіо»."
 }

@@ -810,10 +810,11 @@ internal sealed class VoiceOverlay : Window
         Activate();
         if (_readiness is null)
         {
-            _readiness = new ReadinessView(CheckReadinessAsync, OperatingSystem.IsWindows() ? UpdateFromZipAsync : null);
+            _readiness = new ReadinessView(CheckReadinessAsync, OperatingSystem.IsWindows() ? UpdateFromZipAsync : null, () => GitHubUpdate.CheckAsync(), InstallUpdateAsync);
             _readiness.BackRequested += CloseDiscussion;
             _readiness.SetShortcuts(_shortcutList);
         }
+        if (_offeredUpdate is { } offered) _readiness.ShowAvailable(offered);
         ShowPage(_readiness, "Trayvora · Get started");
         _ = _readiness.RefreshAsync();
     }
@@ -854,8 +855,50 @@ internal sealed class VoiceOverlay : Window
         _ = Task.Run(() => CodexDesktopChats.ApplyPending(profile, settings, CodexDesktopChats.DesktopRunning()));
     }
 
+    /// <summary>Stops every reply being read aloud (Windows or OpenAI voice) and Text to audio playback.</summary>
+    public void StopSpeech()
+    {
+        _replyAudio?.Stop();
+        if (OperatingSystem.IsWindows()) _textToAudio?.StopListening();
+    }
+
     /// <summary>Asks the app to close (after an update is staged).</summary>
     public event Action? ExitRequested;
+
+    private AvailableUpdate? _offeredUpdate;
+
+    /// <summary>Opens "Get started" with an Install button for <paramref name="update"/>.</summary>
+    public void OfferUpdate(AvailableUpdate update)
+    {
+        _offeredUpdate = update;
+        _readiness?.ShowAvailable(update);
+    }
+
+    /// <summary>Downloads a GitHub release, checks it and restarts into it; settings and data stay.</summary>
+    private async Task<string?> InstallUpdateAsync(AvailableUpdate update, IProgress<string> progress)
+    {
+        if (_operation is not null || _discussion?.IsRunning == true) return "Wait until the current request finishes.";
+        if (!PortableUpdate.TryBegin()) return "Another update is already in progress.";
+        var app = AppContext.BaseDirectory;
+        try
+        {
+            var download = Path.Combine(PortableUpdate.StagingRoot(app), "..", "update-download");
+            var percent = new Progress<double>(share => progress.Report($"Downloading Trayvora {update.Version}… {share:P0}"));
+            var zip = await GitHubUpdate.DownloadAsync(update, Path.GetFullPath(download), percent);
+            progress.Report("Unpacking…");
+            var staged = await Task.Run(() => PortableUpdate.Stage(zip, app));
+            try { File.Delete(zip); } catch (IOException) { }
+            PortableUpdate.Launch(staged, app);
+        }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or HttpRequestException
+            or TaskCanceledException or System.ComponentModel.Win32Exception)
+        {
+            PortableUpdate.End();
+            return $"Could not update: {error.Message}";
+        }
+        ExitRequested?.Invoke();
+        return "Updating… Trayvora restarts in a few seconds.";
+    }
 
     private async Task<string?> UpdateFromZipAsync()
     {
@@ -867,6 +910,7 @@ internal sealed class VoiceOverlay : Window
             FileTypeFilter = [new Avalonia.Platform.Storage.FilePickerFileType("Trayvora zip") { Patterns = ["*.zip"] }],
         });
         if (picked.Count == 0 || Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(picked[0]) is not { } zip) return null;
+        if (!PortableUpdate.TryBegin()) return "Another update is already in progress.";
         var app = AppContext.BaseDirectory;
         try
         {
@@ -875,6 +919,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or System.ComponentModel.Win32Exception)
         {
+            PortableUpdate.End();
             return $"Could not update: {error.Message}";
         }
         ExitRequested?.Invoke();
@@ -1716,6 +1761,7 @@ internal sealed class VoiceOverlay : Window
                 var notice = new Window
                 {
                     Title = "Action blocked",
+                    Icon = TrayvoraTheme.AppIcon,
                     Width = 420,
                     SizeToContent = SizeToContent.Height,
                     WindowStartupLocation = WindowStartupLocation.CenterOwner,

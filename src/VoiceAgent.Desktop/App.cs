@@ -63,7 +63,7 @@ internal sealed class App : Avalonia.Application
             .AddSingleton(new WhisperModel(modelPath))
             .AddSingleton<ISpeechTranscriber, WhisperTranscriber>()
             .BuildServiceProvider();
-        string Instructions() => $"Preview {voiceKeys.Preview}  ·  Background {voiceKeys.Background}  ·  Send {voiceKeys.Send}  ·  Dictate {voiceKeys.DictationShortcut}  ·  Shared chat {voiceKeys.SharedShortcut}  ·  Long questions {voiceKeys.LongShortcut}  ·  Short questions {voiceKeys.ShortShortcut}  ·  Windows audio {voiceKeys.LoopbackShortcut}";
+        string Instructions() => $"Preview {voiceKeys.Preview}  ·  Background {voiceKeys.Background}  ·  Send {voiceKeys.Send}  ·  Dictate {voiceKeys.DictationShortcut}  ·  Shared chat {voiceKeys.SharedShortcut}  ·  Long questions {voiceKeys.LongShortcut}  ·  Short questions {voiceKeys.ShortShortcut}  ·  Windows audio {voiceKeys.LoopbackShortcut}  ·  Stop reading {voiceKeys.StopSpeechShortcut}";
         var message = string.Join(Environment.NewLine, new[] { Instructions(), settingsWarning, hotkeyWarning }
             .Where(text => !string.IsNullOrWhiteSpace(text)));
         var overlay = new VoiceOverlay(services.GetRequiredService<IAudioRecorder>(),
@@ -140,6 +140,9 @@ internal sealed class App : Avalonia.Application
                 case VoiceAction.WindowsAudio:
                     await overlay.ToggleRecordingAsync(VoiceShortcutMode.WindowsAudio);
                     break;
+                case VoiceAction.StopSpeech:
+                    overlay.StopSpeech();
+                    break;
                 case VoiceAction.Send:
                     await overlay.SendPreviewAsync();
                     break;
@@ -167,7 +170,7 @@ internal sealed class App : Avalonia.Application
         menu.Items.Add(open);
         menu.Items.Add(sessions);
         menu.Items.Add(record);
-        using var iconStream = typeof(App).Assembly.GetManifestResourceStream("VoiceAgent.Desktop.Assets.tray.png")
+        using var iconStream = typeof(App).Assembly.GetManifestResourceStream("VoiceAgent.Desktop.Assets.trayvora.ico")
             ?? throw new InvalidOperationException("Missing tray icon.");
         var tray = new TrayIcon
         {
@@ -182,7 +185,7 @@ internal sealed class App : Avalonia.Application
             ("Record with preview", voiceKeys.Preview.ToString()), ("Record and send at once", voiceKeys.Background.ToString()),
             ("Send preview", voiceKeys.Send.ToString()), ("Dictate into Codex Desktop", voiceKeys.DictationShortcut.ToString()),
             ("Send to Codex Desktop chat", voiceKeys.SharedShortcut.ToString()), ("Deep question (GPT, long memory)", voiceKeys.LongShortcut.ToString()),
-            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Record computer sound and send", voiceKeys.LoopbackShortcut.ToString()),
+            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Record computer sound and send", voiceKeys.LoopbackShortcut.ToString()), ("Stop reading aloud", voiceKeys.StopSpeechShortcut.ToString()),
         ];
         overlay.SetShortcuts(ShortcutList());
         EventHandler openSettings = (_, _) =>
@@ -289,6 +292,29 @@ internal sealed class App : Avalonia.Application
         pendingChats.Tick += (_, _) => { if (!exiting && OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats(); };
         pendingChats.Start();
         if (OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats();
+        // A minute after start and then twice a day: look for a newer release on GitHub and offer it in the tray menu.
+        NativeMenuItem? updateItem = null;
+        var updates = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
+        updates.Tick += async (_, _) =>
+        {
+            updates.Interval = TimeSpan.FromHours(12);
+            if (exiting) return;
+            AvailableUpdate? found;
+            try { found = await GitHubUpdate.CheckAsync(); }
+            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or InvalidOperationException) { return; }
+            if (found is null || exiting) return;
+            overlay.OfferUpdate(found);
+            tray.ToolTipText = $"Trayvora · update {found.Version} available";
+            if (updateItem is null)
+            {
+                updateItem = new NativeMenuItem();
+                updateItem.Click += (_, _) => { if (!exiting) overlay.ShowReadiness(); };
+                menu.Items.Insert(0, updateItem);
+                menu.Items.Insert(1, new NativeMenuItemSeparator());
+            }
+            updateItem.Header = $"Update to Trayvora {found.Version}…";
+        };
+        if (OperatingSystem.IsWindows()) updates.Start();
         // For checking the built-in terminal: TRAYVORA_OPEN_TERMINAL=powershell|claude|codex opens it at startup.
         if (OperatingSystem.IsWindows() && Environment.GetEnvironmentVariable("TRAYVORA_OPEN_TERMINAL") is { Length: > 0 } openTerminal
             && Enum.TryParse<TerminalKind>(openTerminal, ignoreCase: true, out var terminalKind))

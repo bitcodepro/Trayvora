@@ -412,6 +412,16 @@ internal static class TrayvoraTheme
         window.Foreground = Text;
         window.FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI, Inter");
         window.FontSize = 13.5;
+        if (AppIcon is { } icon) window.Icon = icon;
+    }
+
+    /// <summary>The Trayvora icon (all sizes) for windows and the taskbar.</summary>
+    public static WindowIcon? AppIcon { get; } = LoadIcon();
+
+    private static WindowIcon? LoadIcon()
+    {
+        using var stream = typeof(TrayvoraTheme).Assembly.GetManifestResourceStream("VoiceAgent.Desktop.Assets.trayvora.ico");
+        return stream is null ? null : new WindowIcon(stream);
     }
 
     public static void Primary(Button button)

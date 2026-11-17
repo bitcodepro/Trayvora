@@ -14,7 +14,7 @@ internal static class PortableUpdate
     private const string ExeName = "Trayvora.exe";
 
     /// <summary>Folders with the user's data, kept as they are.</summary>
-    internal static readonly string[] DataFolders = ["settings", "history", "codex-data", "Memory", "temp", "appdata", "localappdata", "logs"];
+    internal static readonly string[] DataFolders = ["settings", "history", "codex-data", "Memory", "temp", "tmp", "appdata", "localappdata", "LocalLow", "logs"];
 
     public static string StagingRoot(string appDirectory) => Path.Combine(appDirectory, "settings", "update-staging");
 
@@ -76,6 +76,9 @@ internal static class PortableUpdate
             try
             {
                 CopyProgram(source, appDirectory);
+                var pendingCleanup = Path.Combine(appDirectory, "settings", "update-cleanup-pending.txt");
+                if (RemoveStale(source, appDirectory) is { Count: > 0 } locked) File.WriteAllLines(pendingCleanup, locked);
+                else File.Delete(pendingCleanup);
                 last = null;
                 break;
             }
@@ -107,6 +110,52 @@ internal static class PortableUpdate
         }
     }
 
+    /// <summary>The list of program files Trayvora installed last time, so files dropped by a newer version can be removed.</summary>
+    internal static string ManifestFile(string appDirectory) => Path.Combine(appDirectory, "settings", "program-files.txt");
+
+    /// <summary>
+    /// Deletes program files of the old version that the new one no longer has and records the new list.
+    /// Only files listed by an earlier update count as Trayvora's: without that list (the first update) nothing is deleted,
+    /// so files the user added are never removed. Files that cannot be deleted stay in the list and are retried next time.
+    /// </summary>
+    /// <returns>Relative paths of stale files that could not be deleted.</returns>
+    internal static IReadOnlyList<string> RemoveStale(string source, string target)
+    {
+        var current = ProgramFiles(source).ToHashSet(StringComparer.OrdinalIgnoreCase);
+        var manifest = ManifestFile(target);
+        var previous = File.Exists(manifest) ? File.ReadAllLines(manifest).Where(line => line.Length > 0).ToList() : [];
+        var root = Path.GetFullPath(target) + Path.DirectorySeparatorChar;
+        var failed = new List<string>();
+        foreach (var relative in previous.Where(relative => !current.Contains(relative)).Distinct(StringComparer.OrdinalIgnoreCase))
+        {
+            var path = Path.GetFullPath(Path.Combine(target, relative));
+            if (!path.StartsWith(root, StringComparison.OrdinalIgnoreCase)) continue;
+            try { if (File.Exists(path)) File.Delete(path); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { failed.Add(relative); }
+        }
+        Directory.CreateDirectory(Path.GetDirectoryName(manifest)!);
+        File.WriteAllLines(manifest, current.Concat(failed).Order(StringComparer.OrdinalIgnoreCase));
+        return failed;
+    }
+
+    /// <summary>Files under <paramref name="folder"/> that belong to the program (not data folders or models).</summary>
+    private static IEnumerable<string> ProgramFiles(string folder) =>
+        Directory.EnumerateFiles(folder, "*", SearchOption.AllDirectories)
+            .Select(file => Path.GetRelativePath(folder, file))
+            .Where(relative =>
+            {
+                var top = relative.Split(Path.DirectorySeparatorChar, 2)[0];
+                return !relative.Contains(Path.DirectorySeparatorChar)
+                    || !(DataFolders.Contains(top, StringComparer.OrdinalIgnoreCase) || top.Equals("models", StringComparison.OrdinalIgnoreCase));
+            });
+
+    private static int _busy;
+
+    /// <summary>Claims the single update slot shared by online and zip installs; false while another update runs.</summary>
+    public static bool TryBegin() => Interlocked.CompareExchange(ref _busy, 1, 0) == 0;
+
+    /// <summary>Releases the update slot (only when an install failed; a successful one exits the app).</summary>
+    public static void End() => Volatile.Write(ref _busy, 0);
     /// <summary>Removes a finished staging folder (called by the updated app).</summary>
     public static void CleanUp(string appDirectory)
     {

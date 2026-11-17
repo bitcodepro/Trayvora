@@ -29,10 +29,22 @@ public sealed class VoiceSettingsTests
         var existing = System.Text.Json.JsonSerializer.Deserialize<VoiceHotkeys>(
             """{"Preview":{"Modifiers":7,"Key":68},"Background":{"Modifiers":1,"Key":66},"Send":{"Modifiers":1,"Key":88}}""")!;
         Assert.Equal("Ctrl+Alt+Shift+D", existing.Preview.ToString());
-        Assert.Equal(8, existing.Entries.Values.Distinct().Count());
+        Assert.Equal(9, existing.Entries.Values.Distinct().Count());
         Assert.True(existing.Entries[VoiceAction.Dictate].IsValid);
     }
 
+    [Fact]
+    public void StopReadingAloudGetsItsOwnShortcutAndCanBeChanged()
+    {
+        var defaults = VoiceHotkeys.Default(HotkeyShortcut.Default);
+        Assert.Equal("Ctrl+Alt+Shift+S", defaults.StopSpeechShortcut.ToString());
+        Assert.Equal(defaults.Entries.Count, defaults.Entries.Values.Distinct().Count());
+        var custom = new HotkeyShortcut(HotkeyModifiers.Ctrl | HotkeyModifiers.Alt, 'P');
+        var json = System.Text.Json.JsonSerializer.Serialize(defaults with { StopSpeech = custom });
+        Assert.Equal(custom, System.Text.Json.JsonSerializer.Deserialize<VoiceHotkeys>(json)!.Entries[VoiceAction.StopSpeech]);
+        // Taken by Preview: the next free letter is used instead.
+        Assert.NotEqual("Ctrl+Alt+Shift+S", (defaults with { Preview = defaults.StopSpeechShortcut }).StopSpeechShortcut.ToString());
+    }
     [Fact]
     public void PlaybackCanFollowRecognitionKeyWithoutCopyingIt()
     {

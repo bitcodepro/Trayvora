@@ -21,7 +21,12 @@ internal sealed class ReadinessView : ToolPage
     private readonly StackPanel _shortcuts = new() { Spacing = 6 };
     private bool _checking;
 
-    public ReadinessView(Func<Task<IReadOnlyList<ReadinessItem>>> check, Func<Task<string?>>? update = null)
+    private readonly TextBlock _updateStatus = TrayvoraTheme.Hint("");
+    private readonly Button _install = new() { IsVisible = false };
+    private AvailableUpdate? _available;
+
+    public ReadinessView(Func<Task<IReadOnlyList<ReadinessItem>>> check, Func<Task<string?>>? update = null,
+        Func<Task<AvailableUpdate?>>? checkOnline = null, Func<AvailableUpdate, IProgress<string>, Task<string?>>? install = null)
     {
         _check = check;
         var recheck = new Button { Content = "Check again" };
@@ -46,18 +51,65 @@ internal sealed class ReadinessView : ToolPage
         };
         if (update is not null)
         {
+            var current = GitHubUpdate.CurrentVersion();
+            _updateStatus.Text = (current is null ? "Version: development build. " : $"Version {current}. ")
+                + "Updating keeps settings, history, sessions, models and sign-ins; old program files are replaced.";
             var updateButton = new Button { Content = "Update from zip…" };
-            var updateStatus = TrayvoraTheme.Hint("Choose a newer Trayvora portable zip. Trayvora closes, replaces its program files and starts again; settings, history, sessions, models and sign-ins stay.");
-            TrayvoraTheme.StyleControls(updateButton);
+            var checkButton = new Button { Content = "Check for updates", IsVisible = checkOnline is not null };
+            TrayvoraTheme.StyleControls(updateButton, checkButton, _install);
+            TrayvoraTheme.Primary(_install);
             updateButton.Click += async (_, _) =>
             {
-                updateButton.IsEnabled = false;
-                try { if (await update() is { } message) updateStatus.Text = message; }
-                finally { updateButton.IsEnabled = true; }
+                SetUpdating(true);
+                try { if (await update() is { } message) _updateStatus.Text = message; }
+                finally { SetUpdating(false); }
             };
-            body.Children.Add(TrayvoraTheme.Card(TrayvoraTheme.Heading("Update"), updateStatus, updateButton));
+            checkButton.Click += async (_, _) =>
+            {
+                if (checkOnline is null) return;
+                SetUpdating(true);
+                _updateStatus.Text = "Checking GitHub…";
+                try
+                {
+                    if (await checkOnline() is { } found) ShowAvailable(found);
+                    else _updateStatus.Text = $"You have the latest version{(current is null ? "" : $" ({current})")}.";
+                }
+                catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or InvalidOperationException)
+                {
+                    _updateStatus.Text = $"Could not check for updates: {error.Message}";
+                }
+                finally { SetUpdating(false); }
+            };
+            _install.Click += async (_, _) =>
+            {
+                if (install is null || _available is not { } chosen) return;
+                SetUpdating(true);
+                try
+                {
+                    var progress = new Progress<string>(text => _updateStatus.Text = text);
+                    if (await install(chosen, progress) is { } message) _updateStatus.Text = message;
+                }
+                finally { SetUpdating(false); }
+            };
+            void SetUpdating(bool busy)
+            {
+                foreach (var button in new[] { _install, checkButton, updateButton }) button.IsEnabled = !busy;
+            }
+            var buttons = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { _install, checkButton, updateButton } };
+            body.Children.Insert(0, TrayvoraTheme.Card(TrayvoraTheme.Heading("Update"), _updateStatus, buttons));
         }
         Content = Frame("Get started", "What Trayvora needs, and how to use it", body);
+    }
+
+    /// <summary>Offers <paramref name="update"/> with an Install button.</summary>
+    public void ShowAvailable(AvailableUpdate update)
+    {
+        _available = update;
+        _install.Content = $"Install {update.Version}";
+        _install.IsVisible = true;
+        var current = GitHubUpdate.CurrentVersion();
+        _updateStatus.Text = $"Trayvora {update.Version} is available{(current is null ? "" : $" (you have {current})")}. "
+            + "Install downloads it from GitHub, restarts Trayvora and keeps all your settings and data.";
     }
 
     /// <summary>Shows the global shortcuts followed by the window's own keys.</summary>
