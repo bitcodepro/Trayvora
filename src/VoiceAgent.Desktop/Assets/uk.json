@@ -619,5 +619,9 @@
   "Recognition: default": "Розпізнавання: типове",
   "Computer-sound shortcut uses": "Розпізнавання для звуку комп’ютера",
   "Recognition: OpenAI": "Розпізнавання: OpenAI",
-  "Checking for updates…": "Перевіряю оновлення…"
+  "Checking for updates…": "Перевіряю оновлення…",
+  "Activity": "Активність",
+  "Shortcuts · OpenAI requests": "Шорткати · запити OpenAI",
+  "Clear": "Очистити",
+  "Nothing yet. Press a shortcut and it shows up here.": "Поки порожньо. Натисніть шорткат, і він з'явиться тут."
 }

@@ -7,6 +7,21 @@ internal enum VoiceAction { Preview, Background, Send, Dictate, SharedChat, Long
 
 internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Background, HotkeyShortcut Send, HotkeyShortcut? Dictation = null, HotkeyShortcut? Shared = null, HotkeyShortcut? Long = null, HotkeyShortcut? Short = null, HotkeyShortcut? Loopback = null, HotkeyShortcut? StopSpeech = null)
 {
+    /// <summary>A readable name for the Activity page.</summary>
+    public static string Describe(VoiceAction action) => action switch
+    {
+        VoiceAction.Preview => "Voice → preview",
+        VoiceAction.Background => "Voice → background",
+        VoiceAction.Send => "Send preview",
+        VoiceAction.Dictate => "Dictation",
+        VoiceAction.SharedChat => "Shared chat",
+        VoiceAction.LongQuestions => "Deep question",
+        VoiceAction.ShortQuestions => "Quick question",
+        VoiceAction.WindowsAudio => "Computer sound",
+        VoiceAction.StopSpeech => "Stop reading aloud",
+        _ => action.ToString(),
+    };
+
     public static VoiceHotkeys Default(HotkeyShortcut preview)
     {
         var remaining = new[] { Pick('Z'), Pick('X'), Pick('V') }.Where(key => key != preview).ToArray();

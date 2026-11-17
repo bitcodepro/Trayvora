@@ -34,7 +34,7 @@ internal sealed class VoiceSettingsPanel : StackPanel
         var shortQuestions = AddShortcut("Quick question (GPT, last six exchanges)", initial.ShortShortcut, OnShortcutChanged,
             "Same as above, but remembers only the last six questions while the app runs. Needs an OpenAI API key.");
         var windowsAudio = AddShortcut("Computer sound → ask OpenAI, answer aloud", initial.LoopbackShortcut, OnShortcutChanged,
-            "Press once to start recording what plays on the computer (a video, a call), press again to stop: the speech is recognized, sent to OpenAI as a question and the answer is shown and read aloud. Needs the OpenAI API key.");
+            "Press once to start recording what plays on the computer (a video, a call), press again to stop: the speech is recognized, sent to OpenAI as a question and the answer is shown and read aloud. It hears what plays in your speakers or headphones (the other side of a call), not your own microphone. Needs the OpenAI API key.");
         var stopSpeech = AddShortcut("Stop reading aloud", initial.StopSpeechShortcut, OnShortcutChanged,
             "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.");
         var feedback = new TextBlock { TextWrapping = TextWrapping.Wrap };
