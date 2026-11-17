@@ -1252,7 +1252,7 @@ internal sealed class VoiceOverlay : Window
         if (mode == VoiceShortcutMode.WindowsAudio)
         {
             // Computer sound: ask OpenAI about what was heard and read the answer aloud.
-            _codexRun = AskQuestionAsync(draft, silent: false, readAloud: true);
+            _codexRun = AskQuestionAsync(draft, silent: false, readAloud: true, longMemory: false);
             await _codexRun;
             return;
         }
@@ -1427,10 +1427,15 @@ internal sealed class VoiceOverlay : Window
         }
     }
 
-    private async Task AskQuestionAsync(string? question, bool silent, bool readAloud = false)
+    /// <summary>Long memory only when asked for, otherwise the selected mode decides.</summary>
+    internal static bool UsesLongMemory(bool? requested, bool longModeSelected) => requested ?? longModeSelected;
+
+    /// <param name="longMemory">null: follow the selected Questions mode; false: short memory, nothing saved to Memory (computer sound).</param>
+    private async Task AskQuestionAsync(string? question, bool silent, bool readAloud = false, bool? longMemory = null)
     {
+        var useLong = UsesLongMemory(longMemory, LongQuestionsActive);
         if (_suspended || _operation is not null || string.IsNullOrWhiteSpace(question) || !OperatingSystem.IsWindows()) return;
-        if (LongQuestionsActive && _memoryReadFailed)
+        if (useLong && _memoryReadFailed)
         {
             _status.Text = "Could not read Memory. Start a new conversation to archive the old file.";
             if (!silent && !IsVisible) GetPreview().ShowStatus(_status.Text);
@@ -1458,7 +1463,7 @@ internal sealed class VoiceOverlay : Window
             var api = new OpenAiQuestions();
             var credential = SpeechSettings.UnprotectKey(key);
             var memory = _memory;
-            while (LongQuestionsActive && NeedsSummary(memory))
+            while (useLong && NeedsSummary(memory))
             {
                 var count = Math.Min(4, memory.Exchanges.Count - memory.Summarized - 2);
                 var batch = memory.Exchanges.Skip(memory.Summarized).Take(count).ToArray();
@@ -1466,12 +1471,12 @@ internal sealed class VoiceOverlay : Window
                 var summary = await api.SummarizeAsync(credential, memory.Summary, batch, operation.Token);
                 memory = memory with { Summary = summary, Summarized = memory.Summarized + count };
             }
-            var history = LongQuestionsActive ? memory.Exchanges.Skip(memory.Summarized).ToArray() : _questions.ToArray();
-            answer = await api.AskAsync(credential, question, history, operation.Token, LongQuestionsActive ? memory.Summary : null);
+            var history = useLong ? memory.Exchanges.Skip(memory.Summarized).ToArray() : _questions.ToArray();
+            answer = await api.AskAsync(credential, question, history, operation.Token, useLong ? memory.Summary : null);
             operation.Token.ThrowIfCancellationRequested();
             _answer.Text = answer;
             _status.Text = "Answer ready.";
-            if (LongQuestionsActive && _memoryFile is not null)
+            if (useLong && _memoryFile is not null)
             {
                 memory.Exchanges.Add(new QuestionExchange(question, answer));
                 _memory = memory;
@@ -1888,12 +1893,14 @@ internal sealed class VoiceOverlay : Window
 
     private bool ModelAvailable => (OperatingSystem.IsWindows() && _speech is not null ? _speech.Ready : _model.Exists) && !_modelNeedsReplacement;
 
+    /// <summary>The place the Record button records for: questions use their own recognizer.</summary>
+    private RecognitionPlace ActivePlace => QuestionsActive ? RecognitionPlace.Questions : RecognitionPlace.Main;
+
     /// <summary>Whether the recognizer chosen for <paramref name="place"/> can be used now.</summary>
     private bool ReadyFor(RecognitionPlace place)
     {
         if (!OperatingSystem.IsWindows() || _speech is null) return ModelAvailable;
-        var cloud = _speech.CloudFor(place);
-        return _speech.ReadyFor(cloud) && (cloud || !_modelNeedsReplacement);
+        return SpeechSettings.ReadyFor(_speech.Current, place, _speech.Model.Exists && !_modelNeedsReplacement);
     }
 
     private ISpeechTranscriber TranscriberFor(RecognitionPlace place) =>
@@ -1910,6 +1917,7 @@ internal sealed class VoiceOverlay : Window
     public void SetRecognitionChoice(RecognitionPlace place, bool? cloud)
     {
         if (OperatingSystem.IsWindows()) _speech?.SetChoice(place, cloud);
+        RefreshControls();
     }
 
     /// <summary>Shows the feed of the active mode and chat; a chat seen for the first time is filled from its saved history.</summary>
@@ -1948,7 +1956,7 @@ internal sealed class VoiceOverlay : Window
     {
         var idle = !_suspended && _operation is null;
         _record.IsEnabled = (!_suspended && _stop is { IsCancellationRequested: false } && _operation?.IsCancellationRequested == false)
-            || (idle && !_loadingDevices && ModelAvailable && _microphone.SelectedItem is not null);
+            || (idle && !_loadingDevices && ReadyFor(ActivePlace) && _microphone.SelectedItem is not null);
         _send.IsEnabled = idle && !string.IsNullOrWhiteSpace(_transcript.Text);
         _transcript.IsReadOnly = !idle;
         _answer.IsReadOnly = !idle;
@@ -2000,7 +2008,7 @@ internal sealed class VoiceOverlay : Window
             AgentState.Transcribing => ("Transcribing…", TrayvoraTheme.Warning),
             AgentState.Sending => ("Waiting for reply…", TrayvoraTheme.Accent),
             AgentState.Busy => (_suspended ? "Paused (sleep)" : "Working…", TrayvoraTheme.Warning),
-            _ => (ModelAvailable ? "Ready" : "Speech model missing", ModelAvailable ? TrayvoraTheme.Success : TrayvoraTheme.Warning),
+            _ => (ReadyFor(ActivePlace) ? "Ready" : "Speech model missing", ReadyFor(ActivePlace) ? TrayvoraTheme.Success : TrayvoraTheme.Warning),
         };
         AgentStateChanged?.Invoke(state);
     }

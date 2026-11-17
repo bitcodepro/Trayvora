@@ -201,4 +201,46 @@ public sealed class RecognitionChoiceTests
         Assert.Equal([null, false, true], new[] { 0, 1, 2 }.Select(Recognizers.Value));
         Assert.Equal(2, Recognizers.Index(true));
     }
+
+    [Fact]
+    public void ChosenOpenAiRecognizerIsReadyEvenWhenTheDefaultWhisperModelIsMissing()
+    {
+        var options = new SpeechOptions(Cloud: false, ProtectedKey: "k", QuestionCloud: true);
+        Assert.True(SpeechSettings.ReadyFor(options, RecognitionPlace.Questions, modelReady: false));
+        Assert.False(SpeechSettings.ReadyFor(options, RecognitionPlace.Main, modelReady: false));
+        Assert.False(SpeechSettings.ReadyFor(options with { ProtectedKey = null }, RecognitionPlace.Questions, modelReady: true));
+        Assert.True(SpeechSettings.ReadyFor(options with { QuestionCloud = false }, RecognitionPlace.Questions, modelReady: true));
+    }
+
+    [Fact]
+    public void FreshInstallSelectingOpenAiThenSavingTheKeyTurnsOpenAiOn()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-speech-");
+        try
+        {
+            var speech = new SpeechSettings(folder.FullName, folder.FullName);
+            Assert.Throws<InvalidOperationException>(() => speech.Save(true, 0, 0, ""));
+            Assert.False(speech.Current.Cloud);
+            speech.SaveKey("sk-test-0000000000ABCD", cloud: true);
+            Assert.True(speech.Current.Cloud);
+            Assert.True(speech.CloudFor(RecognitionPlace.Main));
+            Assert.True(SpeechSettings.ReadyFor(speech.Current, RecognitionPlace.Main, modelReady: false));
+            Assert.Equal("sk-…ABCD", speech.Current.KeyHint);
+            Assert.True(new SpeechSettings(folder.FullName, folder.FullName).Current.Cloud);
+            speech.SaveKey("sk-test-1111111111WXYZ");
+            Assert.True(speech.Current.Cloud);
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void ComputerSoundQuestionsNeverUseLongMemory()
+    {
+        Assert.False(VoiceOverlay.UsesLongMemory(false, longModeSelected: true));
+        Assert.True(VoiceOverlay.UsesLongMemory(null, longModeSelected: true));
+        Assert.False(VoiceOverlay.UsesLongMemory(null, longModeSelected: false));
+    }
 }

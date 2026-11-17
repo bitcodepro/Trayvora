@@ -127,11 +127,12 @@ internal sealed class VoiceSettingsPanel : StackPanel
             if (string.IsNullOrWhiteSpace(key.Text)) return;
             try
             {
-                speech.SaveKey(key.Text);
+                speech.SaveKey(key.Text, cloud: provider.SelectedIndex == 1);
                 key.Clear();
                 Update();
                 changed();
-                keyState.Text = $"Key saved: {speech.Current.KeyHint}. Used by every OpenAI feature.";
+                keyState.Text = $"Key saved: {speech.Current.KeyHint}. Used by every OpenAI feature."
+                    + (speech.Current.Cloud ? " OpenAI recognition is on." : "");
             }
             catch (Exception error) when (error is InvalidOperationException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
             {

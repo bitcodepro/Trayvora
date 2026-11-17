@@ -51,18 +51,19 @@ internal sealed class SpeechSettings(string directory, string modelDirectory)
         {
             protectedKey = ProtectKey(key);
         }
-        if (cloud && protectedKey is null) throw new InvalidOperationException("Enter an OpenAI API key first.");
+        if (cloud && protectedKey is null) throw new InvalidOperationException("Save an OpenAI API key above first; OpenAI recognition turns on when the key is saved.");
         var next = Current with { Cloud = cloud, Local = local, Remote = remote, ProtectedKey = protectedKey, WhisperHints = hints, KeyHint = string.IsNullOrWhiteSpace(key) ? Current.KeyHint : Hint(key.Trim()) };
         SettingsFile.Write(FilePath, next);
         Current = next;
     }
 
     /// <summary>Saves the one OpenAI API key that recognition, questions and voices share.</summary>
-    public void SaveKey(string key)
+    /// <param name="cloud">The recognizer shown in Settings, applied together with the key (OpenAI cannot be saved before a key exists).</param>
+    public void SaveKey(string key, bool? cloud = null)
     {
         if (string.IsNullOrWhiteSpace(key)) throw new InvalidOperationException("Enter an OpenAI API key.");
         var trimmed = key.Trim();
-        var next = Current with { ProtectedKey = ProtectKey(trimmed), KeyHint = Hint(trimmed) };
+        var next = Current with { ProtectedKey = ProtectKey(trimmed), KeyHint = Hint(trimmed), Cloud = cloud ?? Current.Cloud };
         SettingsFile.Write(FilePath, next);
         Current = next;
     }
@@ -89,6 +90,10 @@ internal sealed class SpeechSettings(string directory, string modelDirectory)
         RecognitionPlace.ComputerSound => options.ComputerSoundCloud ?? (options.ProtectedKey is not null || options.Cloud),
         _ => options.Cloud,
     };
+
+    /// <summary>Whether <paramref name="place"/> can record: OpenAI needs a key, Whisper needs the model.</summary>
+    internal static bool ReadyFor(SpeechOptions options, RecognitionPlace place, bool modelReady) =>
+        Resolve(options, place) ? options.ProtectedKey is not null : modelReady;
 
     public void SetChoice(RecognitionPlace place, bool? cloud)
     {
