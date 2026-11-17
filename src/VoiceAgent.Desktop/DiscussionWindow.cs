@@ -137,6 +137,17 @@ internal sealed class DiscussionWindow(
     private readonly Button _send = new() { Content = new TextBlock { Text = TrayvoraTheme.IconSend, FontFamily = IconFont, FontSize = 16 } };
     private readonly Button _pause = new() { Content = "Pause", IsVisible = false };
     private readonly Button _mic = new();
+    private readonly ComboBox _recognizer = new() { ItemsSource = new[] { "Recognition: default", "Recognition: Whisper", "Recognition: OpenAI" }, SelectedIndex = 0, IsVisible = false };
+    private Action<bool?>? _recognitionChanged;
+
+    /// <summary>Shows the dictation recognizer chooser (default / local Whisper / OpenAI) and saves changes through <paramref name="changed"/>.</summary>
+    public void UseRecognition(bool? current, Action<bool?> changed)
+    {
+        _recognitionChanged = null;
+        _recognizer.SelectedIndex = Recognizers.Index(current);
+        _recognitionChanged = changed;
+        _recognizer.IsVisible = _mic.IsVisible;
+    }
     private readonly ProgressBar _level = new() { Minimum = 0, Maximum = 100, IsVisible = false, Margin = new Thickness(4, 0) };
     private CancellationTokenSource? _dictationStop;
     private CancellationTokenSource? _dictationCancel;
@@ -625,6 +636,17 @@ internal sealed class DiscussionWindow(
         _voiceMode.FontSize = 11.5;
         _voiceMode.Padding = new Thickness(10, 3);
         toRow.Children.Add(_voiceMode);
+        _recognizer.FontSize = 11.5;
+        _recognizer.MinHeight = 26;
+        _recognizer.Padding = new Thickness(10, 2);
+        ToolTip.SetTip(_recognizer, "How the 🎤 dictation in sessions is recognized: local Whisper (free, offline) or OpenAI (needs the API key in Settings).");
+        _recognizer.SelectionChanged += (_, _) =>
+        {
+            try { _recognitionChanged?.Invoke(Recognizers.Value(_recognizer.SelectedIndex)); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+        };
+        TrayvoraTheme.StyleControls(_recognizer);
+        toRow.Children.Add(_recognizer);
 
         var box = new Border
         {

@@ -33,8 +33,8 @@ internal sealed class VoiceSettingsPanel : StackPanel
             "Ask GPT by voice; the answer appears and can be read aloud. Remembers earlier questions (saved in Memory). Needs an OpenAI API key.");
         var shortQuestions = AddShortcut("Quick question (GPT, last six exchanges)", initial.ShortShortcut, OnShortcutChanged,
             "Same as above, but remembers only the last six questions while the app runs. Needs an OpenAI API key.");
-        var windowsAudio = AddShortcut("Record computer sound and send", initial.LoopbackShortcut, OnShortcutChanged,
-            "Records what plays on the computer (a video, a call) instead of the microphone, transcribes it and sends it like “Record with preview”.");
+        var windowsAudio = AddShortcut("Computer sound → ask OpenAI, answer aloud", initial.LoopbackShortcut, OnShortcutChanged,
+            "Press once to start recording what plays on the computer (a video, a call), press again to stop: the speech is recognized, sent to OpenAI as a question and the answer is shown and read aloud. Needs the OpenAI API key.");
         var stopSpeech = AddShortcut("Stop reading aloud", initial.StopSpeechShortcut, OnShortcutChanged,
             "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.");
         var feedback = new TextBlock { TextWrapping = TextWrapping.Wrap };
@@ -51,11 +51,18 @@ internal sealed class VoiceSettingsPanel : StackPanel
         };
         Children.Add(feedback);
 
+        Children.Add(new TextBlock { Text = "OpenAI API key", FontSize = 22, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 12, 0, 0) });
+        Children.Add(new TextBlock { Text = "One key for everything that uses OpenAI: OpenAI recognition, Quick and Deep questions, the computer-sound shortcut, OpenAI voices and Text to audio. The key is stored encrypted for your Windows account; the field stays empty after saving.", TextWrapping = TextWrapping.Wrap, Foreground = TrayvoraTheme.Muted });
+        var keyIndex = Children.Count;
         Children.Add(new TextBlock { Text = "Speech recognition", FontSize = 22, FontWeight = FontWeight.SemiBold, Margin = new Thickness(0, 12, 0, 0) });
+        Children.Add(new TextBlock { Text = "The default recognizer. Sessions and questions can pick their own in their windows; the computer-sound shortcut is set below.", TextWrapping = TextWrapping.Wrap, Foreground = TrayvoraTheme.Muted });
         var provider = new ComboBox { ItemsSource = new[] { "Local Whisper", "OpenAI Audio API" }, SelectedIndex = speech.Current.Cloud ? 1 : 0 };
         var local = new ComboBox { ItemsSource = SpeechSettings.LocalModels, SelectedIndex = speech.Current.Local };
         var remote = new ComboBox { ItemsSource = SpeechSettings.CloudModels, SelectedIndex = speech.Current.Remote };
-        var key = new TextBox { PasswordChar = '●', MaxLength = 512, PlaceholderText = "OpenAI API key" };
+        var key = new TextBox { PasswordChar = '●', MaxLength = 512, PlaceholderText = "Paste an OpenAI API key (sk-…)" };
+        var keyState = new TextBlock { TextWrapping = TextWrapping.Wrap };
+        var saveKey = new Button { Content = "Save key" };
+        var soundChoice = new ComboBox { ItemsSource = Recognizers.Choices, SelectedIndex = Recognizers.Index(speech.Current.ComputerSoundCloud) };
         var hints = new TextBox
         {
             Text = speech.Current.EffectiveWhisperHints,
@@ -75,7 +82,7 @@ internal sealed class VoiceSettingsPanel : StackPanel
                 hints,
             },
         };
-        TrayvoraTheme.StyleControls(provider, local, remote, key, hints);
+        TrayvoraTheme.StyleControls(provider, local, remote, key, hints, saveKey, soundChoice);
         var note = new TextBlock { TextWrapping = TextWrapping.Wrap };
         var remove = new Button { Content = "Forget API key", IsEnabled = speech.Current.ProtectedKey is not null };
 
@@ -83,9 +90,11 @@ internal sealed class VoiceSettingsPanel : StackPanel
         {
             var cloud = provider.SelectedIndex == 1;
             local.IsVisible = vocabulary.IsVisible = !cloud;
-            remote.IsVisible = key.IsVisible = cloud;
+            remote.IsVisible = cloud;
             remove.IsEnabled = speech.Current.ProtectedKey is not null;
-            key.PlaceholderText = remove.IsEnabled ? "API key saved · type to replace" : "OpenAI API key";
+            keyState.Text = speech.Current.ProtectedKey is null
+                ? "No key saved. Whisper recognition still works; OpenAI features need a key."
+                : $"Key saved: {speech.Current.KeyHint ?? "saved"}. Paste a new key to replace it.";
             note.Text = cloud
                 ? "Recordings are sent to OpenAI. Audio API usage is billed separately."
                 : "If a model is missing, launch a download from this panel.";
@@ -94,9 +103,8 @@ internal sealed class VoiceSettingsPanel : StackPanel
         {
             try
             {
-                speech.Save(provider.SelectedIndex == 1, local.SelectedIndex, remote.SelectedIndex, key.Text ?? "", hints.Text ?? "");
+                speech.Save(provider.SelectedIndex == 1, local.SelectedIndex, remote.SelectedIndex, "", hints.Text ?? "");
                 if (!speech.Current.Cloud) hints.Text = speech.Current.EffectiveWhisperHints;
-                key.Clear();
                 Update();
                 changed();
                 note.Text = speech.Current.Cloud ? "OpenAI Audio enabled. Audio usage is billed separately." : "Local Whisper settings saved for the next recording.";
@@ -114,12 +122,34 @@ internal sealed class VoiceSettingsPanel : StackPanel
         {
             if (hints.Text != speech.Current.EffectiveWhisperHints) SaveSpeech();
         };
-        key.LostFocus += (_, _) => { if (!string.IsNullOrWhiteSpace(key.Text)) SaveSpeech(); };
+        void SaveKeyNow()
+        {
+            if (string.IsNullOrWhiteSpace(key.Text)) return;
+            try
+            {
+                speech.SaveKey(key.Text);
+                key.Clear();
+                Update();
+                changed();
+                keyState.Text = $"Key saved: {speech.Current.KeyHint}. Used by every OpenAI feature.";
+            }
+            catch (Exception error) when (error is InvalidOperationException or IOException or UnauthorizedAccessException or System.Security.Cryptography.CryptographicException)
+            {
+                keyState.Text = error is InvalidOperationException ? error.Message : "Could not save the key.";
+            }
+        }
+        saveKey.Click += (_, _) => SaveKeyNow();
+        key.LostFocus += (_, _) => SaveKeyNow();
         key.KeyDown += (_, args) =>
         {
-            if (args.Key != Avalonia.Input.Key.Enter || string.IsNullOrWhiteSpace(key.Text)) return;
-            SaveSpeech();
+            if (args.Key != Avalonia.Input.Key.Enter) return;
+            SaveKeyNow();
             args.Handled = true;
+        };
+        soundChoice.SelectionChanged += (_, _) =>
+        {
+            try { speech.SetChoice(RecognitionPlace.ComputerSound, Recognizers.Value(soundChoice.SelectedIndex)); changed(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { note.Text = "Could not save the computer-sound recognizer."; }
         };
         remove.Click += (_, _) =>
         {
@@ -130,7 +160,7 @@ internal sealed class VoiceSettingsPanel : StackPanel
                 provider.SelectedIndex = 0;
                 Update();
                 changed();
-                note.Text = "API key removed. Local Whisper selected.";
+                keyState.Text = "API key removed. Local Whisper selected.";
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {
@@ -174,7 +204,10 @@ internal sealed class VoiceSettingsPanel : StackPanel
         {
             if (args.Property == IsVisibleProperty) download.IsVisible = local.IsVisible;
         };
-        Children.AddRange([provider, local, vocabulary, remote, key, note, remove, download, cancel, progress]);
+        Children.InsertRange(keyIndex, [key, new StackPanel { Orientation = Orientation.Horizontal, Spacing = 8, Children = { saveKey, remove } }, keyState]);
+        Children.AddRange([provider, local, vocabulary, remote, note, download, cancel, progress,
+            new Label { Content = "Computer-sound shortcut uses", Target = soundChoice, Margin = new Thickness(0, 8, 0, 0) }, soundChoice,
+            new TextBlock { Text = "“Record computer sound” records what plays on the PC, asks OpenAI and reads the answer aloud. Automatic uses OpenAI recognition when a key is saved.", TextWrapping = TextWrapping.Wrap, Foreground = TrayvoraTheme.Muted }]);
         Update();
         download.IsVisible = local.IsVisible;
     }

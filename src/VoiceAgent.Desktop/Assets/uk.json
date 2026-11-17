@@ -610,5 +610,13 @@
   "Checking GitHub…": "Перевіряю GitHub…",
   "Unpacking…": "Розпаковую…",
   "Stop reading aloud": "Зупинити читання вголос",
-  "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.": "Одразу зупиняє відповідь, яку читають уголос, незалежно від голосу (Windows чи OpenAI), а також відтворення в «Текст в аудіо»."
+  "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.": "Одразу зупиняє відповідь, яку читають уголос, незалежно від голосу (Windows чи OpenAI), а також відтворення в «Текст в аудіо».",
+  "Automatic (default)": "Автоматично (за замовчуванням)",
+  "Paste an OpenAI API key (sk-…)": "Вставте ключ OpenAI API (sk-…)",
+  "Save key": "Зберегти ключ",
+  "Recognition: Whisper": "Розпізнавання: Whisper",
+  "Computer sound → ask OpenAI, answer aloud": "Звук комп’ютера → питання OpenAI, відповідь уголос",
+  "Recognition: default": "Розпізнавання: типове",
+  "Computer-sound shortcut uses": "Розпізнавання для звуку комп’ютера",
+  "Recognition: OpenAI": "Розпізнавання: OpenAI"
 }

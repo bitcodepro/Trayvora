@@ -36,6 +36,7 @@ internal sealed class VoiceOverlay : Window
     private readonly ReplyAudioPanel? _replyAudio;
     private readonly ComboBox _mode = new() { ItemsSource = new[] { "Codex · computer tasks", "Questions · short memory", "Questions · long memory", "Claude Code" }, SelectedIndex = 0 };
     private readonly Button _clearQuestions = new() { Content = "New conversation" };
+    private readonly ComboBox _questionRecognizer = new() { ItemsSource = Recognizers.Choices, SelectedIndex = 0, MinWidth = 170 };
     private readonly List<QuestionExchange> _questions = [];
     private bool ClaudeActive => _mode.SelectedIndex == 3;
     private ClaudeChat? _claudeChat;
@@ -491,8 +492,18 @@ internal sealed class VoiceOverlay : Window
         _clearQuestions.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
         var headerGrid = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
         var headerText = new StackPanel { Spacing = 2, Children = { _destination, _modeHint } };
-        Grid.SetColumn(_clearQuestions, 1);
-        headerGrid.Children.AddRange([headerText, _clearQuestions]);
+        _questionRecognizer.VerticalAlignment = Avalonia.Layout.VerticalAlignment.Center;
+        ToolTip.SetTip(_questionRecognizer, "Speech recognition for Quick and Deep questions. The question itself always goes to OpenAI.");
+        _questionRecognizer.SelectedIndex = Recognizers.Index(RecognitionChoice(RecognitionPlace.Questions));
+        _questionRecognizer.SelectionChanged += (_, _) =>
+        {
+            try { SetRecognitionChoice(RecognitionPlace.Questions, Recognizers.Value(_questionRecognizer.SelectedIndex)); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { _status.Text = "Could not save the recognizer choice."; }
+        };
+        TrayvoraTheme.StyleControls(_questionRecognizer);
+        var headerTools = new StackPanel { Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 8, Children = { _questionRecognizer, _clearQuestions } };
+        Grid.SetColumn(headerTools, 1);
+        headerGrid.Children.AddRange([headerText, headerTools]);
         var header = new Border
         {
             BorderBrush = TrayvoraTheme.Border, BorderThickness = new Thickness(0, 0, 0, 1),
@@ -640,6 +651,7 @@ internal sealed class VoiceOverlay : Window
             _discussion.Initialize();
             _discussion.BackRequested += CloseDiscussion;
             if (_replyAudio is not null) _discussion.Speak = text => _replyAudio.ReadAsync(text);
+            _discussion.UseRecognition(RecognitionChoice(RecognitionPlace.Sessions), choice => SetRecognitionChoice(RecognitionPlace.Sessions, choice));
             // Tell the user when a session finishes while they are in another app.
             _discussion.RunFinished += (_, outcome) =>
             {
@@ -1134,12 +1146,13 @@ internal sealed class VoiceOverlay : Window
 
         if (_suspended || _operation is not null) return;
         var microphone = _microphone.SelectedItem as Microphone;
-        if (!ModelAvailable || (!loopback && microphone is null))
+        var place = loopback ? RecognitionPlace.ComputerSound : QuestionsActive ? RecognitionPlace.Questions : RecognitionPlace.Main;
+        if (!ReadyFor(place) || (!loopback && microphone is null))
         {
-            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation)
-                GetPreview().ShowStatus(!ModelAvailable
-                    ? "Speech recognition is unavailable. Check the selected model in Settings."
-                    : "No microphone selected. Check the microphone in Trayvora.");
+            var problem = !ReadyFor(place) ? NotReadyMessage(place) : "No microphone selected. Check the microphone in Trayvora.";
+            _status.Text = problem;
+            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation or VoiceShortcutMode.WindowsAudio || !IsVisible)
+                GetPreview().ShowStatus(problem);
             return;
         }
 
@@ -1160,7 +1173,8 @@ internal sealed class VoiceOverlay : Window
         string? draft = null;
         try
         {
-            var transcriber = OperatingSystem.IsWindows() && _speech is not null ? _speech.CreateTranscriber() : _transcriber;
+            var transcriber = TranscriberFor(place);
+            if (loopback) GetPreview().ShowStatus("Listening to the computer sound… Press the shortcut again to stop and ask OpenAI.");
             var progress = new Progress<double>(peak =>
             {
                 if (ReferenceEquals(_stop, stopRecording) && !operation.IsCancellationRequested)
@@ -1185,7 +1199,7 @@ internal sealed class VoiceOverlay : Window
             _stop = null;
             _transcribing = true;
             _status.Text = "Transcribing audio…";
-            if (mode == VoiceShortcutMode.Preview)
+            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.WindowsAudio)
                 GetPreview().ShowStatus(_status.Text);
             _progress.IsIndeterminate = true;
             RefreshControls();
@@ -1231,11 +1245,18 @@ internal sealed class VoiceOverlay : Window
         }
         if (draft is null)
         {
-            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation)
+            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation or VoiceShortcutMode.WindowsAudio)
                 GetPreview().ShowStatus(_status.Text ?? "No speech detected.");
             return;
         }
-        if (mode is VoiceShortcutMode.Background or VoiceShortcutMode.WindowsAudio)
+        if (mode == VoiceShortcutMode.WindowsAudio)
+        {
+            // Computer sound: ask OpenAI about what was heard and read the answer aloud.
+            _codexRun = AskQuestionAsync(draft, silent: false, readAloud: true);
+            await _codexRun;
+            return;
+        }
+        if (mode is VoiceShortcutMode.Background)
         {
             _codexRun = SendToActiveChatAsync(draft, RequestRoute.Auto, silent: true);
             await _codexRun;
@@ -1263,7 +1284,7 @@ internal sealed class VoiceOverlay : Window
         if (_suspended || _operation is not null) throw new IOException("Trayvora is busy with another recording or request. Try again when it finishes.");
         if (_microphone.SelectedItem is null) await RefreshDevicesAsync();
         if (_microphone.SelectedItem is not Microphone microphone) throw new IOException("No microphone found. Check the microphone in the main window.");
-        if (!ModelAvailable) throw new IOException("Speech recognition is unavailable. Check the speech model in Settings.");
+        if (!ReadyFor(RecognitionPlace.Sessions)) throw new IOException(NotReadyMessage(RecognitionPlace.Sessions));
         if (_suspended || _operation is not null) throw new IOException("Trayvora is busy with another recording or request.");
 
         using var operation = CancellationTokenSource.CreateLinkedTokenSource(cancel);
@@ -1274,7 +1295,7 @@ internal sealed class VoiceOverlay : Window
         RefreshControls();
         try
         {
-            var transcriber = OperatingSystem.IsWindows() && _speech is not null ? _speech.CreateTranscriber() : _transcriber;
+            var transcriber = TranscriberFor(RecognitionPlace.Sessions);
             var count = await Task.Run(() => _recorder.RecordAsync(
                 string.IsNullOrEmpty(microphone.Id) ? null : microphone.Id, bytes, level, stopRecording, operation.Token));
             operation.Token.ThrowIfCancellationRequested();
@@ -1406,7 +1427,7 @@ internal sealed class VoiceOverlay : Window
         }
     }
 
-    private async Task AskQuestionAsync(string? question, bool silent)
+    private async Task AskQuestionAsync(string? question, bool silent, bool readAloud = false)
     {
         if (_suspended || _operation is not null || string.IsNullOrWhiteSpace(question) || !OperatingSystem.IsWindows()) return;
         if (LongQuestionsActive && _memoryReadFailed)
@@ -1418,7 +1439,7 @@ internal sealed class VoiceOverlay : Window
         var key = _speech?.Current.ProtectedKey ?? _replyAudio?.SavedSeparateKey;
         if (key is null)
         {
-            _status.Text = "Save an OpenAI API key in Speech recognition or Playback settings first.";
+            _status.Text = "Save an OpenAI API key in Settings → OpenAI API key first.";
             if (!silent && !IsVisible) GetPreview().ShowStatus(_status.Text);
             return;
         }
@@ -1486,7 +1507,7 @@ internal sealed class VoiceOverlay : Window
             if (answer is null) GetPreview().ShowStatus(_status.Text ?? "Could not get an answer.");
             else GetPreview().ShowAnswer(answer);
         }
-        if (answer is not null && _sharedChat?.ReadAloud == true && _replyAudio is not null)
+        if (answer is not null && (readAloud || _sharedChat?.ReadAloud == true) && _replyAudio is not null)
             _ = _replyAudio.ReadAsync(answer);
     }
 
@@ -1867,6 +1888,30 @@ internal sealed class VoiceOverlay : Window
 
     private bool ModelAvailable => (OperatingSystem.IsWindows() && _speech is not null ? _speech.Ready : _model.Exists) && !_modelNeedsReplacement;
 
+    /// <summary>Whether the recognizer chosen for <paramref name="place"/> can be used now.</summary>
+    private bool ReadyFor(RecognitionPlace place)
+    {
+        if (!OperatingSystem.IsWindows() || _speech is null) return ModelAvailable;
+        var cloud = _speech.CloudFor(place);
+        return _speech.ReadyFor(cloud) && (cloud || !_modelNeedsReplacement);
+    }
+
+    private ISpeechTranscriber TranscriberFor(RecognitionPlace place) =>
+        OperatingSystem.IsWindows() && _speech is not null ? _speech.CreateTranscriber(_speech.CloudFor(place)) : _transcriber;
+
+    private string NotReadyMessage(RecognitionPlace place) =>
+        OperatingSystem.IsWindows() && _speech is not null && _speech.CloudFor(place)
+            ? "OpenAI recognition needs an API key. Add it in Settings → OpenAI API key."
+            : "Speech recognition is unavailable. Download the Whisper model in Settings.";
+
+    /// <summary>The recognizer chosen for a place (null = default), for the choosers in sessions and questions.</summary>
+    public bool? RecognitionChoice(RecognitionPlace place) => OperatingSystem.IsWindows() ? _speech?.ChoiceFor(place) : null;
+
+    public void SetRecognitionChoice(RecognitionPlace place, bool? cloud)
+    {
+        if (OperatingSystem.IsWindows()) _speech?.SetChoice(place, cloud);
+    }
+
     /// <summary>Shows the feed of the active mode and chat; a chat seen for the first time is filled from its saved history.</summary>
     private void SyncFeed(bool desktopActive)
     {
@@ -1910,7 +1955,7 @@ internal sealed class VoiceOverlay : Window
         _replyAudio?.Refresh(idle);
         var desktopActive = _sharedChat?.HasChat == true;
         _mode.IsEnabled = idle;
-        _clearQuestions.IsVisible = QuestionsActive;
+        _clearQuestions.IsVisible = _questionRecognizer.IsVisible = QuestionsActive;
         _clearQuestions.IsEnabled = idle;
         _claudeExe.IsEnabled = _claudeProfile.IsEnabled = _claudeChats.IsEnabled = idle;
         _destination.Text = ClaudeActive ? $"Claude Code · {_claudeChat?.Title ?? "Choose a session"}" : QuestionsActive ? (LongQuestionsActive ? "GPT-6 Luna · long memory" : "GPT-6 Luna · last six exchanges") : desktopActive ? $"Active chat: Codex Desktop · {_sharedChat!.TargetTitle}"
