@@ -9,6 +9,13 @@ internal static class Program
     [STAThread]
     private static void Main(string[] args)
     {
+        // CI probes the extracted package without opening the UI, microphone or a user's profile.
+        if (args.Length == 2 && args[0] == PackageSmoke.Argument)
+        {
+            Environment.ExitCode = PackageSmoke.Run(args[1]);
+            return;
+        }
+
         // A staged copy of a newer version replaces the program files, then starts the updated app.
         if (args.Length == 3 && args[0] == PortableUpdate.ApplyArgument && int.TryParse(args[2], out var oldProcess))
         {

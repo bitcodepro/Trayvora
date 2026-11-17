@@ -22,4 +22,18 @@
     <EmbeddedResource Include="Assets/uk.json" Condition="Exists('Assets/uk.json')" />
     <InternalsVisibleTo Include="VoiceAgent.UnitTests" />
   </ItemGroup>
+  <!-- Whisper loads these by an explicit path beside the executable, unlike P/Invoke libraries. -->
+  <Target Name="PrepareCompactWindowsNativeFiles" AfterTargets="ComputeResolvedFilesToPublishList"
+          Condition="'$(PublishSingleFile)' == 'true' and '$(RuntimeIdentifier)' == 'win-x64'">
+    <ItemGroup>
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="'%(ResolvedFileToPublish.Extension)' == '.pdb' or '%(ResolvedFileToPublish.Filename)%(ResolvedFileToPublish.Extension)' == 'ggml-metal.metal'" />
+      <ResolvedFileToPublish Remove="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\', '/').StartsWith('runtimes/')) and !$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\', '/').StartsWith('runtimes/win-x64/'))" />
+      <ResolvedFileToPublish Update="@(ResolvedFileToPublish)"
+        Condition="$([System.String]::Copy('%(ResolvedFileToPublish.RelativePath)').Replace('\', '/').StartsWith('runtimes/win-x64/'))">
+        <ExcludeFromSingleFile>true</ExcludeFromSingleFile>
+      </ResolvedFileToPublish>
+    </ItemGroup>
+  </Target>
 </Project>

@@ -24,7 +24,7 @@ New-Item -ItemType Directory -Force -Path $env:TEMP | Out-Null
 
 $project = Join-Path $PSScriptRoot '../src/VoiceAgent.Desktop/VoiceAgent.Desktop.csproj'
 $package = Join-Path $OutputRoot ('release-win-x64-' + (Get-Date -Format 'yyyyMMdd-HHmmss'))
-dotnet publish $project -m:1 -c Release -r win-x64 --self-contained true -p:PublishReadyToRun=true --artifacts-path (Join-Path $OutputRoot 'publish-obj') -o $package
+dotnet publish $project -m:1 -c Release -r win-x64 --self-contained true -p:PublishProfile=CompactWinX64 --artifacts-path (Join-Path $OutputRoot 'publish-obj') -o $package
 if ($LASTEXITCODE) { throw "dotnet publish failed ($LASTEXITCODE)." }
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'portable\*') -Destination $package

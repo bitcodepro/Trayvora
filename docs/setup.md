@@ -9,3 +9,9 @@ Set VOICEAGENT_REVQORA_EXE to the full path of revqora.exe, start Revqora with M
 Quit Trayvora before moving or uninstalling it. Remove the unpacked application directory to uninstall. Model, history and Codex data use the configured locations. Keep or remove those directories separately according to the data you want to retain. **More → Start with Windows** in the tray menu enables or disables startup for the current Windows user. Turn it off before removing the application folder. It only manages the entry belonging to that folder; an entry left by the old PowerShell launcher for the same folder is upgraded to start Trayvora.exe directly.
 
 With Local Whisper selected, open Speech recognition in Settings and edit Whisper hints. Add one term or phrase per line; the changes save when you leave the field. The updated list takes effect on the next recording.
+
+## Compact Windows downloads
+
+Keep the extracted package together: `Trayvora.exe`, `release.json`, the two help files and `runtimes/win-x64` (four native Whisper libraries). No separately installed .NET runtime is required. The EXE bundles managed dependencies and most native components; .NET extracts native components into its per-user cache on first start. Models and your settings/history remain separate and are never embedded in the EXE.
+
+Extract into a fresh folder for a clean layout. Copying a compact release over an older many-file installation does not by itself remove obsolete files; do not manually delete folders containing your data just to reduce the file count.
