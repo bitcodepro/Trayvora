@@ -185,7 +185,7 @@ internal sealed class App : Avalonia.Application
             ("Record with preview", voiceKeys.Preview.ToString()), ("Record and send at once", voiceKeys.Background.ToString()),
             ("Send preview", voiceKeys.Send.ToString()), ("Dictate into Codex Desktop", voiceKeys.DictationShortcut.ToString()),
             ("Send to Codex Desktop chat", voiceKeys.SharedShortcut.ToString()), ("Deep question (GPT, long memory)", voiceKeys.LongShortcut.ToString()),
-            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Record computer sound and send", voiceKeys.LoopbackShortcut.ToString()), ("Stop reading aloud", voiceKeys.StopSpeechShortcut.ToString()),
+            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Computer sound → ask OpenAI, answer aloud", voiceKeys.LoopbackShortcut.ToString()), ("Stop reading aloud", voiceKeys.StopSpeechShortcut.ToString()),
         ];
         overlay.SetShortcuts(ShortcutList());
         EventHandler openSettings = (_, _) =>
