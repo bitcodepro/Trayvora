@@ -168,7 +168,7 @@ internal sealed class DiscussionWindow(
     private DiscussionTarget _target = DiscussionTarget.Codex;
 
     private static FontFamily IconFont => new("Segoe Fluent Icons, Segoe MDL2 Assets");
-    private enum DiscussionTarget { Codex, Claude, Both }
+    internal enum DiscussionTarget { Codex, Claude, Both }
 
     private RoomRun? CurrentRun => _room is { } room && _runs.TryGetValue(room.Id, out var run) ? run : null;
 
@@ -1007,9 +1007,15 @@ internal sealed class DiscussionWindow(
 
     private bool RelayFor(DiscussionMember agent) => agent == DiscussionMember.Codex ? _relayFromCodex : _relayFromClaude;
 
+    /// <summary>The ⇄ toggles that stay on after choosing <paramref name="target"/>: only the chosen agent's own.</summary>
+    internal static (bool Codex, bool Claude) RelayAfterSwitch(DiscussionTarget target, bool codex, bool claude) =>
+        (target == DiscussionTarget.Codex && codex, target == DiscussionTarget.Claude && claude);
+
     private void SetTarget(DiscussionTarget target)
     {
         _target = target;
+        // Only the chosen recipient can pass its reply on: switching clears the other ⇄ toggle.
+        (_relayFromCodex, _relayFromClaude) = RelayAfterSwitch(target, _relayFromCodex, _relayFromClaude);
         TrayvoraTheme.SetSelected(_toCodex, target == DiscussionTarget.Codex);
         TrayvoraTheme.SetSelected(_toClaude, target == DiscussionTarget.Claude);
         TrayvoraTheme.SetSelected(_toBoth, target == DiscussionTarget.Both);
