@@ -1,0 +1,62 @@
+name: Windows
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  windows:
+    name: Windows build, test and package
+    runs-on: windows-2022
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
+        with:
+          global-json-file: global.json
+      - name: Build, test and validate portable package
+        shell: pwsh
+        run: ./scripts/ci/build.ps1 -OutputRoot "$env:RUNNER_TEMP/trayvora-ci"
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        with:
+          name: trayvora-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/trayvora-ci/release/*
+          overwrite: true
+          if-no-files-found: error
+          retention-days: 7
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
+        if: always()
+        with:
+          name: test-results-${{ github.sha }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/trayvora-ci/results/*
+          if-no-files-found: ignore
+          retention-days: 7
+  release:
+    name: Publish verified Windows release
+    needs: windows
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main'
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@11bd71901bbe5b1630ceea73d27597364c9af683
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+      - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
+        with:
+          name: trayvora-${{ github.sha }}-${{ github.run_id }}
+          path: ${{ runner.temp }}/release
+      - name: Publish exact tested artifact
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: ./scripts/ci/release.ps1 -ArtifactRoot "$env:RUNNER_TEMP/release"
+
