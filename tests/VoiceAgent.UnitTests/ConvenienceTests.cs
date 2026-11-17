@@ -163,3 +163,15 @@ public sealed class ReplyQuoteTests
         Assert.Equal("> Codex wrote:\n> Plan:\n> 1. Build\n\n", DiscussionWindow.Quote(message));
     }
 }
+
+public sealed class TargetChipTests
+{
+    [Fact]
+    public void SwitchingRecipientClearsTheOtherAgentsRelayToggle()
+    {
+        Assert.Equal((true, false), DiscussionWindow.RelayAfterSwitch(DiscussionWindow.DiscussionTarget.Codex, true, true));
+        Assert.Equal((false, true), DiscussionWindow.RelayAfterSwitch(DiscussionWindow.DiscussionTarget.Claude, true, true));
+        Assert.Equal((false, false), DiscussionWindow.RelayAfterSwitch(DiscussionWindow.DiscussionTarget.Both, true, true));
+        Assert.Equal((false, false), DiscussionWindow.RelayAfterSwitch(DiscussionWindow.DiscussionTarget.Codex, false, true));
+    }
+}
