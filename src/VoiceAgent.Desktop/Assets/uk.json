@@ -618,5 +618,6 @@
   "Computer sound → ask OpenAI, answer aloud": "Звук комп’ютера → питання OpenAI, відповідь уголос",
   "Recognition: default": "Розпізнавання: типове",
   "Computer-sound shortcut uses": "Розпізнавання для звуку комп’ютера",
-  "Recognition: OpenAI": "Розпізнавання: OpenAI"
+  "Recognition: OpenAI": "Розпізнавання: OpenAI",
+  "Checking for updates…": "Перевіряю оновлення…"
 }

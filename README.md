@@ -47,7 +47,7 @@ While a request runs, use **Stop everything** in the tray to terminate the owned
 
 ## Voice shortcuts and recognition
 
-**Ctrl+Alt+Shift+W** (Settings → Shortcuts → Computer sound) records what plays on the Windows default playback device through WASAPI loopback. Press again to stop: the speech is recognized (OpenAI by default when a key is saved; Settings → Speech recognition → Computer-sound shortcut uses), sent to OpenAI as a quick question, and the answer is shown and read aloud. **Ctrl+Alt+Shift+S** stops reading.
+**Ctrl+Alt+Shift+W** (Settings → Shortcuts → Computer sound) records what plays on the Windows default playback device through WASAPI loopback. Press again to stop: the speech is recognized (OpenAI by default when a key is saved; Settings → Speech recognition → Computer-sound shortcut uses), sent to OpenAI as a quick question, and the answer is read aloud. Nothing appears on screen while it works (safe during screen sharing); the tray icon tooltip shows the state and any problem. Every active output device (speakers, headset) is recorded and the one that carried the sound is used. **Ctrl+Alt+Shift+S** stops reading.
 
 Settings → **OpenAI API key** holds the one key used by OpenAI recognition, Quick and Deep questions, the computer-sound shortcut, OpenAI voices and Text to audio; after saving, the field is cleared and the last characters of the key are shown. Sessions (next to Voice mode) and the Questions modes (next to New conversation) each have a recognizer chooser: Automatic, Local Whisper or OpenAI.
 

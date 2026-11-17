@@ -26,6 +26,9 @@ internal sealed class VoiceOverlay : Window
     public bool HasDraftPreview => _preview?.HasDraft == true;
     private bool _transcribing;
     public event Action<AgentState>? AgentStateChanged;
+
+    /// <summary>Status of the computer-sound shortcut. It shows no window (nothing visible when the screen is shared), only the tray tooltip.</summary>
+    public event Action<string>? QuietNotice;
     public AgentState CurrentAgentState =>
         _stop is { IsCancellationRequested: false } && _operation?.IsCancellationRequested == false ? AgentState.Recording :
         _transcribing ? AgentState.Transcribing :
@@ -886,6 +889,9 @@ internal sealed class VoiceOverlay : Window
         _readiness?.ShowAvailable(update);
     }
 
+    /// <summary>Installs <paramref name="update"/> from the tray menu, without opening any window.</summary>
+    public Task<string?> InstallUpdateFromTrayAsync(AvailableUpdate update, IProgress<string> progress) => InstallUpdateAsync(update, progress);
+
     /// <summary>Downloads a GitHub release, checks it and restarts into it; settings and data stay.</summary>
     private async Task<string?> InstallUpdateAsync(AvailableUpdate update, IProgress<string> progress)
     {
@@ -1151,7 +1157,8 @@ internal sealed class VoiceOverlay : Window
         {
             var problem = !ReadyFor(place) ? NotReadyMessage(place) : "No microphone selected. Check the microphone in Trayvora.";
             _status.Text = problem;
-            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation or VoiceShortcutMode.WindowsAudio || !IsVisible)
+            if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(problem);
+            else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation || !IsVisible)
                 GetPreview().ShowStatus(problem);
             return;
         }
@@ -1174,7 +1181,7 @@ internal sealed class VoiceOverlay : Window
         try
         {
             var transcriber = TranscriberFor(place);
-            if (loopback) GetPreview().ShowStatus("Listening to the computer sound… Press the shortcut again to stop and ask OpenAI.");
+            if (loopback) QuietNotice?.Invoke("listening to the computer sound… press the shortcut again to ask OpenAI");
             var progress = new Progress<double>(peak =>
             {
                 if (ReferenceEquals(_stop, stopRecording) && !operation.IsCancellationRequested)
@@ -1199,8 +1206,8 @@ internal sealed class VoiceOverlay : Window
             _stop = null;
             _transcribing = true;
             _status.Text = "Transcribing audio…";
-            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.WindowsAudio)
-                GetPreview().ShowStatus(_status.Text);
+            if (mode == VoiceShortcutMode.Preview) GetPreview().ShowStatus(_status.Text);
+            else if (loopback) QuietNotice?.Invoke("transcribing…");
             _progress.IsIndeterminate = true;
             RefreshControls();
             var text = await Task.Run(() => transcriber.TranscribeAsync(
@@ -1245,15 +1252,18 @@ internal sealed class VoiceOverlay : Window
         }
         if (draft is null)
         {
-            if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation or VoiceShortcutMode.WindowsAudio)
+            if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(_status.Text ?? "No speech detected.");
+            else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation)
                 GetPreview().ShowStatus(_status.Text ?? "No speech detected.");
             return;
         }
         if (mode == VoiceShortcutMode.WindowsAudio)
         {
             // Computer sound: ask OpenAI about what was heard and read the answer aloud.
-            _codexRun = AskQuestionAsync(draft, silent: false, readAloud: true, longMemory: false);
+            QuietNotice?.Invoke("asking OpenAI…");
+            _codexRun = AskQuestionAsync(draft, silent: true, readAloud: true, longMemory: false);
             await _codexRun;
+            QuietNotice?.Invoke(_status.Text ?? "done");
             return;
         }
         if (mode is VoiceShortcutMode.Background)
