@@ -1,6 +1,6 @@
 # Windows CI and releases
 
-The `Windows build, test and package` check builds with the SDK pinned in global.json, runs the unit suite, publishes a self-contained Windows x64 folder and validates every file after ZIP extraction. All jobs use Windows runners. Three signed-in live AI tests are intentionally skipped without an authorized profile; CI is not a claim that live microphone/AI integrations were tested.
+The `Windows build, test and package` check builds with the SDK pinned in global.json, runs the unit suite, publishes a self-contained Windows x64 folder and validates every file after ZIP extraction. All jobs use Windows runners. Three signed-in live AI tests and the optional local Whisper/audio-fixture test are intentionally skipped without their required authorized profile/fixtures; CI is not a claim that live microphone/AI integrations were tested.
 
 PRs validate without repository write permissions. A push to main repeats validation for that exact source SHA and only then publishes `trayvora-win-x64.zip`, `SHA256SUMS.txt` and `release.json`. No token/PAT secret is needed: only the release job has contents:write. Tag creation does not trigger this workflow. No version commit is pushed, so there is no workflow loop.
 
@@ -17,3 +17,4 @@ Local verification (fresh output folder required):
 ```
 
 This performs build/tests/package validation without publishing. No existing output directory is deleted. Native dependencies and the .NET runtime are included; speech models and local user data are not.
+
