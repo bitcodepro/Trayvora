@@ -95,6 +95,8 @@ Two tools in the main window sidebar under **Tools** open as full pages with **�
 
 Drop audio files onto **Audio to text** or pick several at once: they are transcribed one after another, each with its own status. **Save all…** writes one .txt per file into a folder; **Save as .srt** writes subtitles (times are approximate within each two-minute part).
 
+**Activity** (Tools in the sidebar) lists the last 30 shortcut presses and what came of each: recording started, length and loudest level, recognized or no speech, OpenAI request sent, answer or error. Only times, counts and errors are kept (no transcripts or answers), in settings\logs\activity.json; older entries are dropped. The computer-sound shortcut records what plays in the speakers or headphones, not the microphone, so speaking into the microphone alone shows up there as silence.
+
 **Text to audio** speaks text with an installed Windows voice (on this computer) or an OpenAI voice (uses the key from Speech recognition or Playback settings, billed separately). It starts from the voice and speed chosen in Playback settings. Long text is generated in parts and joined into one file. **Play** listens in Trayvora; **Save as…** writes MP3 or WAV. Automatic voice selection needs an installed Windows voice for the text language.
 
 ## Open a past response

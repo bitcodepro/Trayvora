@@ -181,6 +181,8 @@ internal sealed class VoiceOverlay : Window
         var textToAudioButton = TrayvoraTheme.NavItem("\uE767", "Text to audio", "Text → speech file");
         audioToTextButton.Click += (_, _) => { if (OperatingSystem.IsWindows()) OpenAudioToText(); };
         textToAudioButton.Click += (_, _) => { if (OperatingSystem.IsWindows()) OpenTextToAudio(); };
+        var activityButton = TrayvoraTheme.NavItem(TrayvoraTheme.IconHistory, "Activity", "Shortcuts · OpenAI requests");
+        activityButton.Click += (_, _) => OpenActivity();
         var terminalButton = TrayvoraTheme.NavItem("", "Terminal", "Claude Code · Codex CLI");
         terminalButton.Click += (_, _) =>
         {
@@ -458,7 +460,7 @@ internal sealed class VoiceOverlay : Window
                 new Border { Height = 8 },
                 TrayvoraTheme.Caption("Workspace"), discussionButton, historyButton,
                 new Border { Height = 8 },
-                TrayvoraTheme.Caption("Tools"), audioToTextButton, textToAudioButton, terminalButton,
+                TrayvoraTheme.Caption("Tools"), audioToTextButton, textToAudioButton, activityButton, terminalButton,
                 new Border { Height = 8 },
                 TrayvoraTheme.Caption("Accounts"), _chatGptButton, _claudeButton,
             },
@@ -963,6 +965,19 @@ internal sealed class VoiceOverlay : Window
         hint.Foreground = status.SignedIn ? TrayvoraTheme.Success : status.Available ? TrayvoraTheme.Warning : TrayvoraTheme.Muted;
     }
     private TextToAudioView? _textToAudio;
+    private ActivityView? _activityView;
+    private static ActivityLog Activity => ActivityLog.Shared;
+
+    private void OpenActivity()
+    {
+        if (_activityView is null)
+        {
+            _activityView = new ActivityView(Activity);
+            _activityView.BackRequested += CloseDiscussion;
+        }
+        _activityView.Refresh();
+        ShowPage(_activityView, "Trayvora · Activity");
+    }
 
     /// <summary>Shows one full-window page (Sessions, Audio to text, Text to audio) in place of the main view.</summary>
     private void ShowPage(Control page, string title)
@@ -1112,7 +1127,8 @@ internal sealed class VoiceOverlay : Window
     {
         if (_stop is { IsCancellationRequested: false } stop)
         {
-            if (_recordMode != mode) return;
+            if (_recordMode != mode) { Activity.Add("Ignored", "Another recording is running."); return; }
+            Activity.Add("Recording", "Stopped by the shortcut.");
             stop.Cancel();
             RefreshControls();
             _record.IsEnabled = false;
@@ -1123,6 +1139,7 @@ internal sealed class VoiceOverlay : Window
 
         if (_operation is not null)
         {
+            Activity.Add("Ignored", "Trayvora is busy with another request.");
             return;
         }
 
@@ -1157,6 +1174,7 @@ internal sealed class VoiceOverlay : Window
         {
             var problem = !ReadyFor(place) ? NotReadyMessage(place) : "No microphone selected. Check the microphone in Trayvora.";
             _status.Text = problem;
+            Activity.Add("Not started", problem);
             if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(problem);
             else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation || !IsVisible)
                 GetPreview().ShowStatus(problem);
@@ -1178,12 +1196,15 @@ internal sealed class VoiceOverlay : Window
         _progress.IsVisible = true;
         RefreshControls();
         string? draft = null;
+        var loudest = 0.0;
+        Activity.Add("Recording", loopback ? "Listening to the computer sound (what plays in speakers/headphones, not the microphone)." : "Listening to the microphone.");
         try
         {
             var transcriber = TranscriberFor(place);
             if (loopback) QuietNotice?.Invoke("listening to the computer sound… press the shortcut again to ask OpenAI");
             var progress = new Progress<double>(peak =>
             {
+                loudest = Math.Max(loudest, peak);
                 if (ReferenceEquals(_stop, stopRecording) && !operation.IsCancellationRequested)
                 {
                     _progress.Value = peak * 100;
@@ -1204,6 +1225,7 @@ internal sealed class VoiceOverlay : Window
             });
 
             _stop = null;
+            Activity.Add("Recorded", $"{stopwatch.Elapsed.TotalSeconds:0.0} s, loudest level {loudest * 100:0}%{(loudest < 0.01 ? " (silence)" : "")}.");
             _transcribing = true;
             _status.Text = "Transcribing audio…";
             if (mode == VoiceShortcutMode.Preview) GetPreview().ShowStatus(_status.Text);
@@ -1216,18 +1238,21 @@ internal sealed class VoiceOverlay : Window
             if (string.IsNullOrWhiteSpace(text))
             {
                 _status.Text = "No speech detected.";
+                Activity.Add("Recognized", "No speech detected.");
             }
             else
             {
                 _transcript.Text = text;
                 _status.Text = "Transcript ready.";
                 draft = text;
+                Activity.Add("Recognized", $"{text.Length} characters.");
                 if (mode == VoiceShortcutMode.MainWindow) _transcript.Focus();
             }
         }
         catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
             _status.Text = "Recording or transcription cancelled.";
+            Activity.Add("Cancelled", _status.Text);
         }
         catch (Exception error)
         {
@@ -1237,6 +1262,7 @@ internal sealed class VoiceOverlay : Window
             }
 
             _status.Text = FriendlyError(error, _stop is null ? "Could not transcribe" : $"{source} unavailable");
+            Activity.Add("Error", _status.Text ?? error.GetType().Name);
         }
         finally
         {
@@ -1444,6 +1470,7 @@ internal sealed class VoiceOverlay : Window
     private async Task AskQuestionAsync(string? question, bool silent, bool readAloud = false, bool? longMemory = null)
     {
         var useLong = UsesLongMemory(longMemory, LongQuestionsActive);
+        if (_operation is not null) Activity.Add("Ignored", "Question not sent: Trayvora is busy.");
         if (_suspended || _operation is not null || string.IsNullOrWhiteSpace(question) || !OperatingSystem.IsWindows()) return;
         if (useLong && _memoryReadFailed)
         {
@@ -1455,6 +1482,7 @@ internal sealed class VoiceOverlay : Window
         if (key is null)
         {
             _status.Text = "Save an OpenAI API key in Settings → OpenAI API key first.";
+            Activity.Add("OpenAI", "Not sent: no API key saved.");
             if (!silent && !IsVisible) GetPreview().ShowStatus(_status.Text);
             return;
         }
@@ -1481,11 +1509,13 @@ internal sealed class VoiceOverlay : Window
                 var summary = await api.SummarizeAsync(credential, memory.Summary, batch, operation.Token);
                 memory = memory with { Summary = summary, Summarized = memory.Summarized + count };
             }
+            Activity.Add("OpenAI", $"Request sent ({(useLong ? "deep" : "quick")} question, {question.Length} characters).");
             var history = useLong ? memory.Exchanges.Skip(memory.Summarized).ToArray() : _questions.ToArray();
             answer = await api.AskAsync(credential, question, history, operation.Token, useLong ? memory.Summary : null);
             operation.Token.ThrowIfCancellationRequested();
             _answer.Text = answer;
             _status.Text = "Answer ready.";
+            Activity.Add("OpenAI", $"Answer received ({answer.Length} characters){(readAloud ? ", reading aloud" : "")}.");
             if (useLong && _memoryFile is not null)
             {
                 memory.Exchanges.Add(new QuestionExchange(question, answer));
@@ -1504,14 +1534,17 @@ internal sealed class VoiceOverlay : Window
         {
             answer = null;
             _status.Text = "Question cancelled.";
+            Activity.Add("OpenAI", "Request cancelled.");
         }
         catch (Exception error) when (error is IOException or ArgumentException)
         {
             _status.Text = error.Message;
+            Activity.Add("OpenAI", $"Failed: {error.Message}");
         }
-        catch (Exception)
+        catch (Exception error)
         {
             _status.Text = "Could not get an answer. Check the saved API key and connection.";
+            Activity.Add("OpenAI", $"Failed: {error.GetType().Name}. Check the key and connection.");
         }
         finally
         {

@@ -117,6 +117,7 @@ internal sealed class App : Avalonia.Application
         async void HotkeyPressed(VoiceAction action)
         {
             if (exiting) return;
+            ActivityLog.Shared.Add(ActivityLog.PressKind, $"{VoiceHotkeys.Describe(action)} pressed");
             switch (action)
             {
                 case VoiceAction.Background:
