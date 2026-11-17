@@ -221,8 +221,12 @@ public sealed class RecognitionChoiceTests
             var speech = new SpeechSettings(folder.FullName, folder.FullName);
             Assert.Throws<InvalidOperationException>(() => speech.Save(true, 0, 0, ""));
             Assert.False(speech.Current.Cloud);
-            speech.SaveKey("sk-test-0000000000ABCD", cloud: true);
+            // The user also picked a non-default OpenAI model before the key existed.
+            Assert.Throws<InvalidOperationException>(() => speech.Save(true, 0, 1, ""));
+            speech.Save(true, 0, 1, "sk-test-0000000000ABCD", "");
             Assert.True(speech.Current.Cloud);
+            Assert.Equal(1, speech.Current.Remote);
+            Assert.Equal(1, new SpeechSettings(folder.FullName, folder.FullName).Current.Remote);
             Assert.True(speech.CloudFor(RecognitionPlace.Main));
             Assert.True(SpeechSettings.ReadyFor(speech.Current, RecognitionPlace.Main, modelReady: false));
             Assert.Equal("sk-…ABCD", speech.Current.KeyHint);

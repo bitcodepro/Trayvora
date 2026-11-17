@@ -127,7 +127,8 @@ internal sealed class VoiceSettingsPanel : StackPanel
             if (string.IsNullOrWhiteSpace(key.Text)) return;
             try
             {
-                speech.SaveKey(key.Text, cloud: provider.SelectedIndex == 1);
+                // Key and every displayed speech option in one write, so the UI always matches what is used.
+                speech.Save(provider.SelectedIndex == 1, local.SelectedIndex, remote.SelectedIndex, key.Text, hints.Text ?? "");
                 key.Clear();
                 Update();
                 changed();
