@@ -25,8 +25,9 @@ jobs:
         run: ./scripts/ci/build.ps1 -OutputRoot "$env:RUNNER_TEMP/trayvora-ci"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
-          name: trayvora-${{ github.sha }}-${{ github.run_attempt }}
+          name: trayvora-${{ github.sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/trayvora-ci/release/*
+          overwrite: true
           if-no-files-found: error
           retention-days: 7
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
@@ -51,10 +52,11 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@d3f86a106a0bac45b974a628896c90dbdf5c8093
         with:
-          name: trayvora-${{ github.sha }}-${{ github.run_attempt }}
+          name: trayvora-${{ github.sha }}-${{ github.run_id }}
           path: ${{ runner.temp }}/release
       - name: Publish exact tested artifact
         shell: pwsh
         env:
           GH_TOKEN: ${{ github.token }}
         run: ./scripts/ci/release.ps1 -ArtifactRoot "$env:RUNNER_TEMP/release"
+
