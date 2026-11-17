@@ -3,9 +3,9 @@ using VoiceAgent.Application;
 
 namespace VoiceAgent.Desktop;
 
-internal enum VoiceAction { Preview, Background, Send, Dictate, SharedChat, LongQuestions, ShortQuestions, WindowsAudio }
+internal enum VoiceAction { Preview, Background, Send, Dictate, SharedChat, LongQuestions, ShortQuestions, WindowsAudio, StopSpeech }
 
-internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Background, HotkeyShortcut Send, HotkeyShortcut? Dictation = null, HotkeyShortcut? Shared = null, HotkeyShortcut? Long = null, HotkeyShortcut? Short = null, HotkeyShortcut? Loopback = null)
+internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Background, HotkeyShortcut Send, HotkeyShortcut? Dictation = null, HotkeyShortcut? Shared = null, HotkeyShortcut? Long = null, HotkeyShortcut? Short = null, HotkeyShortcut? Loopback = null, HotkeyShortcut? StopSpeech = null)
 {
     public static VoiceHotkeys Default(HotkeyShortcut preview)
     {
@@ -33,6 +33,12 @@ internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Backg
             .First(key => key != Preview && key != Background && key != Send &&
                 key != DictationShortcut && key != SharedShortcut && key != LongShortcut && key != ShortShortcut);
 
+    /// <summary>Stops any reply being read aloud (Windows voice or OpenAI voice).</summary>
+    public HotkeyShortcut StopSpeechShortcut => StopSpeech ??
+        "SQWERTYUIOPADFGHJKLZXCVBNM".Select(Pick)
+            .First(key => key != Preview && key != Background && key != Send && key != DictationShortcut &&
+                key != SharedShortcut && key != LongShortcut && key != ShortShortcut && key != LoopbackShortcut);
+
     private static HotkeyShortcut Pick(char key) =>
         new(HotkeyModifiers.Ctrl | HotkeyModifiers.Alt | HotkeyModifiers.Shift, key);
 
@@ -46,6 +52,7 @@ internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Backg
         [VoiceAction.LongQuestions] = LongShortcut,
         [VoiceAction.ShortQuestions] = ShortShortcut,
         [VoiceAction.WindowsAudio] = LoopbackShortcut,
+        [VoiceAction.StopSpeech] = StopSpeechShortcut,
     };
 }
 

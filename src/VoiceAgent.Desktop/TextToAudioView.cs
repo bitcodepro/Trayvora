@@ -141,6 +141,12 @@ internal sealed class TextToAudioView : ToolPage, IDisposable
         if (!hasAudio) _audioInfo.Text = "Create audio to listen to it and save it.";
     }
 
+    /// <summary>Stops listening to the created audio, if it plays.</summary>
+    public void StopListening()
+    {
+        if (_playback is not null) StopPlayback();
+    }
+
     protected override bool OnEscape()
     {
         if (_run is not null) { _run.Cancel(); return true; }

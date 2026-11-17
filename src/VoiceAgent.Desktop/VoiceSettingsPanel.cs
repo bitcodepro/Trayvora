@@ -35,12 +35,14 @@ internal sealed class VoiceSettingsPanel : StackPanel
             "Same as above, but remembers only the last six questions while the app runs. Needs an OpenAI API key.");
         var windowsAudio = AddShortcut("Record computer sound and send", initial.LoopbackShortcut, OnShortcutChanged,
             "Records what plays on the computer (a video, a call) instead of the microphone, transcribes it and sends it like “Record with preview”.");
+        var stopSpeech = AddShortcut("Stop reading aloud", initial.StopSpeechShortcut, OnShortcutChanged,
+            "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.");
         var feedback = new TextBlock { TextWrapping = TextWrapping.Wrap };
         shortcutsChanged = () =>
         {
             try
             {
-                feedback.Text = apply(new VoiceHotkeys(preview(), background(), send(), dictate(), shared(), longQuestions(), shortQuestions(), windowsAudio())) ?? "Shortcuts saved.";
+                feedback.Text = apply(new VoiceHotkeys(preview(), background(), send(), dictate(), shared(), longQuestions(), shortQuestions(), windowsAudio(), stopSpeech())) ?? "Shortcuts saved.";
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {

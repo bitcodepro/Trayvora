@@ -64,6 +64,7 @@ Open **Settings…** from the tray to change all three shortcuts. Default shortc
 - **Ctrl+Shift+Z** starts and stops recording, then opens a compact editable preview.
 - **Ctrl+Alt+Shift+X** sends the current preview.
 - **Ctrl+Alt+Shift+Z** starts and stops background recording and sends the resulting text automatically.
+- **Ctrl+Alt+Shift+S** stops any reply being read aloud at once, whether the Windows voice or an OpenAI voice reads it (Text to audio playback too). Change it in Settings → Shortcuts → Stop reading aloud.
 
 **Show floating agent** places a speaker button on the desktop. Click it to start recording and again to stop and send. The red button indicates recording. The button is disabled while processing. Drag it using the right mouse button.
 

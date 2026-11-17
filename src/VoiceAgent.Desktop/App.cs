@@ -63,7 +63,7 @@ internal sealed class App : Avalonia.Application
             .AddSingleton(new WhisperModel(modelPath))
             .AddSingleton<ISpeechTranscriber, WhisperTranscriber>()
             .BuildServiceProvider();
-        string Instructions() => $"Preview {voiceKeys.Preview}  ·  Background {voiceKeys.Background}  ·  Send {voiceKeys.Send}  ·  Dictate {voiceKeys.DictationShortcut}  ·  Shared chat {voiceKeys.SharedShortcut}  ·  Long questions {voiceKeys.LongShortcut}  ·  Short questions {voiceKeys.ShortShortcut}  ·  Windows audio {voiceKeys.LoopbackShortcut}";
+        string Instructions() => $"Preview {voiceKeys.Preview}  ·  Background {voiceKeys.Background}  ·  Send {voiceKeys.Send}  ·  Dictate {voiceKeys.DictationShortcut}  ·  Shared chat {voiceKeys.SharedShortcut}  ·  Long questions {voiceKeys.LongShortcut}  ·  Short questions {voiceKeys.ShortShortcut}  ·  Windows audio {voiceKeys.LoopbackShortcut}  ·  Stop reading {voiceKeys.StopSpeechShortcut}";
         var message = string.Join(Environment.NewLine, new[] { Instructions(), settingsWarning, hotkeyWarning }
             .Where(text => !string.IsNullOrWhiteSpace(text)));
         var overlay = new VoiceOverlay(services.GetRequiredService<IAudioRecorder>(),
@@ -140,6 +140,9 @@ internal sealed class App : Avalonia.Application
                 case VoiceAction.WindowsAudio:
                     await overlay.ToggleRecordingAsync(VoiceShortcutMode.WindowsAudio);
                     break;
+                case VoiceAction.StopSpeech:
+                    overlay.StopSpeech();
+                    break;
                 case VoiceAction.Send:
                     await overlay.SendPreviewAsync();
                     break;
@@ -182,7 +185,7 @@ internal sealed class App : Avalonia.Application
             ("Record with preview", voiceKeys.Preview.ToString()), ("Record and send at once", voiceKeys.Background.ToString()),
             ("Send preview", voiceKeys.Send.ToString()), ("Dictate into Codex Desktop", voiceKeys.DictationShortcut.ToString()),
             ("Send to Codex Desktop chat", voiceKeys.SharedShortcut.ToString()), ("Deep question (GPT, long memory)", voiceKeys.LongShortcut.ToString()),
-            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Record computer sound and send", voiceKeys.LoopbackShortcut.ToString()),
+            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Record computer sound and send", voiceKeys.LoopbackShortcut.ToString()), ("Stop reading aloud", voiceKeys.StopSpeechShortcut.ToString()),
         ];
         overlay.SetShortcuts(ShortcutList());
         EventHandler openSettings = (_, _) =>
