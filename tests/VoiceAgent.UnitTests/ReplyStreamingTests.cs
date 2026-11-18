@@ -159,13 +159,27 @@ public sealed class ReplyStreamingTests
     }
 
     [Fact]
-    public void LongRepliesAreCutBeforeTheyReachTheOtherAgent()
+    public void LongMessagesReachTheOtherAgentWholeAsAFile()
     {
-        Assert.Equal("short", DiscussionWindow.ClipForAgent("short"));
-        var clipped = DiscussionWindow.ClipForAgent(new string('x', DiscussionWindow.MaxLength + 500));
-        Assert.StartsWith(new string('x', DiscussionWindow.MaxLength), clipped);
-        Assert.Contains("cut by Trayvora", clipped);
-        Assert.True(clipped.Length < 16000 - 1500);
+        var folder = Path.Combine(Path.GetTempPath(), "trayvora-attach-" + Guid.NewGuid().ToString("N"));
+        try
+        {
+            Assert.Equal("short", DiscussionWindow.ForAgent("short", folder, "Claude-to-Codex"));
+            Assert.False(Directory.Exists(folder));
+            var text = "Начало. " + new string('x', DiscussionWindow.MaxLength * 3) + " конец.";
+            var sent = DiscussionWindow.ForAgent(text, folder, "Claude-to-Codex");
+            var file = Assert.Single(Directory.GetFiles(folder, "*.txt"));
+            Assert.Equal(text, File.ReadAllText(file));
+            Assert.Contains(file, sent);
+            Assert.StartsWith("[Trayvora: this message is long", sent);
+            Assert.Contains("Начало.", sent);
+            // Room for Trayvora's routing instructions under Codex's 16,000-character turn limit.
+            Assert.True(sent.Length < DiscussionWindow.PreviewLength + 700);
+        }
+        finally
+        {
+            if (Directory.Exists(folder)) Directory.Delete(folder, recursive: true);
+        }
     }
 
     [Fact]

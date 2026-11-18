@@ -265,7 +265,8 @@ public sealed partial class CodexSession(string dataDirectory)
                         break;
                     case "item/agentMessage/delta" when data.GetProperty("turnId").GetString() == turnId:
                         var delta = data.GetProperty("delta").GetString() ?? "";
-                        if (delta.Length > 65536 - count)
+                        // Long replies are fine (they go on to the other agent as a file); this only stops a runaway stream.
+                        if (delta.Length > 4_000_000 - count)
                         {
                             return CodexTurnStatus.Unknown;
                         }

@@ -595,7 +595,8 @@ internal sealed class VoiceOverlay : Window
                 if (agent == DiscussionMember.Claude)
                 {
                     if (room.Claude is not { } chat) throw new IOException("Choose a Claude chat for this session first.");
-                    var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions);
+                    var attachments = Path.Combine(folder, "attachments", room.Id.ToString("N"));
+                    var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions, attachments);
                     // A chat Trayvora started is added to Claude Desktop's Code tab once Claude Code has saved it.
                     if (chat.Title.StartsWith("New Claude chat", StringComparison.Ordinal)) _ = Task.Run(() => ClaudeDesktopSessions.Register(chat));
                     return reply;

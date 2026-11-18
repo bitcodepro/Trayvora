@@ -403,8 +403,28 @@ internal sealed class DiscussionWindow(
         Recipient(text) is null ? text.Trim() : text[Address.Match(text).Length..].Trim();
 
     /// <summary>Long replies passed between agents are cut so the receiving agent accepts the turn.</summary>
-    internal static string ClipForAgent(string text) => text.Length <= MaxLength ? text
-        : text[..MaxLength] + "\n[… cut by Trayvora: the full text is in the session.]";
+    /// <summary>
+    /// The text an agent gets. Up to <see cref="MaxLength"/> characters it goes in the message; a longer one is saved
+    /// whole as a .txt file in <paramref name="folder"/> and the agent gets its path, a short preview and an
+    /// instruction to read the file, so nothing is cut and the message stays under Codex's per-turn limit.
+    /// </summary>
+    internal static string ForAgent(string text, string folder, string name)
+    {
+        if (text.Length <= MaxLength) return text;
+        Directory.CreateDirectory(folder);
+        var safe = string.Concat(name.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' ? c : '-'));
+        var stem = $"{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{safe}-{Guid.NewGuid():N}";
+        var file = Path.Combine(folder, stem[..Math.Min(60, stem.Length)] + ".txt");
+        File.WriteAllText(file, text, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        var preview = text[..Math.Min(PreviewLength, text.Length)].TrimEnd();
+        return $"[Trayvora: this message is long ({text.Length:N0} characters), so the full text is attached as a file. " +
+            $"Read the whole file before you answer: {file}]\n\nBeginning of the message:\n{preview}\n[… continues in the file]";
+    }
+
+    internal const int PreviewLength = 1500;
+
+    /// <summary>Messages past this size are refused (they would make the session file too large to keep).</summary>
+    internal const int MaxTypedLength = 2_000_000;
 
     /// <summary>Text the agent receives: only this message, labelled with its sender and how to hand off.</summary>
     internal static string Envelope(DiscussionRoom room, DiscussionMember to, DiscussionMember from, string text,
@@ -1103,11 +1123,11 @@ internal sealed class DiscussionWindow(
     private void UpdateComposer()
     {
         var length = _editor.Text?.Length ?? 0;
-        _counter.Text = length == 0 ? "" : $"{length:N0} / {MaxLength:N0}";
-        _counter.Foreground = length > MaxLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
+        _counter.Text = length == 0 ? "" : length > MaxLength ? $"{length:N0} · sent as a .txt file" : $"{length:N0}";
+        _counter.Foreground = length > MaxTypedLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
         var idle = CurrentRun is null;
         var open = _room is not null;
-        _send.IsEnabled = idle && length > 0 && length <= MaxLength && !string.IsNullOrWhiteSpace(_editor.Text);
+        _send.IsEnabled = idle && length > 0 && length <= MaxTypedLength && !string.IsNullOrWhiteSpace(_editor.Text);
         _pause.IsVisible = !idle;
         _delete.IsEnabled = idle && open;
         _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle;
@@ -1243,9 +1263,9 @@ internal sealed class DiscussionWindow(
     {
         if (CurrentRun is not null || string.IsNullOrWhiteSpace(_editor.Text)) return;
         var text = _editor.Text.Trim();
-        if (text.Length > MaxLength)
+        if (text.Length > MaxTypedLength)
         {
-            _status.Text = $"Keep each message under {MaxLength:N0} characters.";
+            _status.Text = $"Keep each message under {MaxTypedLength:N0} characters.";
             return;
         }
         if (_room is null) NewRoom();
@@ -1362,7 +1382,8 @@ internal sealed class DiscussionWindow(
             string? answer;
             try
             {
-                answer = await send(agent, Envelope(room, agent, delivery.From, ClipForAgent(delivery.Text), delivery.ForwardedFrom, delivery.Relay, delivery.Discuss),
+                var body = await Task.Run(() => ForAgent(delivery.Text, Path.Combine(store.Directory, "attachments", room.Id.ToString("N")), $"{delivery.From}-to-{agent}"));
+                answer = await send(agent, Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss),
                     room, stream, cancel.Token);
             }
             catch (Exception error)
@@ -1375,7 +1396,8 @@ internal sealed class DiscussionWindow(
                     Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes, Interrupted: true));
                 if (!cancel.IsCancellationRequested)
                 {
-                    var reason = error is IOException ? error.Message : "The request failed. Check the selected chat, profile and sign-in.";
+                    var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
+                        ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
                     Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
                     ErrorLog.Write(error);
                 }

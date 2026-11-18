@@ -223,7 +223,7 @@ internal static class ClaudeChats
     /// <paramref name="stream"/> receives the text as it is written and the tool in use.
     /// </summary>
     public static async Task<string> SendAsync(string executable, string profile, ClaudeChat chat, string prompt, CancellationToken ct, ReplyStream? stream = null,
-        ClaudePermissions permissions = ClaudePermissions.Ask)
+        ClaudePermissions permissions = ClaudePermissions.Ask, string? readableFolder = null)
     {
         executable = FindExecutable(executable);
 
@@ -242,6 +242,12 @@ internal static class ClaudeChats
         // A chat created in Trayvora has no file until its first message; that message starts it under the same ID.
         var mode = new[] { Exists(profile, chat.Id) ? "--resume" : "--session-id", chat.Id.ToString() };
         foreach (var arg in mode) start.ArgumentList.Add(arg);
+        // Long messages arrive as a .txt file outside the chat folder; let Claude read that folder too.
+        if (readableFolder is not null && Directory.Exists(readableFolder))
+        {
+            start.ArgumentList.Add("--add-dir");
+            start.ArgumentList.Add(readableFolder);
+        }
         start.Environment["CLAUDE_CONFIG_DIR"] = profile;
         // The Trayvora launcher redirects these folders for its own Codex profile. Claude Code must see the
         // user's real folders so it finds the sign-in and settings it uses outside Trayvora.
