@@ -215,9 +215,8 @@ public sealed class DesktopEventsTests
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             PumpUntil(() => Stored().Any(item => item.Title == "Other topic" && item.Messages.Count >= 2));
             Assert.Equal(2, Stored().Count);
-            view.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "First question")
-                .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Pump(Task.Delay(100));
+            WaitForButton(view, "First question").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.GetLogicalDescendants().OfType<SelectableTextBlock>().Any(block => block.Text == "Second question"));
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Second question");
             Assert.DoesNotContain(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Other topic");
 
@@ -717,6 +716,22 @@ public sealed class DesktopEventsTests
     {
         var deadline = DateTime.UtcNow.AddSeconds(8);
         while (!done() && DateTime.UtcNow < deadline) Pump(Task.Delay(20));
+    }
+
+    /// <summary>
+    /// Waits until exactly one button with this accessible name is in the view. The session list is rebuilt on the UI
+    /// loop after a save, so the button may appear later than the file on disk. On timeout, lists the buttons it saw.
+    /// </summary>
+    private static Button WaitForButton(Control view, string name)
+    {
+        Button[] Matches() => view.GetLogicalDescendants().OfType<Button>().Where(button => AutomationProperties.GetName(button) == name).ToArray();
+        PumpUntil(() => Matches().Length == 1);
+        var found = Matches();
+        if (found.Length == 1) return found[0];
+        var seen = view.GetLogicalDescendants().OfType<Button>()
+            .Select(button => AutomationProperties.GetName(button) ?? button.Content?.ToString() ?? "(unnamed)");
+        throw new Xunit.Sdk.XunitException(
+            $"Expected one button \"{name}\", found {found.Length}. Buttons in the view: {string.Join(" | ", seen)}");
     }
 
     private static void Pump(Task task)
