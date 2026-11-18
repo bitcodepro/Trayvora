@@ -152,21 +152,27 @@ internal sealed class VoiceHotkeyBindings(Func<HotkeyShortcut, IGlobalHotkeyServ
 
 internal static class SettingsFile
 {
-    public static T? Read<T>(string file) where T : class
+    public const int DefaultMaxBytes = 16384;
+
+    /// <summary>Reads a settings file; one larger than <paramref name="maxBytes"/> is treated as missing.</summary>
+    public static T? Read<T>(string file, int maxBytes = DefaultMaxBytes) where T : class
     {
         if (!File.Exists(file)) return null;
         using var stream = File.OpenRead(file);
-        return stream.Length <= 16384 ? JsonSerializer.Deserialize<T>(stream) : null;
+        return stream.Length <= maxBytes ? JsonSerializer.Deserialize<T>(stream) : null;
     }
 
-    public static void Write<T>(string file, T value)
+    /// <summary>Writes a settings file atomically; refuses (IOException) what <see cref="Read"/> could not read back.</summary>
+    public static void Write<T>(string file, T value, int maxBytes = DefaultMaxBytes)
     {
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(value);
+        if (bytes.Length > maxBytes) throw new IOException($"The settings are too large to save ({bytes.Length:N0} bytes, limit {maxBytes:N0}).");
         var folder = Path.GetDirectoryName(file)!;
         Directory.CreateDirectory(folder);
         var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            File.WriteAllBytes(temporary, JsonSerializer.SerializeToUtf8Bytes(value));
+            File.WriteAllBytes(temporary, bytes);
             File.Move(temporary, file, overwrite: true);
         }
         finally

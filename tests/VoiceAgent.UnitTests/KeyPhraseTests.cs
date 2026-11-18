@@ -42,6 +42,45 @@ public sealed class KeyPhraseTests : IDisposable
     }
 
     [Fact]
+    public void FullListsSurviveARestartWithTheBuiltInSwitch()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-phrases-");
+        try
+        {
+            KeyPhrases.Load(folder.FullName);
+            string Line(int i, string agent) => $"{i:D3} " + new string('ж', KeyPhrases.MaxLength - 14) + " " + agent;
+            var forward = Enumerable.Range(0, KeyPhrases.MaxLines).Select(i => Line(i, "Клоду")).ToArray();
+            var discuss = Enumerable.Range(0, KeyPhrases.MaxLines).Select(i => Line(i, "Кодексом")).ToArray();
+            KeyPhrases.Save(new KeyPhraseOptions(forward, discuss, BuiltIn: false));
+            Assert.True(new FileInfo(Path.Combine(folder.FullName, "key-phrases.json")).Length > SettingsFile.DefaultMaxBytes);
+
+            KeyPhrases.Use(new KeyPhraseOptions());
+            KeyPhrases.Load(folder.FullName);
+            Assert.False(KeyPhrases.Current.BuiltIn);
+            Assert.Equal(forward, KeyPhrases.Current.ForwardLines);
+            Assert.Equal(discuss, KeyPhrases.Current.DiscussLines);
+        }
+        finally
+        {
+            KeyPhrases.Load(null);
+            folder.Delete(recursive: true);
+        }
+    }
+
+    [Fact]
+    public void SettingsThatCouldNotBeReadBackAreNotWritten()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-settings-");
+        try
+        {
+            var file = Path.Combine(folder.FullName, "big.json");
+            Assert.Throws<IOException>(() => SettingsFile.Write(file, new string('x', SettingsFile.DefaultMaxBytes)));
+            Assert.False(File.Exists(file));
+        }
+        finally { folder.Delete(recursive: true); }
+    }
+
+    [Fact]
     public void DefaultListsShowTheBuiltInExamplesAndADamagedFileFallsBack()
     {
         Assert.Equal(RelayPhrases.Examples, new KeyPhraseOptions().ForwardLines);

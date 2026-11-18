@@ -19,6 +19,12 @@ internal sealed record KeyPhraseOptions(string[]? Forward = null, string[]? Disc
 internal static partial class KeyPhrases
 {
     public const int MaxLines = 200, MaxLength = 120;
+
+    /// <summary>
+    /// Room for both full lists even when every character is escaped in JSON (\uXXXX, 6 bytes): 2 × 200 × 120 × 6 ≈ 288 KB.
+    /// The general 16 KB settings limit would drop a long list on the next start and reset the built-in switch with it.
+    /// </summary>
+    internal const int MaxFileBytes = 1024 * 1024;
     private static string? _file;
 
     public static KeyPhraseOptions Current { get; private set; } = new();
@@ -35,7 +41,7 @@ internal static partial class KeyPhrases
 
     internal static KeyPhraseOptions Read(string? file)
     {
-        try { return (file is null ? null : SettingsFile.Read<KeyPhraseOptions>(file)) is { } saved ? Clean(saved) : new(); }
+        try { return (file is null ? null : SettingsFile.Read<KeyPhraseOptions>(file, MaxFileBytes)) is { } saved ? Clean(saved) : new(); }
         catch (Exception error) when (error is System.Text.Json.JsonException or IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
         { return new(); }
     }
@@ -43,7 +49,7 @@ internal static partial class KeyPhrases
     public static void Save(KeyPhraseOptions options)
     {
         var clean = Clean(options);
-        if (_file is not null) SettingsFile.Write(_file, clean);
+        if (_file is not null) SettingsFile.Write(_file, clean, MaxFileBytes);
         Use(clean);
     }
 
