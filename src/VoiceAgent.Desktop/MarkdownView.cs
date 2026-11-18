@@ -37,20 +37,91 @@ internal sealed class MarkdownView : StackPanel
     private static readonly Cursor Hand = new(StandardCursorType.Hand);
 
     private readonly List<(string Source, Control Control)> _blocks = [];
-    private readonly double _size;
+    private readonly double _baseSize;
+    private double _size;
     private string? _text;
 
+    /// <param name="fontSize">Size at the default theme; the Theme setting for chat text shifts it.</param>
     public MarkdownView(double fontSize = 13.5)
     {
-        _size = fontSize;
+        _baseSize = fontSize;
+        _size = ThemedSize();
         Spacing = 8;
+        AttachedToVisualTree += (_, _) => { Appearance.Changed += Restyle; Restyle(); };
+        DetachedFromVisualTree += (_, _) => Appearance.Changed -= Restyle;
+    }
+
+    private double ThemedSize() => Math.Clamp(_baseSize + Appearance.ChatSize - Appearance.DefaultChatSize, Appearance.MinSize, Appearance.MaxSize);
+
+    /// <summary>Redraws with the new chat text size.</summary>
+    private void Restyle()
+    {
+        var size = ThemedSize();
+        if (size == _size) return;
+        _size = size;
+        var text = _text;
+        _text = null;
+        Truncate(0);
+        if (text is not null) Show(text);
     }
 
     /// <summary>Number of top-level blocks built by the last <see cref="Show"/> calls (for tests of incremental updates).</summary>
     internal int Rebuilt { get; private set; }
 
+    private TextBox? _selectBox;
+
+    /// <summary>True while the message is shown as one plain text box where any part can be selected.</summary>
+    public bool Selecting => _selectBox is not null;
+
+    /// <summary>Raised when select mode starts or ends, so the toolbar can update its button.</summary>
+    public event Action? SelectingChanged;
+
+    /// <summary>
+    /// Switches between the formatted view and one read-only text box with the whole message. Formatted text is split
+    /// into blocks (paragraphs, lists, code), and a selection cannot cross from one block to the next; the box can.
+    /// </summary>
+    public void ToggleSelecting(bool selectAll = false)
+    {
+        if (_selectBox is { } open)
+        {
+            Children.Remove(open);
+            _selectBox = null;
+            foreach (var (_, control) in _blocks) control.IsVisible = true;
+            SelectingChanged?.Invoke();
+            return;
+        }
+        var box = new TextBox
+        {
+            Text = _text ?? "", IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0),
+            FontSize = _size, MinHeight = 0, CaretBrush = Brushes.Transparent,
+            // Set here so the Theme setting for typed text does not restyle a message.
+            FontFamily = Appearance.Font(Appearance.Current.ChatLook), Foreground = Appearance.Brush(Appearance.Current.ChatLook),
+            LineHeight = LineHeight(_size),
+        };
+        box.Classes.Add("bare");
+        box.Classes.Add("message-select");
+        Avalonia.Automation.AutomationProperties.SetName(box, "Message text");
+        box.KeyDown += (_, args) =>
+        {
+            if (args.Key != Key.Escape) return;
+            args.Handled = true;
+            ToggleSelecting();
+        };
+        foreach (var (_, control) in _blocks) control.IsVisible = false;
+        _selectBox = box;
+        Children.Add(box);
+        SelectingChanged?.Invoke();
+        Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+        {
+            box.Focus();
+            if (selectAll) box.SelectAll();
+        }, Avalonia.Threading.DispatcherPriority.Input);
+    }
+
     public void Show(string text)
     {
+        if (_selectBox is { } selecting && text != _text) selecting.Text = text;
         if (text == _text) return;
         _text = text;
         var document = Markdown.Parse(text, Pipeline);
@@ -67,7 +138,8 @@ internal sealed class MarkdownView : StackPanel
             Truncate(index);
             var control = Render(block);
             _blocks.Add((source, control));
-            Children.Add(control);
+            control.IsVisible = _selectBox is null;
+            Children.Insert(_selectBox is { } box ? Children.IndexOf(box) : Children.Count, control);
             Rebuilt++;
             index++;
         }

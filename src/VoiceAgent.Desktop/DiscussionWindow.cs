@@ -24,7 +24,7 @@ internal sealed record CodexChatOption(Guid Id, string Title, bool Desktop)
 /// </summary>
 internal sealed class DiscussionWindow(
     DiscussionStore store,
-    Func<DiscussionMember, string, DiscussionRoom, ReplyStream, CancellationToken, Task<string?>> send,
+    Func<DiscussionMember, string, DiscussionRoom, ReplyStream, IReadOnlyList<string>, CancellationToken, Task<string?>> send,
     Func<IReadOnlyList<Conversation>> codexChats,
     Func<CancellationToken, Task<IReadOnlyList<DesktopChat>>>? desktopChats,
     Func<Task<IReadOnlyList<ClaudeChat>>> claudeChats,
@@ -56,7 +56,7 @@ internal sealed class DiscussionWindow(
     private const double BubbleWidth = 860;
     private const string OwnThreadTitle = "Own Trayvora thread for this session";
 
-    private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null);
+    private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null, IReadOnlyList<string>? Files = null);
 
     /// <summary>How many times the lead may hand the plan to the partner (Settings → Sessions, default 5).</summary>
     private int DiscussExchanges => Math.Clamp(discussRounds?.Invoke() ?? DiscussionOptions.DefaultRounds, DiscussionOptions.MinRounds, DiscussionOptions.MaxRounds);
@@ -70,12 +70,13 @@ internal sealed class DiscussionWindow(
     }
 
     /// <summary>The bubble of a reply that is still being written.</summary>
-    private sealed class LiveBubble(ReplyStream stream, Control row, MarkdownView view, TextBlock activity, TextBlock waiting)
+    private sealed class LiveBubble(ReplyStream stream, Control row, MarkdownView view, TextBlock activity, TextBlock waiting, TextBlock steps)
     {
         public ReplyStream Stream { get; } = stream;
         public Control Row { get; } = row;
         public MarkdownView View { get; } = view;
         public TextBlock Activity { get; } = activity;
+        public TextBlock Steps { get; } = steps;
         public TextBlock Waiting { get; } = waiting;
         public DateTime Started { get; } = DateTime.Now;
         public int Version { get; set; } = -1;
@@ -135,6 +136,13 @@ internal sealed class DiscussionWindow(
         VerticalContentAlignment = VerticalAlignment.Center,
     };
     private readonly Button _send = new() { Content = new TextBlock { Text = TrayvoraTheme.IconSend, FontFamily = IconFont, FontSize = 16 } };
+    private readonly Button _attachButton = new() { Content = new TextBlock { Text = "\uE723", FontFamily = IconFont, FontSize = 15 } };
+    private ComposerAttachments? _attachments;
+    private ComposerAttachments Attachments => _attachments ??= new ComposerAttachments(
+        () => _room is { } room ? AttachmentsFolder(room) : null);
+
+    private string AttachmentsFolder(DiscussionRoom room) => Path.Combine(store.Directory, "attachments", room.Id.ToString("N"));
+    internal const double EditorMinHeight = 44, EditorDefaultMaxHeight = 160;
     private readonly Button _pause = new() { Content = "Pause", IsVisible = false };
     private readonly Button _mic = new();
     private readonly ComboBox _recognizer = new() { ItemsSource = new[] { "Recognition: default", "Recognition: Whisper", "Recognition: OpenAI" }, SelectedIndex = 0, IsVisible = false };
@@ -402,8 +410,31 @@ internal sealed class DiscussionWindow(
         Recipient(text) is null ? text.Trim() : text[Address.Match(text).Length..].Trim();
 
     /// <summary>Long replies passed between agents are cut so the receiving agent accepts the turn.</summary>
-    internal static string ClipForAgent(string text) => text.Length <= MaxLength ? text
-        : text[..MaxLength] + "\n[… cut by Trayvora: the full text is in the session.]";
+    /// <summary>
+    /// The text an agent gets. Up to <see cref="MaxLength"/> characters it goes in the message; a longer one is saved
+    /// whole as a .txt file in <paramref name="folder"/> and the agent gets its path, a short preview and an
+    /// instruction to read the file, so nothing is cut and the message stays under Codex's per-turn limit.
+    /// </summary>
+    internal static string ForAgent(string text, string folder, string name) => ForAgentWithFile(text, folder, name).Text;
+
+    /// <summary>The text an agent receives and, for a long message, the file holding the whole of it.</summary>
+    internal static (string Text, string? File) ForAgentWithFile(string text, string folder, string name)
+    {
+        if (text.Length <= MaxLength) return (text, null);
+        Directory.CreateDirectory(folder);
+        var safe = string.Concat(name.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' ? c : '-'));
+        var stem = $"{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{safe}-{Guid.NewGuid():N}";
+        var file = Path.Combine(folder, stem[..Math.Min(60, stem.Length)] + ".txt");
+        File.WriteAllText(file, text, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
+        var preview = text[..Math.Min(PreviewLength, text.Length)].TrimEnd();
+        return ($"[Trayvora: this message is long ({text.Length:N0} characters), so the full text is attached as a file. " +
+            $"Read the whole file before you answer: {file}]\n\nBeginning of the message:\n{preview}\n[… continues in the file]", file);
+    }
+
+    internal const int PreviewLength = 1500;
+
+    /// <summary>Messages past this size are refused (they would make the session file too large to keep).</summary>
+    internal const int MaxTypedLength = 2_000_000;
 
     /// <summary>Text the agent receives: only this message, labelled with its sender and how to hand off.</summary>
     internal static string Envelope(DiscussionRoom room, DiscussionMember to, DiscussionMember from, string text,
@@ -623,15 +654,24 @@ internal sealed class DiscussionWindow(
         Grid.SetColumn(_counter, 1);
         bottom.Children.AddRange([toRow, _counter]);
 
-        var input = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 8 };
+        var input = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"), ColumnSpacing = 8 };
         var templates = Templates.Button(() => _editor.Text, text => PromptTemplates.InsertInto(_editor, text));
         templates.VerticalAlignment = VerticalAlignment.Bottom;
         _send.VerticalAlignment = VerticalAlignment.Bottom;
         _mic.VerticalAlignment = VerticalAlignment.Bottom;
-        Grid.SetColumn(templates, 1);
-        Grid.SetColumn(_mic, 2);
-        Grid.SetColumn(_send, 3);
-        input.Children.AddRange([_editor, templates, _mic, _send]);
+        _attachButton.VerticalAlignment = VerticalAlignment.Bottom;
+        TrayvoraTheme.Ghost(_attachButton);
+        ToolTip.SetTip(_attachButton, "Attach files (or drop them here, or paste a picture with Ctrl+V)");
+        Avalonia.Automation.AutomationProperties.SetName(_attachButton, "Attach files");
+        _attachButton.Click += async (_, _) => await ChooseAttachmentsAsync();
+        Grid.SetColumn(_attachButton, 1);
+        Grid.SetColumn(templates, 2);
+        Grid.SetColumn(_mic, 3);
+        Grid.SetColumn(_send, 4);
+        input.Children.AddRange([_editor, _attachButton, templates, _mic, _send]);
+        Attachments.Problem += problem => _status.Text = problem;
+        Attachments.Changed += UpdateComposer;
+        Attachments.HandlePaste(_editor);
         _voiceMode.IsVisible = dictate is not null;
         _voiceMode.FontSize = 11.5;
         _voiceMode.Padding = new Thickness(10, 3);
@@ -655,15 +695,68 @@ internal sealed class DiscussionWindow(
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(18),
             Padding = new Thickness(14, 10, 10, 10),
-            Child = new StackPanel { Spacing = 8, Children = { input, _level, bottom } },
+            Child = new StackPanel { Spacing = 8, Children = { ResizeGrip(), Attachments.Chips, input, _level, bottom } },
         };
         _editor.GotFocus += (_, _) => box.BorderBrush = TrayvoraTheme.Accent;
         _editor.LostFocus += (_, _) => box.BorderBrush = TrayvoraTheme.Border;
+        Attachments.AcceptDrops(this, on => box.BorderBrush = on ? TrayvoraTheme.Accent : _editor.IsFocused ? TrayvoraTheme.Accent : TrayvoraTheme.Border);
         return new Border
         {
             Padding = new Thickness(20, 6, 20, 16),
             Child = new StackPanel { Spacing = 6, Children = { _status, box } },
         };
+    }
+
+    /// <summary>A handle above the text box: drag it up or down to make the box taller or shorter; double-click resets.</summary>
+    private Control ResizeGrip()
+    {
+        var grip = new Border
+        {
+            Height = 10, Margin = new Thickness(0, -6, 0, -4), Background = Brushes.Transparent,
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth),
+            Child = new Border { Width = 36, Height = 4, CornerRadius = new CornerRadius(2), Background = TrayvoraTheme.Border, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center },
+        };
+        ToolTip.SetTip(grip, "Drag to resize the text box · double-click to reset");
+        double? startY = null;
+        double startHeight = 0;
+        grip.PointerPressed += (_, args) =>
+        {
+            if (!args.GetCurrentPoint(grip).Properties.IsLeftButtonPressed) return;
+            if (args.ClickCount == 2)
+            {
+                _editor.Height = double.NaN;
+                _editor.MaxHeight = EditorDefaultMaxHeight;
+                startY = null;
+                args.Handled = true;
+                return;
+            }
+            startY = args.GetPosition(this).Y;
+            startHeight = _editor.Bounds.Height;
+            args.Pointer.Capture(grip);
+            args.Handled = true;
+        };
+        grip.PointerMoved += (_, args) =>
+        {
+            if (startY is not { } from) return;
+            var limit = Math.Max(EditorMinHeight, Bounds.Height * 0.65);
+            var height = EditorHeight(startHeight, from - args.GetPosition(this).Y, limit);
+            _editor.MaxHeight = double.PositiveInfinity;
+            _editor.Height = height;
+        };
+        grip.PointerReleased += (_, args) => { startY = null; args.Pointer.Capture(null); };
+        grip.PointerCaptureLost += (_, _) => startY = null;
+        return grip;
+    }
+
+    /// <summary>The new text box height after dragging <paramref name="up"/> pixels upwards, kept between the minimum and <paramref name="limit"/>.</summary>
+    internal static double EditorHeight(double start, double up, double limit) => Math.Clamp(start + up, EditorMinHeight, Math.Max(EditorMinHeight, limit));
+
+    private async Task ChooseAttachmentsAsync()
+    {
+        if (_room is null) NewRoom();
+        if (TopLevel.GetTopLevel(this)?.StorageProvider is not { } storage) return;
+        var files = await storage.OpenFilePickerAsync(new Avalonia.Platform.Storage.FilePickerOpenOptions { Title = "Attach files", AllowMultiple = true });
+        Attachments.AddFiles(files.Select(file => Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(file)).OfType<string>());
     }
 
     // ── Sessions ─────────────────────────────────────────────────────────
@@ -747,6 +840,15 @@ internal sealed class DiscussionWindow(
             TrayvoraTheme.SetSelected(row, ReferenceEquals(room, _room));
             Avalonia.Automation.AutomationProperties.SetName(row, room.Title);
             row.Click += (_, _) => { if (!ReferenceEquals(room, _room)) Open(room); };
+            var rename = new MenuItem { Header = "Rename", InputGesture = new KeyGesture(Key.F2) };
+            rename.Click += (_, _) => StartRename(room, row);
+            row.ContextMenu = new ContextMenu { Items = { rename } };
+            row.KeyDown += (_, args) =>
+            {
+                if (args.Key != Key.F2) return;
+                args.Handled = true;
+                StartRename(room, row);
+            };
             _roomRows.Children.Add(row);
         }
         _roomsEmpty.IsVisible = _items.Count == 0;
@@ -837,6 +939,39 @@ internal sealed class DiscussionWindow(
                 Dispatcher.UIThread.Post(() => _status.Text = failure);
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+    }
+
+    /// <summary>Turns a session row into a text box: Enter or leaving it saves the name, Escape keeps the old one.</summary>
+    private void StartRename(DiscussionRoom room, Button row)
+    {
+        var box = new TextBox { Text = room.Title, MaxLength = 120, MinWidth = 120 };
+        TrayvoraTheme.StyleControls(box);
+        Avalonia.Automation.AutomationProperties.SetName(box, "Session name");
+        var done = false;
+        void Finish(bool save)
+        {
+            if (done) return;
+            done = true;
+            var title = (box.Text ?? "").Trim();
+            if (save && title.Length > 0 && title != room.Title)
+            {
+                room.Title = title;
+                Persist(room);
+                if (ReferenceEquals(room, _room)) _title.Text = title;
+            }
+            RefreshListNow();
+        }
+        box.KeyDown += (_, args) =>
+        {
+            if (args.Key == Key.Enter) { args.Handled = true; Finish(true); }
+            else if (args.Key == Key.Escape) { args.Handled = true; Finish(false); }
+        };
+        box.LostFocus += (_, _) => Finish(true);
+        // Swap the row for the box (not inside the button, which would treat Space and Enter as clicks).
+        var index = _roomRows.Children.IndexOf(row);
+        if (index < 0) return;
+        _roomRows.Children[index] = box;
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => { box.Focus(); box.SelectAll(); }, Avalonia.Threading.DispatcherPriority.Input);
     }
 
     private void RenameRoom()
@@ -989,9 +1124,9 @@ internal sealed class DiscussionWindow(
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0),
         };
         ToolTip.SetTip(hint, "Pass the reply on without the ⇄ toggle: end your message with a phrase such as\n"
-            + string.Join("\n", RelayPhrases.Examples.Select(example => "  • " + example))
+            + string.Join("\n", KeyPhrases.Current.ForwardLines.Select(example => "  • " + example))
             + "\n\nLet them work it out together and send you one final answer:\n"
-            + string.Join("\n", RelayPhrases.DiscussExamples.Select(example => "  • " + example))
+            + string.Join("\n", KeyPhrases.Current.DiscussLines.Select(example => "  • " + example))
             + "\n\nWorks for typed and dictated messages to Codex or Claude.");
         Avalonia.Automation.AutomationProperties.SetName(hint, "Relay phrases");
         return hint;
@@ -1060,11 +1195,12 @@ internal sealed class DiscussionWindow(
     private void UpdateComposer()
     {
         var length = _editor.Text?.Length ?? 0;
-        _counter.Text = length == 0 ? "" : $"{length:N0} / {MaxLength:N0}";
-        _counter.Foreground = length > MaxLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
+        _counter.Text = length == 0 ? "" : length > MaxLength ? $"{length:N0} · sent as a .txt file" : $"{length:N0}";
+        _counter.Foreground = length > MaxTypedLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
         var idle = CurrentRun is null;
         var open = _room is not null;
-        _send.IsEnabled = idle && length > 0 && length <= MaxLength && !string.IsNullOrWhiteSpace(_editor.Text);
+        var files = _attachments?.Files.Count ?? 0;
+        _send.IsEnabled = idle && length <= MaxTypedLength && (files > 0 || (length > 0 && !string.IsNullOrWhiteSpace(_editor.Text)));
         _pause.IsVisible = !idle;
         _delete.IsEnabled = idle && open;
         _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle;
@@ -1198,11 +1334,13 @@ internal sealed class DiscussionWindow(
 
     private async Task PostAsync()
     {
-        if (CurrentRun is not null || string.IsNullOrWhiteSpace(_editor.Text)) return;
-        var text = _editor.Text.Trim();
-        if (text.Length > MaxLength)
+        var attached = Attachments.Files.ToArray();
+        if (CurrentRun is not null || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
+        var text = (_editor.Text ?? "").Trim();
+        if (text.Length == 0) text = attached.All(ComposerAttachments.IsImage) ? "Look at the attached image(s)." : "Look at the attached file(s).";
+        if (text.Length > MaxTypedLength)
         {
-            _status.Text = $"Keep each message under {MaxLength:N0} characters.";
+            _status.Text = $"Keep each message under {MaxTypedLength:N0} characters.";
             return;
         }
         if (_room is null) NewRoom();
@@ -1241,10 +1379,20 @@ internal sealed class DiscussionWindow(
             room.Title = DiscussionStore.TitleFrom(text);
             _title.Text = room.Title;
         }
+        // Files attached while another session was open are moved into this session's folder first.
+        try { attached = [.. Attachments.MoveInto(AttachmentsFolder(room))]; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            _status.Text = "Could not move the attachments into this session: " + error.Message;
+            return;
+        }
         _editor.Clear();
+        text = ComposerAttachments.WithFiles(text, attached);
+        sent = ComposerAttachments.WithFiles(sent, attached);
+        Attachments.Clear();
         Append(room, new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
             RelayTo: relayTo, DiscussWith: discuss?.Partner));
-        await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss)));
+        await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss, attached)));
     }
 
     private async Task ForwardAsync(DiscussionMessage message, DiscussionMember target)
@@ -1257,7 +1405,8 @@ internal sealed class DiscussionWindow(
         }
         if (!Ready(room, [target])) return;
         Append(room, new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender));
-        await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender)]);
+        await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender,
+            Files: ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room)))]);
     }
 
     private bool Ready(DiscussionRoom room, IEnumerable<DiscussionMember> targets)
@@ -1319,8 +1468,11 @@ internal sealed class DiscussionWindow(
             string? answer;
             try
             {
-                answer = await send(agent, Envelope(room, agent, delivery.From, ClipForAgent(delivery.Text), delivery.ForwardedFrom, delivery.Relay, delivery.Discuss),
-                    room, stream, cancel.Token);
+                var (body, file) = await Task.Run(() => ForAgentWithFile(delivery.Text, AttachmentsFolder(room), $"{delivery.From}-to-{agent}"));
+                // The agent gets the files themselves, not paths parsed back out of the text.
+                IReadOnlyList<string> files = file is null ? delivery.Files ?? [] : [file, .. delivery.Files ?? []];
+                answer = await send(agent, Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss),
+                    room, stream, files, cancel.Token);
             }
             catch (Exception error)
             {
@@ -1332,7 +1484,8 @@ internal sealed class DiscussionWindow(
                     Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes, Interrupted: true));
                 if (!cancel.IsCancellationRequested)
                 {
-                    var reason = error is IOException ? error.Message : "The request failed. Check the selected chat, profile and sign-in.";
+                    var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
+                        ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
                     Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
                     ErrorLog.Write(error);
                 }
@@ -1475,6 +1628,7 @@ internal sealed class DiscussionWindow(
     {
         var view = new MarkdownView { IsVisible = false };
         var waiting = new TextBlock { Text = "•", FontSize = 18, Foreground = MemberColor(agent), LetterSpacing = 2 };
+        var steps = new TextBlock { FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, IsVisible = false, LineHeight = 17 };
         var activity = new TextBlock { FontSize = 11, Foreground = TrayvoraTheme.Muted, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         var meta = new StackPanel
         {
@@ -1486,7 +1640,7 @@ internal sealed class DiscussionWindow(
             Background = TrayvoraTheme.Surface, BorderBrush = MemberColor(agent), BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(4, 14, 14, 14), Padding = new Thickness(14, 10), MaxWidth = BubbleWidth,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Child = new StackPanel { Children = { waiting, view } },
+            Child = new StackPanel { Spacing = 6, Children = { steps, waiting, view } },
         };
         var avatar = TrayvoraTheme.Avatar(Initials(agent), MemberColor(agent), 32);
         avatar.VerticalAlignment = VerticalAlignment.Top;
@@ -1494,7 +1648,7 @@ internal sealed class DiscussionWindow(
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(0, 0, 80, 0) };
         Grid.SetColumn(column, 1);
         row.Children.AddRange([avatar, column]);
-        _live[agent] = new LiveBubble(stream, row, view, activity, waiting);
+        _live[agent] = new LiveBubble(stream, row, view, activity, waiting, steps);
         _messages.Children.Add(row);
         UpdateLive();
         ScrollToEnd();
@@ -1511,6 +1665,14 @@ internal sealed class DiscussionWindow(
             var doing = activity ?? (text.Length == 0 ? "is working" : "is writing");
             bubble.Activity.Text = seconds < 1 ? doing + "…" : $"{doing}… · {seconds} s";
             if (text.Length == 0) bubble.Waiting.Text = new string('•', 1 + (int)(DateTime.Now - bubble.Started).TotalMilliseconds / 380 % 3);
+            var (recent, total) = bubble.Stream.Steps;
+            var steps = ReplyStream.FormatSteps(recent, total, running: activity is not null);
+            if (bubble.Steps.Text != steps)
+            {
+                bubble.Steps.Text = steps;
+                bubble.Steps.IsVisible = steps.Length > 0;
+                grew = true;
+            }
             if (version == bubble.Version) continue;
             bubble.Version = version;
             bubble.Waiting.IsVisible = text.Length == 0;
@@ -1652,7 +1814,7 @@ internal sealed class DiscussionWindow(
         Grid.SetColumn(avatar, mine ? 1 : 0);
         Grid.SetColumn(column, mine ? 0 : 1);
         row.Children.AddRange([avatar, column]);
-        AttachTools(row, tools, message);
+        AttachTools(row, tools, message, bubble.Child as MarkdownView);
         Place(message, row, scroll, insertAt);
     }
 
@@ -1678,12 +1840,12 @@ internal sealed class DiscussionWindow(
         HorizontalAlignment = alignRight ? HorizontalAlignment.Right : HorizontalAlignment.Left,
     };
 
-    private void AttachTools(Control owner, StackPanel tools, DiscussionMessage message)
+    private void AttachTools(Control owner, StackPanel tools, DiscussionMessage message, MarkdownView? view = null)
     {
         void Build()
         {
             if (tools.Children.Count > 0) return;
-            owner.ContextMenu = FillTools(tools, message);
+            owner.ContextMenu = FillTools(tools, message, view);
         }
         owner.PointerEntered += (_, _) => { Build(); tools.Opacity = 1; };
         owner.PointerExited += (_, _) => tools.Opacity = 0;
@@ -1703,7 +1865,7 @@ internal sealed class DiscussionWindow(
             && !(message.Sender == DiscussionMember.Boss && message.To is null));
 
     /// <summary>Hover toolbar under a message plus the same actions in a right-click menu.</summary>
-    private ContextMenu FillTools(StackPanel tools, DiscussionMessage message)
+    private ContextMenu FillTools(StackPanel tools, DiscussionMessage message, MarkdownView? view = null)
     {
         var items = new List<MenuItem>();
 
@@ -1724,6 +1886,13 @@ internal sealed class DiscussionWindow(
             items.Add(item);
         }
 
+        if (view is not null)
+        {
+            Add("", "Select", "Select text (any part; Esc to return)", () => { view.ToggleSelecting(); return Task.CompletedTask; });
+            var all = new MenuItem { Header = "Select all text", Icon = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 12 } };
+            all.Click += (_, _) => { if (view.Selecting) view.ToggleSelecting(); view.ToggleSelecting(selectAll: true); };
+            items.Add(all);
+        }
         Add(TrayvoraTheme.IconCopy, null, "Copy message", async () =>
         {
             if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)

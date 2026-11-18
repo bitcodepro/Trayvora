@@ -35,8 +35,8 @@ internal sealed class ReadinessView : ToolPage
         var phrases = new StackPanel { Spacing = 6, Children =
         {
             TrayvoraTheme.Hint("Write or say these anywhere in a session message:"),
-            Phrase("Forward the reply", string.Join(" · ", RelayPhrases.Examples.Take(5))),
-            Phrase("Agents discuss, lead reports to you", string.Join(" · ", RelayPhrases.DiscussExamples.Take(4))),
+            Phrase("Forward the reply", string.Join(" · ", KeyPhrases.Current.ForwardLines.Take(5))),
+            Phrase("Agents discuss, lead reports to you", string.Join(" · ", KeyPhrases.Current.DiscussLines.Take(4))),
             Phrase("Chips", "Codex / Claude / Both choose who gets the message; ⇄ forwards the reply to the other agent."),
         } };
         var body = new StackPanel

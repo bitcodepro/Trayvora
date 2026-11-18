@@ -17,6 +17,9 @@ internal sealed class App : Avalonia.Application
     {
         Styles.Add(new FluentTheme());
         TrayvoraTheme.AddStyles(Styles);
+        Appearance.Load(Environment.GetEnvironmentVariable("VOICEAGENT_SETTINGS_DIR") ?? Path.Combine(AppContext.BaseDirectory, "settings"));
+        Appearance.Install(Styles);
+        KeyPhrases.Load(Environment.GetEnvironmentVariable("VOICEAGENT_SETTINGS_DIR") ?? Path.Combine(AppContext.BaseDirectory, "settings"));
         // A failure in one UI handler must not close the tray app: log it and keep running.
         Dispatcher.UIThread.UnhandledException += (_, args) =>
         {
@@ -63,7 +66,7 @@ internal sealed class App : Avalonia.Application
             .AddSingleton(new WhisperModel(modelPath))
             .AddSingleton<ISpeechTranscriber, WhisperTranscriber>()
             .BuildServiceProvider();
-        string Instructions() => $"Preview {voiceKeys.Preview}  ·  Background {voiceKeys.Background}  ·  Send {voiceKeys.Send}  ·  Dictate {voiceKeys.DictationShortcut}  ·  Shared chat {voiceKeys.SharedShortcut}  ·  Long questions {voiceKeys.LongShortcut}  ·  Short questions {voiceKeys.ShortShortcut}  ·  Windows audio {voiceKeys.LoopbackShortcut}  ·  Stop reading {voiceKeys.StopSpeechShortcut}";
+        string Instructions() => $"Preview {voiceKeys.Preview}  ·  Background {voiceKeys.Background}  ·  Send {voiceKeys.Send}  ·  Dictate {voiceKeys.DictationShortcut}  ·  Shared chat {voiceKeys.SharedShortcut}  ·  Long questions {voiceKeys.LongShortcut}  ·  Short questions {voiceKeys.ShortShortcut}  ·  Windows audio {voiceKeys.LoopbackShortcut}  ·  Stop reading {voiceKeys.StopSpeechShortcut}  ·  Dictate anywhere {voiceKeys.AnywhereShortcut}";
         var message = string.Join(Environment.NewLine, new[] { Instructions(), settingsWarning, hotkeyWarning }
             .Where(text => !string.IsNullOrWhiteSpace(text)));
         var overlay = new VoiceOverlay(services.GetRequiredService<IAudioRecorder>(),
@@ -141,6 +144,9 @@ internal sealed class App : Avalonia.Application
                 case VoiceAction.WindowsAudio:
                     await overlay.ToggleRecordingAsync(VoiceShortcutMode.WindowsAudio);
                     break;
+                case VoiceAction.Anywhere:
+                    await overlay.ToggleRecordingAsync(VoiceShortcutMode.Anywhere);
+                    break;
                 case VoiceAction.StopSpeech:
                     overlay.StopSpeech();
                     break;
@@ -186,7 +192,7 @@ internal sealed class App : Avalonia.Application
             ("Record with preview", voiceKeys.Preview.ToString()), ("Record and send at once", voiceKeys.Background.ToString()),
             ("Send preview", voiceKeys.Send.ToString()), ("Dictate into Codex Desktop", voiceKeys.DictationShortcut.ToString()),
             ("Send to Codex Desktop chat", voiceKeys.SharedShortcut.ToString()), ("Deep question (GPT, long memory)", voiceKeys.LongShortcut.ToString()),
-            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Computer sound → ask OpenAI, answer aloud", voiceKeys.LoopbackShortcut.ToString()), ("Stop reading aloud", voiceKeys.StopSpeechShortcut.ToString()),
+            ("Quick question (GPT, last six exchanges)", voiceKeys.ShortShortcut.ToString()), ("Computer sound → ask OpenAI, answer aloud", voiceKeys.LoopbackShortcut.ToString()), ("Stop reading aloud", voiceKeys.StopSpeechShortcut.ToString()), ("Dictate anywhere", voiceKeys.AnywhereShortcut.ToString()),
         ];
         overlay.SetShortcuts(ShortcutList());
         EventHandler openSettings = (_, _) =>

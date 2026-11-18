@@ -590,12 +590,13 @@ internal sealed class VoiceOverlay : Window
         if (_discussion is null)
         {
             var folder = Path.Combine(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings"), "discussions");
-            _discussion = new DiscussionWindow(new DiscussionStore(folder), async (agent, message, room, stream, ct) =>
+            _discussion = new DiscussionWindow(new DiscussionStore(folder), async (agent, message, room, stream, files, ct) =>
             {
                 if (agent == DiscussionMember.Claude)
                 {
                     if (room.Claude is not { } chat) throw new IOException("Choose a Claude chat for this session first.");
-                    var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions);
+                    var attachments = Path.Combine(folder, "attachments", room.Id.ToString("N"));
+                    var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions, attachments);
                     // A chat Trayvora started is added to Claude Desktop's Code tab once Claude Code has saved it.
                     if (chat.Title.StartsWith("New Claude chat", StringComparison.Ordinal)) _ = Task.Run(() => ClaudeDesktopSessions.Register(chat));
                     return reply;
@@ -630,7 +631,9 @@ internal sealed class VoiceOverlay : Window
                 CodexTurnStatus result;
                 try
                 {
-                    result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId);
+                    result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
+                        steps: new ReplyStream.Reporter(stream.Activity),
+                        attachments: files);
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
                 {
@@ -1150,6 +1153,13 @@ internal sealed class VoiceOverlay : Window
         }
         _replyAudio?.Stop();
 
+        AnywhereDictation.Target? anywhereTarget = null;
+        if (mode == VoiceShortcutMode.Anywhere)
+        {
+            // Remember where the text cursor is before anything else gets focus.
+            anywhereTarget = AnywhereDictation.Capture();
+        }
+
         DesktopDictation.Target? dictationTarget = null;
         if (mode == VoiceShortcutMode.Dictation)
         {
@@ -1175,14 +1185,14 @@ internal sealed class VoiceOverlay : Window
             var problem = !ReadyFor(place) ? NotReadyMessage(place) : "No microphone selected. Check the microphone in Trayvora.";
             _status.Text = problem;
             Activity.Add("Not started", problem);
-            if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(problem);
+            if (mode is VoiceShortcutMode.WindowsAudio or VoiceShortcutMode.Anywhere) QuietNotice?.Invoke(problem);
             else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation || !IsVisible)
                 GetPreview().ShowStatus(problem);
             return;
         }
 
         using var operation = new CancellationTokenSource();
-        if (mode is VoiceShortcutMode.Background or VoiceShortcutMode.WindowsAudio) Hide();
+        if (mode is VoiceShortcutMode.Background or VoiceShortcutMode.WindowsAudio or VoiceShortcutMode.Anywhere) Hide();
         _preview?.Hide();
         _recordMode = mode;
         using var stopRecording = new CancellationTokenSource();
@@ -1278,9 +1288,14 @@ internal sealed class VoiceOverlay : Window
         }
         if (draft is null)
         {
-            if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(_status.Text ?? "No speech detected.");
+            if (mode is VoiceShortcutMode.WindowsAudio or VoiceShortcutMode.Anywhere) QuietNotice?.Invoke(_status.Text ?? "No speech detected.");
             else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation)
                 GetPreview().ShowStatus(_status.Text ?? "No speech detected.");
+            return;
+        }
+        if (mode == VoiceShortcutMode.Anywhere)
+        {
+            await DeliverAnywhereAsync(anywhereTarget, draft);
             return;
         }
         if (mode == VoiceShortcutMode.WindowsAudio)
@@ -1441,6 +1456,8 @@ internal sealed class VoiceOverlay : Window
             _answer.Text = partial;
             _answer.CaretIndex = partial.Length;
             _status.Text = activity is null ? $"Claude Code · {chat.Title}" : $"Claude Code · {activity}";
+            var (recent, total) = stream.Steps;
+            _feed.Steps(ReplyStream.FormatSteps(recent, total, running: activity is not null));
         };
         timer.Start();
         try
@@ -1556,7 +1573,10 @@ internal sealed class VoiceOverlay : Window
             else GetPreview().ShowAnswer(answer);
         }
         if (answer is not null && (readAloud || _sharedChat?.ReadAloud == true) && _replyAudio is not null)
+        {
+            Activity.Add("Speech", "Reading the answer aloud.");
             _ = _replyAudio.ReadAsync(answer);
+        }
     }
 
     private Task SendSharedTrackedAsync(string text, bool silent)
@@ -1625,6 +1645,30 @@ internal sealed class VoiceOverlay : Window
         try { _discussion?.PendingSaves.Wait(TimeSpan.FromSeconds(3)); }
         catch (AggregateException) { }
         _replyAudio?.Dispose();
+    }
+
+    private async Task DeliverAnywhereAsync(AnywhereDictation.Target? target, string draft)
+    {
+        using var delivery = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var result = AnywhereDictation.Result.Failed;
+        try
+        {
+            result = target is { } where
+                ? await AnywhereDictation.DeliverAsync(where, draft, delivery.Token)
+                : AnywhereDictation.SetClipboard(draft) ? AnywhereDictation.Result.Clipboard : AnywhereDictation.Result.Failed;
+        }
+        catch (OperationCanceledException)
+        {
+            result = AnywhereDictation.SetClipboard(draft) ? AnywhereDictation.Result.Clipboard : AnywhereDictation.Result.Failed;
+        }
+        _status.Text = result switch
+        {
+            AnywhereDictation.Result.Typed => "Text typed at the cursor.",
+            AnywhereDictation.Result.Clipboard => "No text cursor: the text is on the clipboard (Ctrl+V to paste).",
+            _ => "Could not type or copy the text. It is in the Trayvora window.",
+        };
+        Activity.Add("Dictation", _status.Text);
+        QuietNotice?.Invoke(_status.Text);
     }
 
     private async Task InsertDictationAsync(DesktopDictation.Target target, string draft)
@@ -1768,9 +1812,22 @@ internal sealed class VoiceOverlay : Window
                 ? "Use the Revqora MCP tools for the Git request. Discover repositories with list_repositories before selecting a repository when needed. If the relevant tool is unavailable, say so. User request:\n" + text
                 : text;
             var localResults = historyUnavailable ? null : await Task.Run(() => _history.RecentLocalResults(chatId));
+            var stepLog = new ReplyStream();
+            var stepsReporter = new ReplyStream.Reporter(step =>
+            {
+                stepLog.Activity(step);
+                var (recent, total) = stepLog.Steps;
+                var shown = ReplyStream.FormatSteps(recent, total, running: true);
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (!ReferenceEquals(_operation, operation)) return;
+                    _feed.Steps(shown);
+                    if (!operation.IsCancellationRequested) _status.Text = $"Codex · {step}";
+                });
+            });
             var status = await Task.Run(() => _codex.RunAsync(routedText, progress, operation.Token,
                 activities => tools = activities, abort.Token, useRevqora: route == RequestRoute.AppMcp,
-                chatId: chatId, localResults: localResults));
+                chatId: chatId, localResults: localResults, steps: stepsReporter));
             (historyStatus, _status.Text) = status switch
             {
                 CodexTurnStatus.Completed => (RequestStatus.Completed, "Codex completed the request."),
@@ -2064,6 +2121,9 @@ internal sealed class VoiceOverlay : Window
         _progress.IsIndeterminate = false;
         _progress.Value = 0;
         _feed.Finish(_status.Text);
+        // The answer text arrives while the operation still runs, so the read-aloud panel saw "busy";
+        // mark it idle again or ReadAsync silently skips the answer.
+        _replyAudio?.Refresh(!_suspended);
         RefreshControls();
         if (_refreshOnResume && IsVisible) _ = RefreshDevicesAsync();
     }

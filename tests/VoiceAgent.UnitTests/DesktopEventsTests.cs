@@ -49,6 +49,7 @@ public sealed class DesktopEventsTests
                 VerifyDiscussWith();
                 VerifyStreamingSession();
                 VerifyMarkdown();
+                VerifyAttachments();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
                 VerifyFloatingAgent();
@@ -172,7 +173,7 @@ public sealed class DesktopEventsTests
             var store = new DiscussionStore(folder.FullName);
             var sent = new List<(DiscussionMember Agent, string Text)>();
             var claudeFails = false;
-            var view = new DiscussionWindow(store, (agent, text, _, _, _) =>
+            var view = new DiscussionWindow(store, (agent, text, _, _, _, _) =>
                 {
                     sent.Add((agent, text));
                     if (claudeFails && agent == DiscussionMember.Claude) throw new IOException("Claude Code was not found.");
@@ -311,7 +312,7 @@ public sealed class DesktopEventsTests
             };
             var endless = false;
             var rounds = 5;
-            var view = new DiscussionWindow(store, (agent, text, _, _, _) =>
+            var view = new DiscussionWindow(store, (agent, text, _, _, _, _) =>
                 {
                     calls.Add((agent, text));
                     if (endless) return Task.FromResult<string?>(agent == DiscussionMember.Codex ? "Claude: one more question?" : "Codex: and one more from me");
@@ -389,7 +390,7 @@ public sealed class DesktopEventsTests
             var started = new List<DiscussionMember>();
             var replies = new Dictionary<DiscussionMember, TaskCompletionSource<string?>>();
             var streams = new Dictionary<DiscussionMember, ReplyStream>();
-            var view = new DiscussionWindow(store, async (agent, _, _, stream, ct) =>
+            var view = new DiscussionWindow(store, async (agent, _, _, stream, _, ct) =>
                 {
                     started.Add(agent);
                     streams[agent] = stream;
@@ -437,6 +438,55 @@ public sealed class DesktopEventsTests
         }
     }
 
+    private static void VerifyAttachments()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-attach-ui-");
+        try
+        {
+            var target = Path.Combine(folder.FullName, "session");
+            var source = Path.Combine(folder.FullName, "notes.txt");
+            File.WriteAllText(source, "synthetic");
+            var attachments = new ComposerAttachments(() => target);
+            Assert.Equal(2, attachments.AddFiles([source, source, Path.Combine(folder.FullName, "missing.txt")]));
+            Assert.Equal(["notes.txt", "notes (2).txt"], attachments.Files.Select(Path.GetFileName));
+            Assert.All(attachments.Files, file => Assert.StartsWith(target, file));
+            Assert.True(attachments.Chips.IsVisible);
+            var message = ComposerAttachments.WithFiles("Посмотри", attachments.Files);
+            Assert.Contains(attachments.Files[1], message);
+            Assert.Equal("Посмотри", ComposerAttachments.WithFiles("Посмотри", []));
+
+            // Attached in one session, sent from another: the files move into the sending session's folder.
+            var other = Path.Combine(folder.FullName, "other-session");
+            var moved = attachments.MoveInto(other);
+            Assert.Equal(["notes.txt", "notes (2).txt"], moved.Select(Path.GetFileName));
+            Assert.All(moved, file => Assert.True(File.Exists(file) && file.StartsWith(other + Path.DirectorySeparatorChar)));
+            Assert.Equal(moved, attachments.Files);
+            Assert.Equal(moved, ComposerAttachments.FilesIn(ComposerAttachments.WithFiles("x", moved), other));
+
+            using (var image = new Avalonia.Media.Imaging.WriteableBitmap(new Avalonia.PixelSize(4, 4), new Avalonia.Vector(96, 96)))
+                Assert.True(attachments.AddImage(image));
+            Assert.True(ComposerAttachments.IsImage(attachments.Files[^1]));
+            Assert.True(new FileInfo(attachments.Files[^1]).Length > 0);
+            attachments.Clear();
+            Assert.Empty(attachments.Files);
+            Assert.False(attachments.Chips.IsVisible);
+
+            var box = new TextBox { Text = "Hello world" };
+            box.SelectionStart = 6;
+            box.SelectionEnd = 11;
+            ComposerAttachments.InsertAtCaret(box, "Trayvora");
+            Assert.Equal("Hello Trayvora", box.Text);
+
+            Assert.Equal(DiscussionWindow.EditorMinHeight, DiscussionWindow.EditorHeight(100, -500, 400));
+            Assert.Equal(400, DiscussionWindow.EditorHeight(100, 900, 400));
+            Assert.Equal(160, DiscussionWindow.EditorHeight(100, 60, 400));
+        }
+        finally
+        {
+            folder.Delete(recursive: true);
+        }
+    }
+
     private static void VerifyMarkdown()
     {
         var view = new MarkdownView();
@@ -458,6 +508,22 @@ public sealed class DesktopEventsTests
         live.Show("First paragraph.\n\nSecond paragraph");
         Assert.Equal(3, live.Rebuilt);
         Assert.Equal(["First paragraph.", "Second paragraph"], live.GetLogicalDescendants().OfType<SelectableTextBlock>().Select(block => block.Text));
+
+        // Select text: the whole message becomes one read-only box (selection can cross paragraphs, lists and code), and back.
+        live.ToggleSelecting();
+        Assert.True(live.Selecting);
+        var box = Assert.Single(live.GetLogicalDescendants().OfType<TextBox>());
+        Assert.True(box.IsReadOnly);
+        Assert.Equal("First paragraph.\n\nSecond paragraph", box.Text);
+        Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
+        live.Show("First paragraph.\n\nSecond paragraph\n\nThird");
+        Assert.Equal("First paragraph.\n\nSecond paragraph\n\nThird", box.Text);
+        Assert.Same(box, live.Children[^1]);
+        Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
+        live.ToggleSelecting();
+        Assert.False(live.Selecting);
+        Assert.Empty(live.GetLogicalDescendants().OfType<TextBox>());
+        Assert.All(live.Children, child => Assert.True(child.IsVisible));
     }
 
     private static void VerifyLongSession()
@@ -471,7 +537,7 @@ public sealed class DesktopEventsTests
             for (var i = 0; i < 130; i++)
                 room.Messages.Add(new DiscussionMessage(DiscussionMember.Codex, DiscussionMember.Boss, $"message {i}", DateTimeOffset.Now));
             store.Save(room);
-            var view = new DiscussionWindow(store, (_, _, _, _, _) => Task.FromResult<string?>("ok"),
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => Task.FromResult<string?>("ok"),
                 () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
             view.Initialize();
             window.Content = view;

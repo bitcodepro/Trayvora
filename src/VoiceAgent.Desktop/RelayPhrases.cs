@@ -27,12 +27,22 @@ internal static partial class RelayPhrases
     public static Match? Detect(string text)
     {
         var trimmed = text.Trim();
-        var found = Spoken().Match(trimmed);
-        if (!found.Success) found = Symbol().Match(trimmed);
-        if (!found.Success) return null;
-        var name = found.Groups["target"].Value.ToLowerInvariant();
-        var target = name.StartsWith("claude", StringComparison.Ordinal) || name.StartsWith("клод", StringComparison.Ordinal)
-            ? DiscussionMember.Claude : DiscussionMember.Codex;
+        System.Text.RegularExpressions.Match found;
+        DiscussionMember target;
+        if (KeyPhrases.Find(KeyPhrases.ForwardPatterns, trimmed) is { } own)
+        {
+            (found, target) = own;
+        }
+        else
+        {
+            if (!KeyPhrases.Current.BuiltIn) return null;
+            found = Spoken().Match(trimmed);
+            if (!found.Success) found = Symbol().Match(trimmed);
+            if (!found.Success) return null;
+            var name = found.Groups["target"].Value.ToLowerInvariant();
+            target = name.StartsWith("claude", StringComparison.Ordinal) || name.StartsWith("клод", StringComparison.Ordinal)
+                ? DiscussionMember.Claude : DiscussionMember.Codex;
+        }
         var before = trimmed[..found.Index].TrimEnd(' ', ',', ';', ':', '—', '-', '–');
         var after = trimmed[(found.Index + found.Length)..].TrimStart(' ', ',', ';', ':', '—', '-', '–', '.', '!', '?', '…');
         var rest = before.Length == 0 ? after : after.Length == 0 ? before : before + " " + after;
@@ -52,6 +62,8 @@ internal static partial class RelayPhrases
     /// </summary>
     public static DiscussionMember? DetectDiscussion(string text)
     {
+        if (KeyPhrases.Find(KeyPhrases.DiscussPatterns, text) is { } own) return own.Target;
+        if (!KeyPhrases.Current.BuiltIn) return null;
         var found = Discuss().Match(text);
         if (!found.Success) return null;
         var name = found.Groups["target"].Value.ToLowerInvariant();
