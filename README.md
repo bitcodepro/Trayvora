@@ -96,6 +96,10 @@ Two tools in the main window sidebar under **Tools** open as full pages with **�
 
 Drop audio files onto **Audio to text** or pick several at once: they are transcribed one after another, each with its own status. **Save all…** writes one .txt per file into a folder; **Save as .srt** writes subtitles (times are approximate within each two-minute part).
 
+**Settings → Key phrases** lists the phrases Trayvora looks for in Sessions messages, one per line: phrases that forward the reply to the other agent (`перешли Клоду`) and phrases that start a discussion (`обсуди с Кодексом`). Edit the lines or add your own; each line must name Claude/Клод… or Codex/Кодекс… and is found anywhere in a message, ignoring case and extra spaces. A joining word before it (`и`, `потом`, `and then`) is removed with it. **Also catch built-in variations** keeps the wider built-in recognition (other word forms, `→ Claude`, `#codex`); turn it off to use only your lines. Saved in settings\key-phrases.json.
+
+**Settings → Theme** sets font, size and colour for chat text, the text you type, and the interface and menus (settings\appearance.json).
+
 **Activity** (Tools in the sidebar) lists the last 30 shortcut presses and what came of each: recording started, length and loudest level, recognized or no speech, OpenAI request sent, answer or error. Only times, counts and errors are kept (no transcripts or answers), in settings\logs\activity.json; older entries are dropped. The computer-sound shortcut records what plays in the speakers or headphones, not the microphone, so speaking into the microphone alone shows up there as silence.
 
 **Text to audio** speaks text with an installed Windows voice (on this computer) or an OpenAI voice (uses the key from Speech recognition or Playback settings, billed separately). It starts from the voice and speed chosen in Playback settings. Long text is generated in parts and joined into one file. **Play** listens in Trayvora; **Save as…** writes MP3 or WAV. Automatic voice selection needs an installed Windows voice for the text language.

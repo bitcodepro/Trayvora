@@ -1032,9 +1032,9 @@ internal sealed class DiscussionWindow(
             VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(6, 0, 0, 0),
         };
         ToolTip.SetTip(hint, "Pass the reply on without the ⇄ toggle: end your message with a phrase such as\n"
-            + string.Join("\n", RelayPhrases.Examples.Select(example => "  • " + example))
+            + string.Join("\n", KeyPhrases.Current.ForwardLines.Select(example => "  • " + example))
             + "\n\nLet them work it out together and send you one final answer:\n"
-            + string.Join("\n", RelayPhrases.DiscussExamples.Select(example => "  • " + example))
+            + string.Join("\n", KeyPhrases.Current.DiscussLines.Select(example => "  • " + example))
             + "\n\nWorks for typed and dictated messages to Codex or Claude.");
         Avalonia.Automation.AutomationProperties.SetName(hint, "Relay phrases");
         return hint;

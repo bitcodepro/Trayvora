@@ -3,6 +3,7 @@ using Xunit;
 
 namespace VoiceAgent.UnitTests;
 
+[Collection("KeyPhrases")]
 public sealed class RelayPhraseTests
 {
     [Theory]

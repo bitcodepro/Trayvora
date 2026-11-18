@@ -625,5 +625,15 @@
   "Clear": "Очистити",
   "Nothing yet. Press a shortcut and it shows up here.": "Поки порожньо. Натисніть шорткат, і він з'явиться тут.",
   "Dictate anywhere": "Диктування будь-де",
-  "Works in any app (Notepad, Word, a browser, a messenger). Press once and speak, press again to stop: if a text cursor is blinking in the active window the text is typed there, otherwise it is copied to the clipboard so you can paste it with Ctrl+V. Nothing is sent anywhere else, and no window appears.": "Працює в будь-якій програмі (Блокнот, Word, браузер, месенджер). Натисніть і говоріть, натисніть ще раз, щоб зупинити: якщо в активному вікні блимає текстовий курсор, текст буде надруковано там, інакше його буде скопійовано в буфер обміну, щоб вставити через Ctrl+V. Нікуди більше нічого не надсилається, і вікно не з'являється."
+  "Works in any app (Notepad, Word, a browser, a messenger). Press once and speak, press again to stop: if a text cursor is blinking in the active window the text is typed there, otherwise it is copied to the clipboard so you can paste it with Ctrl+V. Nothing is sent anywhere else, and no window appears.": "Працює в будь-якій програмі (Блокнот, Word, браузер, месенджер). Натисніть і говоріть, натисніть ще раз, щоб зупинити: якщо в активному вікні блимає текстовий курсор, текст буде надруковано там, інакше його буде скопійовано в буфер обміну, щоб вставити через Ctrl+V. Нікуди більше нічого не надсилається, і вікно не з'являється.",
+  "Key phrases": "Ключові фрази",
+  "Save phrases": "Зберегти фрази",
+  "Restore defaults": "Відновити типові",
+  "Forward the reply to the other agent": "Переслати відповідь іншому агенту",
+  "Discuss with the other agent": "Обговорити з іншим агентом",
+  "Theme": "Тема",
+  "Chat text": "Текст чату",
+  "Text you type": "Текст, який ви набираєте",
+  "Interface and menus": "Інтерфейс і меню",
+  "Rename": "Перейменувати"
 }
