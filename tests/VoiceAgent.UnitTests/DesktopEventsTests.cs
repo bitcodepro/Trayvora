@@ -49,6 +49,7 @@ public sealed class DesktopEventsTests
                 VerifyDiscussWith();
                 VerifyStreamingSession();
                 VerifyMarkdown();
+                VerifyAttachments();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
                 VerifyFloatingAgent();
@@ -433,6 +434,47 @@ public sealed class DesktopEventsTests
         finally
         {
             window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyAttachments()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-attach-ui-");
+        try
+        {
+            var target = Path.Combine(folder.FullName, "session");
+            var source = Path.Combine(folder.FullName, "notes.txt");
+            File.WriteAllText(source, "synthetic");
+            var attachments = new ComposerAttachments(() => target);
+            Assert.Equal(2, attachments.AddFiles([source, source, Path.Combine(folder.FullName, "missing.txt")]));
+            Assert.Equal(["notes.txt", "notes (2).txt"], attachments.Files.Select(Path.GetFileName));
+            Assert.All(attachments.Files, file => Assert.StartsWith(target, file));
+            Assert.True(attachments.Chips.IsVisible);
+            var message = ComposerAttachments.WithFiles("Посмотри", attachments.Files);
+            Assert.Contains(attachments.Files[1], message);
+            Assert.Equal("Посмотри", ComposerAttachments.WithFiles("Посмотри", []));
+
+            using (var image = new Avalonia.Media.Imaging.WriteableBitmap(new Avalonia.PixelSize(4, 4), new Avalonia.Vector(96, 96)))
+                Assert.True(attachments.AddImage(image));
+            Assert.True(ComposerAttachments.IsImage(attachments.Files[^1]));
+            Assert.True(new FileInfo(attachments.Files[^1]).Length > 0);
+            attachments.Clear();
+            Assert.Empty(attachments.Files);
+            Assert.False(attachments.Chips.IsVisible);
+
+            var box = new TextBox { Text = "Hello world" };
+            box.SelectionStart = 6;
+            box.SelectionEnd = 11;
+            ComposerAttachments.InsertAtCaret(box, "Trayvora");
+            Assert.Equal("Hello Trayvora", box.Text);
+
+            Assert.Equal(DiscussionWindow.EditorMinHeight, DiscussionWindow.EditorHeight(100, -500, 400));
+            Assert.Equal(400, DiscussionWindow.EditorHeight(100, 900, 400));
+            Assert.Equal(160, DiscussionWindow.EditorHeight(100, 60, 400));
+        }
+        finally
+        {
             folder.Delete(recursive: true);
         }
     }

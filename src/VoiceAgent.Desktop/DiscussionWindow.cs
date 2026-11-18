@@ -136,6 +136,11 @@ internal sealed class DiscussionWindow(
         VerticalContentAlignment = VerticalAlignment.Center,
     };
     private readonly Button _send = new() { Content = new TextBlock { Text = TrayvoraTheme.IconSend, FontFamily = IconFont, FontSize = 16 } };
+    private readonly Button _attachButton = new() { Content = new TextBlock { Text = "\uE723", FontFamily = IconFont, FontSize = 15 } };
+    private ComposerAttachments? _attachments;
+    private ComposerAttachments Attachments => _attachments ??= new ComposerAttachments(
+        () => _room is { } room ? Path.Combine(store.Directory, "attachments", room.Id.ToString("N")) : null);
+    internal const double EditorMinHeight = 44, EditorDefaultMaxHeight = 160;
     private readonly Button _pause = new() { Content = "Pause", IsVisible = false };
     private readonly Button _mic = new();
     private readonly ComboBox _recognizer = new() { ItemsSource = new[] { "Recognition: default", "Recognition: Whisper", "Recognition: OpenAI" }, SelectedIndex = 0, IsVisible = false };
@@ -644,15 +649,24 @@ internal sealed class DiscussionWindow(
         Grid.SetColumn(_counter, 1);
         bottom.Children.AddRange([toRow, _counter]);
 
-        var input = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto"), ColumnSpacing = 8 };
+        var input = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto,Auto,Auto,Auto"), ColumnSpacing = 8 };
         var templates = Templates.Button(() => _editor.Text, text => PromptTemplates.InsertInto(_editor, text));
         templates.VerticalAlignment = VerticalAlignment.Bottom;
         _send.VerticalAlignment = VerticalAlignment.Bottom;
         _mic.VerticalAlignment = VerticalAlignment.Bottom;
-        Grid.SetColumn(templates, 1);
-        Grid.SetColumn(_mic, 2);
-        Grid.SetColumn(_send, 3);
-        input.Children.AddRange([_editor, templates, _mic, _send]);
+        _attachButton.VerticalAlignment = VerticalAlignment.Bottom;
+        TrayvoraTheme.Ghost(_attachButton);
+        ToolTip.SetTip(_attachButton, "Attach files (or drop them here, or paste a picture with Ctrl+V)");
+        Avalonia.Automation.AutomationProperties.SetName(_attachButton, "Attach files");
+        _attachButton.Click += async (_, _) => await ChooseAttachmentsAsync();
+        Grid.SetColumn(_attachButton, 1);
+        Grid.SetColumn(templates, 2);
+        Grid.SetColumn(_mic, 3);
+        Grid.SetColumn(_send, 4);
+        input.Children.AddRange([_editor, _attachButton, templates, _mic, _send]);
+        Attachments.Problem += problem => _status.Text = problem;
+        Attachments.Changed += UpdateComposer;
+        Attachments.HandlePaste(_editor);
         _voiceMode.IsVisible = dictate is not null;
         _voiceMode.FontSize = 11.5;
         _voiceMode.Padding = new Thickness(10, 3);
@@ -676,15 +690,68 @@ internal sealed class DiscussionWindow(
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(18),
             Padding = new Thickness(14, 10, 10, 10),
-            Child = new StackPanel { Spacing = 8, Children = { input, _level, bottom } },
+            Child = new StackPanel { Spacing = 8, Children = { ResizeGrip(), Attachments.Chips, input, _level, bottom } },
         };
         _editor.GotFocus += (_, _) => box.BorderBrush = TrayvoraTheme.Accent;
         _editor.LostFocus += (_, _) => box.BorderBrush = TrayvoraTheme.Border;
+        Attachments.AcceptDrops(this, on => box.BorderBrush = on ? TrayvoraTheme.Accent : _editor.IsFocused ? TrayvoraTheme.Accent : TrayvoraTheme.Border);
         return new Border
         {
             Padding = new Thickness(20, 6, 20, 16),
             Child = new StackPanel { Spacing = 6, Children = { _status, box } },
         };
+    }
+
+    /// <summary>A handle above the text box: drag it up or down to make the box taller or shorter; double-click resets.</summary>
+    private Control ResizeGrip()
+    {
+        var grip = new Border
+        {
+            Height = 10, Margin = new Thickness(0, -6, 0, -4), Background = Brushes.Transparent,
+            Cursor = new Cursor(StandardCursorType.SizeNorthSouth),
+            Child = new Border { Width = 36, Height = 4, CornerRadius = new CornerRadius(2), Background = TrayvoraTheme.Border, HorizontalAlignment = HorizontalAlignment.Center, VerticalAlignment = VerticalAlignment.Center },
+        };
+        ToolTip.SetTip(grip, "Drag to resize the text box · double-click to reset");
+        double? startY = null;
+        double startHeight = 0;
+        grip.PointerPressed += (_, args) =>
+        {
+            if (!args.GetCurrentPoint(grip).Properties.IsLeftButtonPressed) return;
+            if (args.ClickCount == 2)
+            {
+                _editor.Height = double.NaN;
+                _editor.MaxHeight = EditorDefaultMaxHeight;
+                startY = null;
+                args.Handled = true;
+                return;
+            }
+            startY = args.GetPosition(this).Y;
+            startHeight = _editor.Bounds.Height;
+            args.Pointer.Capture(grip);
+            args.Handled = true;
+        };
+        grip.PointerMoved += (_, args) =>
+        {
+            if (startY is not { } from) return;
+            var limit = Math.Max(EditorMinHeight, Bounds.Height * 0.65);
+            var height = EditorHeight(startHeight, from - args.GetPosition(this).Y, limit);
+            _editor.MaxHeight = double.PositiveInfinity;
+            _editor.Height = height;
+        };
+        grip.PointerReleased += (_, args) => { startY = null; args.Pointer.Capture(null); };
+        grip.PointerCaptureLost += (_, _) => startY = null;
+        return grip;
+    }
+
+    /// <summary>The new text box height after dragging <paramref name="up"/> pixels upwards, kept between the minimum and <paramref name="limit"/>.</summary>
+    internal static double EditorHeight(double start, double up, double limit) => Math.Clamp(start + up, EditorMinHeight, Math.Max(EditorMinHeight, limit));
+
+    private async Task ChooseAttachmentsAsync()
+    {
+        if (_room is null) NewRoom();
+        if (TopLevel.GetTopLevel(this)?.StorageProvider is not { } storage) return;
+        var files = await storage.OpenFilePickerAsync(new Avalonia.Platform.Storage.FilePickerOpenOptions { Title = "Attach files", AllowMultiple = true });
+        Attachments.AddFiles(files.Select(file => Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(file)).OfType<string>());
     }
 
     // ── Sessions ─────────────────────────────────────────────────────────
@@ -1127,7 +1194,8 @@ internal sealed class DiscussionWindow(
         _counter.Foreground = length > MaxTypedLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
         var idle = CurrentRun is null;
         var open = _room is not null;
-        _send.IsEnabled = idle && length > 0 && length <= MaxTypedLength && !string.IsNullOrWhiteSpace(_editor.Text);
+        var files = _attachments?.Files.Count ?? 0;
+        _send.IsEnabled = idle && length <= MaxTypedLength && (files > 0 || (length > 0 && !string.IsNullOrWhiteSpace(_editor.Text)));
         _pause.IsVisible = !idle;
         _delete.IsEnabled = idle && open;
         _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle;
@@ -1261,8 +1329,10 @@ internal sealed class DiscussionWindow(
 
     private async Task PostAsync()
     {
-        if (CurrentRun is not null || string.IsNullOrWhiteSpace(_editor.Text)) return;
-        var text = _editor.Text.Trim();
+        var attached = Attachments.Files.ToArray();
+        if (CurrentRun is not null || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
+        var text = (_editor.Text ?? "").Trim();
+        if (text.Length == 0) text = attached.All(ComposerAttachments.IsImage) ? "Look at the attached image(s)." : "Look at the attached file(s).";
         if (text.Length > MaxTypedLength)
         {
             _status.Text = $"Keep each message under {MaxTypedLength:N0} characters.";
@@ -1305,6 +1375,9 @@ internal sealed class DiscussionWindow(
             _title.Text = room.Title;
         }
         _editor.Clear();
+        text = ComposerAttachments.WithFiles(text, attached);
+        sent = ComposerAttachments.WithFiles(sent, attached);
+        Attachments.Clear();
         Append(room, new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
             RelayTo: relayTo, DiscussWith: discuss?.Partner));
         await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss)));
