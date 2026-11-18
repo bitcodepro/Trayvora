@@ -5,7 +5,8 @@ namespace VoiceAgent.Codex;
 
 internal static class JsonLineReader
 {
-    private const int MaximumLineLength = 1024 * 1024;
+    // One response can carry whole turns of a long chat (command output, diffs); 1 MB broke old Desktop chats.
+    internal const int MaximumLineLength = 64 * 1024 * 1024;
 
     public static async IAsyncEnumerable<string> ReadAsync(TextReader reader,
         [EnumeratorCancellation] CancellationToken cancellationToken)

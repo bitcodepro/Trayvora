@@ -415,6 +415,16 @@ internal sealed class DiscussionWindow(
     /// whole as a .txt file in <paramref name="folder"/> and the agent gets its path, a short preview and an
     /// instruction to read the file, so nothing is cut and the message stays under Codex's per-turn limit.
     /// </summary>
+    /// <summary>Which session and chat a failure concerns, for the Error log.</summary>
+    internal static string ChatContext(DiscussionRoom room, DiscussionMember agent)
+    {
+        var chat = agent == DiscussionMember.Claude
+            ? room.Claude is { } claude ? $"Claude chat \"{claude.Title}\" ({claude.Id})" : "no Claude chat"
+            : room.CodexDesktop ? $"Codex Desktop chat \"{room.CodexChatTitle}\" ({room.CodexChatId})"
+            : $"Trayvora Codex chat {room.CodexChatId}";
+        return $"session \"{room.Title}\" · {chat}";
+    }
+
     internal static string ForAgent(string text, string folder, string name) => ForAgentWithFile(text, folder, name).Text;
 
     /// <summary>The text an agent receives and, for a long message, the file holding the whole of it.</summary>
@@ -1485,9 +1495,10 @@ internal sealed class DiscussionWindow(
                 if (!cancel.IsCancellationRequested)
                 {
                     var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
+                        or InvalidDataException or TimeoutException
                         ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
                     Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
-                    ErrorLog.Write(error);
+                    ErrorLog.Write(error, $"Sessions · {agent}", ChatContext(room, agent));
                 }
                 return;
             }

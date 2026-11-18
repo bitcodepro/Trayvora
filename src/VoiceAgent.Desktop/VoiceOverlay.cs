@@ -183,6 +183,8 @@ internal sealed class VoiceOverlay : Window
         textToAudioButton.Click += (_, _) => { if (OperatingSystem.IsWindows()) OpenTextToAudio(); };
         var activityButton = TrayvoraTheme.NavItem(TrayvoraTheme.IconHistory, "Activity", "Shortcuts · OpenAI requests");
         activityButton.Click += (_, _) => OpenActivity();
+        var errorLogButton = TrayvoraTheme.NavItem("", "Error log", "Errors of the last 7 days");
+        errorLogButton.Click += (_, _) => OpenErrorLog();
         var terminalButton = TrayvoraTheme.NavItem("", "Terminal", "Claude Code · Codex CLI");
         terminalButton.Click += (_, _) =>
         {
@@ -460,7 +462,7 @@ internal sealed class VoiceOverlay : Window
                 new Border { Height = 8 },
                 TrayvoraTheme.Caption("Workspace"), discussionButton, historyButton,
                 new Border { Height = 8 },
-                TrayvoraTheme.Caption("Tools"), audioToTextButton, textToAudioButton, activityButton, terminalButton,
+                TrayvoraTheme.Caption("Tools"), audioToTextButton, textToAudioButton, activityButton, errorLogButton, terminalButton,
                 new Border { Height = 8 },
                 TrayvoraTheme.Caption("Accounts"), _chatGptButton, _claudeButton,
             },
@@ -971,6 +973,19 @@ internal sealed class VoiceOverlay : Window
     private ActivityView? _activityView;
     private static ActivityLog Activity => ActivityLog.Shared;
 
+    private ErrorLogView? _errorLogView;
+
+    private void OpenErrorLog()
+    {
+        if (_errorLogView is null)
+        {
+            _errorLogView = new ErrorLogView();
+            _errorLogView.BackRequested += CloseDiscussion;
+        }
+        _errorLogView.Refresh();
+        ShowPage(_errorLogView, "Trayvora · Error log");
+    }
+
     private void OpenActivity()
     {
         if (_activityView is null)
@@ -1358,6 +1373,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is not OperationCanceledException and not IOException)
         {
+            ErrorLog.Write(error, "Recording / speech recognition");
             if (error is WhisperModelVerificationException) _modelNeedsReplacement = true;
             throw new IOException(FriendlyError(error, "Could not record or transcribe"));
         }
@@ -1845,11 +1861,13 @@ internal sealed class VoiceOverlay : Window
         catch (Exception error) when (error is IOException or InvalidDataException or InvalidOperationException
             or TimeoutException or ArgumentException or UnauthorizedAccessException)
         {
+            ErrorLog.Write(error, "Codex request", $"chat {chatId}");
             _status.Text = error.Message;
             detail = "Codex could not start the request.";
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "Codex request", $"chat {chatId}");
             _status.Text = FriendlyError(error, "Could not connect to Codex");
             detail = "Could not connect to Codex.";
         }
