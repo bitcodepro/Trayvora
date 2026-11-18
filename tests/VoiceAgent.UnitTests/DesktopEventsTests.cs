@@ -182,6 +182,8 @@ public sealed class DesktopEventsTests
                 () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]),
                 () => new ClaudeChat(Guid.NewGuid(), folder.FullName, "Test Claude chat"));
             view.Initialize();
+            // Read the saved files only after the window has finished writing them.
+            IReadOnlyList<DiscussionRoom> Stored() { Pump(view.PendingSaves); return store.Load(); }
             window.Content = view;
             window.Show();
             Pump(Task.Delay(100));
@@ -195,10 +197,10 @@ public sealed class DesktopEventsTests
                 send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 // Wait for the reply itself: a fixed delay was too short on slower CI machines.
                 replies++;
-                PumpUntil(() => store.Load().SingleOrDefault()?.Messages.Count >= replies * 2);
+                PumpUntil(() => Stored().SingleOrDefault()?.Messages.Count >= replies * 2);
             }
 
-            var room = Assert.Single(store.Load());
+            var room = Assert.Single(Stored());
             Assert.Equal("First question", room.Title);
             Assert.Equal(["First question", "Noted.", "Second question", "Noted."], room.Messages.Select(message => message.Text));
             Assert.Equal(2, sent.Count);
@@ -211,8 +213,8 @@ public sealed class DesktopEventsTests
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             editor.Text = "Other topic";
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            PumpUntil(() => store.Load().Any(item => item.Title == "Other topic" && item.Messages.Count >= 2));
-            Assert.Equal(2, store.Load().Count);
+            PumpUntil(() => Stored().Any(item => item.Title == "Other topic" && item.Messages.Count >= 2));
+            Assert.Equal(2, Stored().Count);
             view.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "First question")
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Pump(Task.Delay(100));
@@ -226,12 +228,12 @@ public sealed class DesktopEventsTests
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             editor.Text = "Say hello to Claude";
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            PumpUntil(() => sent.Count >= 3 && store.Load().Single(item => item.Title == "First question").Messages.Count(message => message.Failed) >= 2);
+            PumpUntil(() => sent.Count >= 3 && Stored().Single(item => item.Title == "First question").Messages.Count(message => message.Failed) >= 2);
             Pump(Task.Delay(50));
             Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude, DiscussionMember.Claude], sent.Select(item => item.Agent));
             Assert.Contains("hello from Codex", sent[2].Text);
             Assert.StartsWith("Codex wrote:", sent[2].Text);
-            var saved = store.Load().Single(item => item.Title == "First question").Messages.TakeLast(4).ToArray();
+            var saved = Stored().Single(item => item.Title == "First question").Messages.TakeLast(4).ToArray();
             Assert.Equal("Say hello to Claude", saved[0].Text);
             Assert.Equal((DiscussionMember.Codex, (DiscussionMember?)DiscussionMember.Claude, "hello from Codex"), (saved[1].Sender, saved[1].To, saved[1].Text));
             Assert.All(saved[2..], message => Assert.True(message.Failed && message.Sender == DiscussionMember.Claude));
@@ -248,7 +250,7 @@ public sealed class DesktopEventsTests
             Assert.Equal([DiscussionMember.Claude, DiscussionMember.Codex], sent.Select(item => item.Agent));
             Assert.Equal("Review this", sent[0].Text); // the relay phrase is removed, nothing is added
             Assert.StartsWith("Claude wrote:", sent[1].Text);
-            var relayed = store.Load().Single(item => item.Title == "First question").Messages;
+            var relayed = Stored().Single(item => item.Title == "First question").Messages;
             Assert.Equal(DiscussionMember.Codex, relayed[^2].To);
             Assert.Equal(DiscussionMember.Claude, relayed[^2].Sender);
 
@@ -271,7 +273,7 @@ public sealed class DesktopEventsTests
             Assert.DoesNotContain("перешли Кодексу", sent[0].Text);
             Assert.Equal("Проверь этот план", sent[0].Text);
             Assert.StartsWith("Claude wrote:", sent[1].Text);
-            var phrased = store.Load().Single(item => item.Title == "First question").Messages;
+            var phrased = Stored().Single(item => item.Title == "First question").Messages;
             var request = phrased.Last(message => message.Sender == DiscussionMember.Boss);
             Assert.Equal("Проверь этот план, перешли Кодексу", request.Text);
             Assert.Equal(DiscussionMember.Codex, request.RelayTo);
@@ -279,7 +281,7 @@ public sealed class DesktopEventsTests
             Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text == "⇄ then Codex");
 
             // Delete removes the message from the saved session only.
-            var before = store.Load().Single(item => item.Title == "First question").Messages.Count;
+            var before = Stored().Single(item => item.Title == "First question").Messages.Count;
             // Hover the message so its toolbar is built, then press its own Delete.
             Control row = view.GetLogicalDescendants().OfType<SelectableTextBlock>().Single(block => block.Text == "First question");
             while (row.GetLogicalParent() is Control parent && parent is not StackPanel { Spacing: 14 }) row = parent;
@@ -288,7 +290,7 @@ public sealed class DesktopEventsTests
             row.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Delete from this session")
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Pump(Task.Delay(100));
-            var after = store.Load().Single(item => item.Title == "First question").Messages;
+            var after = Stored().Single(item => item.Title == "First question").Messages;
             Assert.Equal(before - 1, after.Count);
             Assert.DoesNotContain(after, message => message.Text == "First question");
         }

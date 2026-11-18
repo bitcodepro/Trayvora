@@ -944,8 +944,10 @@ internal sealed class DiscussionWindow(
         _saves = _saves.ContinueWith(_ =>
         {
             try { write(); }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+            catch (Exception error)
             {
+                // Never silent: the reason goes to the Error log and the window says the session was not saved.
+                ErrorLog.Write(error, "Sessions · save");
                 Dispatcher.UIThread.Post(() => _status.Text = failure);
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
