@@ -46,7 +46,20 @@ internal static class Appearance
     public static void Load(string? settingsDirectory)
     {
         _file = settingsDirectory is null ? null : Path.Combine(settingsDirectory, "appearance.json");
-        Current = (_file is null ? null : SettingsFile.Read<AppearanceOptions>(_file)) is { } saved ? Clean(saved) : new();
+        Current = Read(_file);
+    }
+
+    /// <summary>A missing, unreadable or damaged file gives the built-in look; it never stops Trayvora from starting.</summary>
+    internal static AppearanceOptions Read(string? file)
+    {
+        try
+        {
+            return (file is null ? null : SettingsFile.Read<AppearanceOptions>(file)) is { } saved ? Clean(saved) : new();
+        }
+        catch (Exception error) when (error is System.Text.Json.JsonException or IOException or UnauthorizedAccessException or NotSupportedException or ArgumentException)
+        {
+            return new();
+        }
     }
 
     public static void Save(AppearanceOptions options)
@@ -103,11 +116,14 @@ internal static class Appearance
         if (_overrides is null) return;
         _overrides.Clear();
         var input = Current.InputLook;
-        var inputStyle = new Style(s => s.OfType<TextBox>());
-        if (input.Font is not null) inputStyle.Setters.Add(new Setter(Avalonia.Controls.Primitives.TemplatedControl.FontFamilyProperty, Font(input)));
-        if (input.Size is { } inputSize) inputStyle.Setters.Add(new Setter(Avalonia.Controls.Primitives.TemplatedControl.FontSizeProperty, inputSize));
-        if (input.Color is not null) inputStyle.Setters.Add(new Setter(Avalonia.Controls.Primitives.TemplatedControl.ForegroundProperty, Brush(input)));
-        if (inputStyle.Setters.Count > 0) _overrides.Add(inputStyle);
+        // Same selectors as the theme's own TextBox styles (plain, .field, .bare) so these win for every box.
+        foreach (var inputStyle in new Style[] { new(s => s.OfType<TextBox>()), new(s => s.OfType<TextBox>().Class("field")), new(s => s.OfType<TextBox>().Class("bare")) })
+        {
+            if (input.Font is not null) inputStyle.Setters.Add(new Setter(Avalonia.Controls.Primitives.TemplatedControl.FontFamilyProperty, Font(input)));
+            if (input.Size is { } inputSize) inputStyle.Setters.Add(new Setter(Avalonia.Controls.Primitives.TemplatedControl.FontSizeProperty, inputSize));
+            if (input.Color is not null) inputStyle.Setters.Add(new Setter(Avalonia.Controls.Primitives.TemplatedControl.ForegroundProperty, Brush(input)));
+            if (inputStyle.Setters.Count > 0) _overrides.Add(inputStyle);
+        }
 
         var chat = Current.ChatLook;
         var chatStyle = new Style(s => s.OfType<MarkdownView>().Descendant().OfType<SelectableTextBlock>());

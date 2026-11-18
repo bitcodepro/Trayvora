@@ -58,30 +58,40 @@ internal static class AnywhereDictation
     internal static bool SetClipboard(string text)
     {
         if (!OperatingSystem.IsWindows()) return false;
-        for (var attempt = 0; attempt < 10; attempt++)
+        // The clipboard must be opened by a window: with no owner, EmptyClipboard leaves it ownerless and
+        // SetClipboardData fails, which would wipe the clipboard without putting the text there.
+        var owner = CreateWindowEx(0, "STATIC", "", 0, 0, 0, 0, 0, new nint(-3), 0, 0, 0);
+        if (owner == 0) return false;
+        try
         {
-            if (OpenClipboard(0))
+            for (var attempt = 0; attempt < 10; attempt++)
             {
+                if (!OpenClipboard(owner)) { Thread.Sleep(30); continue; }
+                var memory = nint.Zero;
                 try
                 {
-                    EmptyClipboard();
-                    var bytes = (text.Length + 1) * 2;
-                    var memory = GlobalAlloc(0x0002, (nuint)bytes);
+                    // Prepare the text first so the clipboard is only emptied when there is something to put in it.
+                    memory = GlobalAlloc(0x0002, (nuint)((text.Length + 1) * 2));
                     if (memory == 0) return false;
                     var pointer = GlobalLock(memory);
-                    if (pointer == 0) { GlobalFree(memory); return false; }
+                    if (pointer == 0) return false;
                     Marshal.Copy(text.ToCharArray(), 0, pointer, text.Length);
                     Marshal.WriteInt16(pointer, text.Length * 2, 0);
                     GlobalUnlock(memory);
-                    if (SetClipboardData(13, memory) != 0) return true;
-                    GlobalFree(memory);
-                    return false;
+                    if (!EmptyClipboard()) return false;
+                    if (SetClipboardData(13, memory) == 0) return false;
+                    memory = 0; // the clipboard owns it now
+                    return true;
                 }
-                finally { CloseClipboard(); }
+                finally
+                {
+                    if (memory != 0) GlobalFree(memory);
+                    CloseClipboard();
+                }
             }
-            Thread.Sleep(30);
+            return false;
         }
-        return false;
+        finally { DestroyWindow(owner); }
     }
 
     private static GuiThreadInfo? Info(uint thread)
@@ -143,6 +153,9 @@ internal static class AnywhereDictation
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool CloseClipboard();
     [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool EmptyClipboard();
     [DllImport("user32.dll")] private static extern nint SetClipboardData(uint format, nint memory);
+    [DllImport("user32.dll", CharSet = CharSet.Unicode, SetLastError = true)]
+    private static extern nint CreateWindowEx(uint exStyle, string className, string windowName, uint style, int x, int y, int width, int height, nint parent, nint menu, nint instance, nint param);
+    [DllImport("user32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool DestroyWindow(nint window);
     [DllImport("kernel32.dll")] private static extern nint GlobalAlloc(uint flags, nuint bytes);
     [DllImport("kernel32.dll")] private static extern nint GlobalLock(nint memory);
     [DllImport("kernel32.dll")] [return: MarshalAs(UnmanagedType.Bool)] private static extern bool GlobalUnlock(nint memory);

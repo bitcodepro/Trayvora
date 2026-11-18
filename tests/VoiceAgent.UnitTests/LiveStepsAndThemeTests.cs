@@ -66,6 +66,23 @@ public sealed class ThemeTests
         Assert.Equal(new TextLook(), clean.Interface);
     }
 
+    [Theory]
+    [InlineData("{ not json")]
+    [InlineData("{\"Chat\":{\"Size\":\"big\"}}")]
+    [InlineData("[]")]
+    public void ADamagedThemeFileGivesTheDefaultLook(string content)
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-theme-");
+        try
+        {
+            var file = Path.Combine(folder.FullName, "appearance.json");
+            File.WriteAllText(file, content);
+            Assert.Equal(new AppearanceOptions(), Appearance.Read(file));
+            Assert.Equal(new AppearanceOptions(), Appearance.Read(Path.Combine(folder.FullName, "missing.json")));
+        }
+        finally { folder.Delete(recursive: true); }
+    }
+
     [Fact]
     public void ThemeRoundTripsThroughJson()
     {

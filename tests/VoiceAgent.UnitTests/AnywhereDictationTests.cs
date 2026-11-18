@@ -33,3 +33,38 @@ public sealed class AnywhereDictationTests
     public void TypedTextNeverContainsEnterOrTabs(string recognized, string typed) =>
         Assert.Equal(typed, AnywhereDictation.Clean(recognized));
 }
+
+/// <summary>Writes the real Windows clipboard, so it runs only when TRAYVORA_LIVE_CLIPBOARD=1.</summary>
+public sealed class AnywhereClipboardLiveTests
+{
+    [Fact]
+    public void TextReallyLandsOnTheClipboard()
+    {
+        if (!OperatingSystem.IsWindows() || Environment.GetEnvironmentVariable("TRAYVORA_LIVE_CLIPBOARD") != "1") return;
+        const string text = "Trayvora clipboard test · привіт";
+        Assert.True(AnywhereDictation.SetClipboard(text));
+        var thread = new Thread(() => Assert.Equal(text, ReadClipboard()));
+        thread.Start();
+        thread.Join();
+    }
+
+    private static string? ReadClipboard()
+    {
+        if (!OpenClipboard(0)) return null;
+        try
+        {
+            var handle = GetClipboardData(13);
+            if (handle == 0) return null;
+            var pointer = GlobalLock(handle);
+            try { return System.Runtime.InteropServices.Marshal.PtrToStringUni(pointer); }
+            finally { GlobalUnlock(handle); }
+        }
+        finally { CloseClipboard(); }
+    }
+
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool OpenClipboard(nint owner);
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern bool CloseClipboard();
+    [System.Runtime.InteropServices.DllImport("user32.dll")] private static extern nint GetClipboardData(uint format);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern nint GlobalLock(nint memory);
+    [System.Runtime.InteropServices.DllImport("kernel32.dll")] private static extern bool GlobalUnlock(nint memory);
+}
