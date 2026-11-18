@@ -522,6 +522,10 @@ internal sealed class AudioToTextView : ToolPage
     }
 
     /// <summary>Transcribes one queued file; returns false when it failed.</summary>
+    /// <summary>The file and engine a failure concerns, for the Error log.</summary>
+    internal static string Context(QueueItem item, bool cloud, int model) =>
+        $"file \"{item.Name}\" · {(cloud ? "OpenAI" : $"local Whisper model {model}")}";
+
     private async Task<bool> TranscribeOneAsync(QueueItem item, bool cloud, int model, string language, bool marks, CancellationTokenSource run)
     {
         item.State = ItemState.Transcribing;
@@ -583,13 +587,15 @@ internal sealed class AudioToTextView : ToolPage
         }
         catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException or ArgumentException)
         {
+            ErrorLog.Write(error, "Audio to text", Context(item, cloud, model));
             item.State = ItemState.Failed;
             item.Error = error.Message;
             return false;
         }
         catch (Exception error)
         {
-            ErrorLog.Write(error);
+            // Includes OpenAI timeouts: a cancellation the user did not ask for.
+            ErrorLog.Write(error, "Audio to text", Context(item, cloud, model));
             item.State = ItemState.Failed;
             item.Error = "Could not transcribe this file. Check the speech recognition setting.";
             return false;

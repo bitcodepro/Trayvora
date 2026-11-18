@@ -1330,7 +1330,7 @@ internal sealed class DiscussionWindow(
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         { _status.Text = "Dictation cancelled."; }
-        catch (IOException error) { _status.Text = error.Message; }
+        catch (IOException error) { _status.Text = error.Message; } // recognition failures are logged by the recognizer
         catch (Exception error)
         {
             ErrorLog.Write(error, "Sessions · dictation");

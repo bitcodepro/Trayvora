@@ -1347,6 +1347,10 @@ internal sealed class VoiceOverlay : Window
     /// Records from the selected microphone until <paramref name="stopRecording"/> fires (or the 30-second limit)
     /// and returns the transcript. Used by session dictation; shares the main window's microphone, language and recognizer.
     /// </summary>
+    /// <summary>Which recognizer a place uses, for the Error log.</summary>
+    private string RecognizerName(RecognitionPlace place) =>
+        OperatingSystem.IsWindows() && _speech is not null ? (_speech.CloudFor(place) ? "OpenAI" : "local Whisper") : "default";
+
     public async Task<string?> DictateAsync(CancellationToken stopRecording, CancellationToken cancel, IProgress<double> level)
     {
         if (_suspended || _operation is not null) throw new IOException("Trayvora is busy with another recording or request. Try again when it finishes.");
@@ -1373,11 +1377,20 @@ internal sealed class VoiceOverlay : Window
             operation.Token.ThrowIfCancellationRequested();
             return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
         }
-        catch (Exception error) when (error is not OperationCanceledException and not IOException)
+        catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
-            ErrorLog.Write(error, "Recording / speech recognition");
+            throw;
+        }
+        catch (Exception error)
+        {
+            // Every failure is logged, including OpenAI errors (401, 429, 5xx, IOException) and timeouts
+            // (a TaskCanceledException that nobody asked for).
+            ErrorLog.Write(error, "Sessions · speech recognition", $"recognizer {RecognizerName(RecognitionPlace.Sessions)}, language {language}");
             if (error is WhisperModelVerificationException) _modelNeedsReplacement = true;
-            throw new IOException(FriendlyError(error, "Could not record or transcribe"));
+            if (error is IOException) throw;
+            throw new IOException(error is OperationCanceledException
+                ? "Speech recognition timed out. Try again."
+                : FriendlyError(error, "Could not record or transcribe"), error);
         }
         finally
         {
