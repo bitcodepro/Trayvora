@@ -1704,7 +1704,7 @@ internal sealed class DiscussionWindow(
         Grid.SetColumn(avatar, mine ? 1 : 0);
         Grid.SetColumn(column, mine ? 0 : 1);
         row.Children.AddRange([avatar, column]);
-        AttachTools(row, tools, message);
+        AttachTools(row, tools, message, bubble.Child as MarkdownView);
         Place(message, row, scroll, insertAt);
     }
 
@@ -1730,12 +1730,12 @@ internal sealed class DiscussionWindow(
         HorizontalAlignment = alignRight ? HorizontalAlignment.Right : HorizontalAlignment.Left,
     };
 
-    private void AttachTools(Control owner, StackPanel tools, DiscussionMessage message)
+    private void AttachTools(Control owner, StackPanel tools, DiscussionMessage message, MarkdownView? view = null)
     {
         void Build()
         {
             if (tools.Children.Count > 0) return;
-            owner.ContextMenu = FillTools(tools, message);
+            owner.ContextMenu = FillTools(tools, message, view);
         }
         owner.PointerEntered += (_, _) => { Build(); tools.Opacity = 1; };
         owner.PointerExited += (_, _) => tools.Opacity = 0;
@@ -1755,7 +1755,7 @@ internal sealed class DiscussionWindow(
             && !(message.Sender == DiscussionMember.Boss && message.To is null));
 
     /// <summary>Hover toolbar under a message plus the same actions in a right-click menu.</summary>
-    private ContextMenu FillTools(StackPanel tools, DiscussionMessage message)
+    private ContextMenu FillTools(StackPanel tools, DiscussionMessage message, MarkdownView? view = null)
     {
         var items = new List<MenuItem>();
 
@@ -1776,6 +1776,13 @@ internal sealed class DiscussionWindow(
             items.Add(item);
         }
 
+        if (view is not null)
+        {
+            Add("", "Select", "Select text (any part; Esc to return)", () => { view.ToggleSelecting(); return Task.CompletedTask; });
+            var all = new MenuItem { Header = "Select all text", Icon = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 12 } };
+            all.Click += (_, _) => { if (view.Selecting) view.ToggleSelecting(); view.ToggleSelecting(selectAll: true); };
+            items.Add(all);
+        }
         Add(TrayvoraTheme.IconCopy, null, "Copy message", async () =>
         {
             if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)

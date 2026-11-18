@@ -458,6 +458,22 @@ public sealed class DesktopEventsTests
         live.Show("First paragraph.\n\nSecond paragraph");
         Assert.Equal(3, live.Rebuilt);
         Assert.Equal(["First paragraph.", "Second paragraph"], live.GetLogicalDescendants().OfType<SelectableTextBlock>().Select(block => block.Text));
+
+        // Select text: the whole message becomes one read-only box (selection can cross paragraphs, lists and code), and back.
+        live.ToggleSelecting();
+        Assert.True(live.Selecting);
+        var box = Assert.Single(live.GetLogicalDescendants().OfType<TextBox>());
+        Assert.True(box.IsReadOnly);
+        Assert.Equal("First paragraph.\n\nSecond paragraph", box.Text);
+        Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
+        live.Show("First paragraph.\n\nSecond paragraph\n\nThird");
+        Assert.Equal("First paragraph.\n\nSecond paragraph\n\nThird", box.Text);
+        Assert.Same(box, live.Children[^1]);
+        Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
+        live.ToggleSelecting();
+        Assert.False(live.Selecting);
+        Assert.Empty(live.GetLogicalDescendants().OfType<TextBox>());
+        Assert.All(live.Children, child => Assert.True(child.IsVisible));
     }
 
     private static void VerifyLongSession()

@@ -129,7 +129,7 @@ internal sealed class ChatFeed : UserControl
             live.View.Opacity = 0.75;
             live.View.Show(done.Answer);
         }
-        FillTools(live.Tools, done);
+        FillTools(live.Tools, done, live.View);
         ScrollToEnd(force: false);
     }
 
@@ -160,7 +160,7 @@ internal sealed class ChatFeed : UserControl
             view.IsVisible = true;
             if (entry.Failed) view.Opacity = 0.75;
             view.Show(entry.Answer);
-            FillTools(tools, entry);
+            FillTools(tools, entry, view);
             _items.Children.Add(bubble);
         }
         Dispatcher.UIThread.Post(() => _scroll.ScrollToEnd(), DispatcherPriority.Background);
@@ -210,10 +210,16 @@ internal sealed class ChatFeed : UserControl
         return (bubble, view, waiting, tools, steps);
     }
 
-    private void FillTools(StackPanel tools, Entry entry)
+    private void FillTools(StackPanel tools, Entry entry, MarkdownView? view = null)
     {
         tools.Children.Clear();
         if (entry.Failed || entry.Answer.Length == 0) return;
+        if (view is not null)
+            tools.Children.Add(Tool("", "Select text: show the reply as one text where you can select any part (Esc to return)", _ =>
+            {
+                view.ToggleSelecting();
+                return Task.CompletedTask;
+            }, "Select"));
         tools.Children.Add(Tool("", "Copy", async button =>
         {
             if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)
