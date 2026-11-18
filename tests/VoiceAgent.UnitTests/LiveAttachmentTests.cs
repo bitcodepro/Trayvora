@@ -115,33 +115,55 @@ public sealed class LiveAttachmentTests(ITestOutputHelper log)
         var folder = Directory.CreateTempSubdirectory("trayvora-live-files-");
         try
         {
-            var envelope = DiscussionWindow.ForAgent(LongText(), folder.FullName, "Claude-to-Codex") + "\n\nWhat is the secret word at the end of the full text? Reply with the word only.";
-            var reply = await CodexAsync(envelope, CodexSession.FilesIn(envelope, folder.FullName));
+            var (envelope, file) = DiscussionWindow.ForAgentWithFile(LongText(), folder.FullName, "Claude-to-Codex");
+            var reply = await CodexAsync(envelope + "\n\nWhat is the secret word at the end of the full text? Reply with the word only.", [file!]);
             Assert.Contains(Marker, reply);
         }
         finally { folder.Delete(recursive: true); }
     }
 
     [Fact]
-    public void FilesNamedInAMessageAreFoundOnlyInsideTheSessionFolder()
+    public void ForwardedMessagesOnlyTakeFilesFromTheSessionFolder()
+    {
+        var root = Directory.CreateTempSubdirectory("trayvora-files-");
+        try
+        {
+            var folder = Directory.CreateDirectory(Path.Combine(root.FullName, "attachments", "room")).FullName;
+            var image = Path.Combine(folder, "shot.png");
+            File.WriteAllBytes(image, SolidPng(2, 2, 0, 0, 0));
+            var secret = Path.Combine(root.FullName, "secret.txt");
+            File.WriteAllText(secret, "synthetic secret");
+            var text = ComposerAttachments.WithFiles("look", [
+                image,
+                Path.Combine(folder, "..", "..", "secret.txt"),          // climbs out of the folder
+                folder + Path.DirectorySeparatorChar + @"..\..\secret.txt",
+                secret,                                                  // outside, named directly
+                Path.Combine(folder, "gone.txt"),                       // does not exist
+            ]);
+            Assert.Equal([image], ComposerAttachments.FilesIn(text, folder));
+            // A path mentioned in ordinary text, outside the attachment list, is never taken.
+            Assert.Empty(ComposerAttachments.FilesIn("see " + image, folder));
+        }
+        finally { root.Delete(recursive: true); }
+    }
+
+    [Fact]
+    public void LongMessageAndPictureBothReachCodexAsInput()
     {
         var folder = Directory.CreateTempSubdirectory("trayvora-files-");
-        var other = Directory.CreateTempSubdirectory("trayvora-other-");
         try
         {
             var image = Path.Combine(folder.FullName, "shot.png");
             File.WriteAllBytes(image, SolidPng(2, 2, 0, 0, 0));
-            var outside = Path.Combine(other.FullName, "secret.txt");
-            File.WriteAllText(outside, "x");
-            var envelope = DiscussionWindow.ForAgent(new string('a', DiscussionWindow.MaxLength + 1), folder.FullName, "x");
-            var text = ComposerAttachments.WithFiles(envelope, [image, outside, Path.Combine(folder.FullName, "gone.txt")]);
-            var found = CodexSession.FilesIn(text, folder.FullName);
-            Assert.Equal(2, found.Count);
-            Assert.EndsWith(".txt", found[0]);
-            Assert.Equal(image, found[1]);
-            Assert.Equal(2, CodexSession.AttachmentInput([image]).Count());
+            // The longest message the Sessions window accepts goes to Codex whole, not just its preview.
+            var longest = new string('a', DiscussionWindow.MaxTypedLength - 20) + Marker;
+            var message = ComposerAttachments.WithFiles(longest, [image]);
+            var (_, file) = DiscussionWindow.ForAgentWithFile(message, folder.FullName, "Boss-to-Codex");
+            var input = CodexSession.AttachmentInput([file!, image]).Select(item => System.Text.Json.JsonSerializer.Serialize(item)).ToArray();
+            Assert.Contains(input, item => item.Contains(Marker) && item.Contains("full content"));
+            Assert.Contains(input, item => item.Contains("\"localImage\""));
         }
-        finally { folder.Delete(recursive: true); other.Delete(recursive: true); }
+        finally { folder.Delete(recursive: true); }
     }
 
     [Fact]

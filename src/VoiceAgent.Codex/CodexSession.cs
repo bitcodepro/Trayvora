@@ -111,7 +111,7 @@ public sealed partial class CodexSession(string dataDirectory)
     }
 
     /// <summary>Largest text file put into a turn (Codex here has no shell to open files itself).</summary>
-    internal const int MaxAttachedTextChars = 400_000;
+    internal const int MaxAttachedTextChars = 4_000_000; // covers any message or reply Trayvora passes on
 
     internal static readonly string[] ImageExtensions = [".png", ".jpg", ".jpeg", ".gif", ".webp", ".bmp"];
 
@@ -119,21 +119,6 @@ public sealed partial class CodexSession(string dataDirectory)
     /// Turn input for attached files. Trayvora's Codex runs without shell tools, so it cannot open a file by its path:
     /// pictures go in as images and text files as their content.
     /// </summary>
-    /// <summary>Files named in a message that lie inside <paramref name="folder"/> (attachments and long-message files).</summary>
-    public static IReadOnlyList<string> FilesIn(string text, string folder)
-    {
-        var root = Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
-        var found = new List<string>();
-        foreach (var line in text.Split('\n'))
-        {
-            var start = line.IndexOf(root, StringComparison.OrdinalIgnoreCase);
-            if (start < 0) continue;
-            var path = line[start..].Trim().TrimEnd('.', ')', ']', '`', '"');
-            if (File.Exists(path) && !found.Contains(path, StringComparer.OrdinalIgnoreCase)) found.Add(path);
-        }
-        return found;
-    }
-
     internal static IEnumerable<object> AttachmentInput(IReadOnlyList<string>? files)
     {
         foreach (var file in files ?? [])

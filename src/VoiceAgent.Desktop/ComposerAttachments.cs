@@ -79,9 +79,69 @@ internal sealed class ComposerAttachments
     }
 
     /// <summary>The message text with the list of attached files the agents should open.</summary>
+    private const string ListHeader = "[Attached files — open them before answering:]";
+
     public static string WithFiles(string text, IReadOnlyList<string> files) =>
         files.Count == 0 ? text
-            : text + "\n\n[Attached files — open them before answering:]\n" + string.Join("\n", files.Select(file => "- " + file));
+            : text + "\n\n" + ListHeader + "\n" + string.Join("\n", files.Select(file => "- " + file));
+
+    /// <summary>
+    /// Moves attachments that were copied into another session's folder (the user switched sessions after attaching)
+    /// into <paramref name="folder"/>, so the agent of this session can read them; returns the files to send.
+    /// </summary>
+    public IReadOnlyList<string> MoveInto(string folder)
+    {
+        var root = Root(folder);
+        for (var i = 0; i < _files.Count; i++)
+        {
+            if (Inside(_files[i], root)) continue;
+            Directory.CreateDirectory(folder);
+            var target = Free(folder, Path.GetFileName(_files[i]));
+            File.Move(_files[i], target);
+            _files[i] = target;
+        }
+        Redraw();
+        return [.. _files];
+    }
+
+    /// <summary>
+    /// Attached files named in a saved message (used when it is forwarded): only existing files whose full path lies
+    /// inside <paramref name="folder"/>; "..", other drives and links that lead elsewhere are refused.
+    /// </summary>
+    public static IReadOnlyList<string> FilesIn(string text, string folder)
+    {
+        var root = Root(folder);
+        var marker = text.LastIndexOf(ListHeader, StringComparison.Ordinal);
+        if (marker < 0) return [];
+        var found = new List<string>();
+        foreach (var line in text[(marker + ListHeader.Length)..].Split('\n'))
+        {
+            if (!line.StartsWith("- ", StringComparison.Ordinal)) continue;
+            string path;
+            try { path = Path.GetFullPath(line[2..].Trim()); }
+            catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException) { continue; }
+            if (Inside(path, root) && File.Exists(path) && !found.Contains(path, StringComparer.OrdinalIgnoreCase)) found.Add(path);
+        }
+        return found;
+    }
+
+    private static string Root(string folder) => Path.GetFullPath(folder).TrimEnd(Path.DirectorySeparatorChar) + Path.DirectorySeparatorChar;
+
+    /// <summary>True when <paramref name="file"/> resolves to a plain file directly inside the folder <paramref name="root"/>.</summary>
+    internal static bool Inside(string file, string root)
+    {
+        try
+        {
+            var full = Path.GetFullPath(file);
+            if (!string.Equals(Path.GetDirectoryName(full) + Path.DirectorySeparatorChar, root, StringComparison.OrdinalIgnoreCase)) return false;
+            var info = new FileInfo(full);
+            return info.Exists && info.LinkTarget is null && !info.Attributes.HasFlag(FileAttributes.ReparsePoint);
+        }
+        catch (Exception error) when (error is ArgumentException or NotSupportedException or PathTooLongException or IOException or UnauthorizedAccessException)
+        {
+            return false;
+        }
+    }
 
     public void Clear()
     {
@@ -96,6 +156,11 @@ internal sealed class ComposerAttachments
         Directory.CreateDirectory(folder);
         var safe = string.Concat(Path.GetFileName(name).Select(c => Path.GetInvalidFileNameChars().Contains(c) ? '_' : c));
         if (safe.Length == 0) safe = "file";
+        return Free(folder, safe);
+    }
+
+    private static string Free(string folder, string safe)
+    {
         var stem = Path.GetFileNameWithoutExtension(safe);
         var extension = Path.GetExtension(safe);
         var target = Path.Combine(folder, safe);

@@ -590,7 +590,7 @@ internal sealed class VoiceOverlay : Window
         if (_discussion is null)
         {
             var folder = Path.Combine(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings"), "discussions");
-            _discussion = new DiscussionWindow(new DiscussionStore(folder), async (agent, message, room, stream, ct) =>
+            _discussion = new DiscussionWindow(new DiscussionStore(folder), async (agent, message, room, stream, files, ct) =>
             {
                 if (agent == DiscussionMember.Claude)
                 {
@@ -633,7 +633,7 @@ internal sealed class VoiceOverlay : Window
                 {
                     result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
                         steps: new ReplyStream.Reporter(stream.Activity),
-                        attachments: CodexSession.FilesIn(message, Path.Combine(folder, "attachments", room.Id.ToString("N"))));
+                        attachments: files);
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
                 {

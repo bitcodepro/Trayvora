@@ -24,7 +24,7 @@ internal sealed record CodexChatOption(Guid Id, string Title, bool Desktop)
 /// </summary>
 internal sealed class DiscussionWindow(
     DiscussionStore store,
-    Func<DiscussionMember, string, DiscussionRoom, ReplyStream, CancellationToken, Task<string?>> send,
+    Func<DiscussionMember, string, DiscussionRoom, ReplyStream, IReadOnlyList<string>, CancellationToken, Task<string?>> send,
     Func<IReadOnlyList<Conversation>> codexChats,
     Func<CancellationToken, Task<IReadOnlyList<DesktopChat>>>? desktopChats,
     Func<Task<IReadOnlyList<ClaudeChat>>> claudeChats,
@@ -56,7 +56,7 @@ internal sealed class DiscussionWindow(
     private const double BubbleWidth = 860;
     private const string OwnThreadTitle = "Own Trayvora thread for this session";
 
-    private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null);
+    private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null, IReadOnlyList<string>? Files = null);
 
     /// <summary>How many times the lead may hand the plan to the partner (Settings → Sessions, default 5).</summary>
     private int DiscussExchanges => Math.Clamp(discussRounds?.Invoke() ?? DiscussionOptions.DefaultRounds, DiscussionOptions.MinRounds, DiscussionOptions.MaxRounds);
@@ -139,7 +139,9 @@ internal sealed class DiscussionWindow(
     private readonly Button _attachButton = new() { Content = new TextBlock { Text = "\uE723", FontFamily = IconFont, FontSize = 15 } };
     private ComposerAttachments? _attachments;
     private ComposerAttachments Attachments => _attachments ??= new ComposerAttachments(
-        () => _room is { } room ? Path.Combine(store.Directory, "attachments", room.Id.ToString("N")) : null);
+        () => _room is { } room ? AttachmentsFolder(room) : null);
+
+    private string AttachmentsFolder(DiscussionRoom room) => Path.Combine(store.Directory, "attachments", room.Id.ToString("N"));
     internal const double EditorMinHeight = 44, EditorDefaultMaxHeight = 160;
     private readonly Button _pause = new() { Content = "Pause", IsVisible = false };
     private readonly Button _mic = new();
@@ -413,17 +415,20 @@ internal sealed class DiscussionWindow(
     /// whole as a .txt file in <paramref name="folder"/> and the agent gets its path, a short preview and an
     /// instruction to read the file, so nothing is cut and the message stays under Codex's per-turn limit.
     /// </summary>
-    internal static string ForAgent(string text, string folder, string name)
+    internal static string ForAgent(string text, string folder, string name) => ForAgentWithFile(text, folder, name).Text;
+
+    /// <summary>The text an agent receives and, for a long message, the file holding the whole of it.</summary>
+    internal static (string Text, string? File) ForAgentWithFile(string text, string folder, string name)
     {
-        if (text.Length <= MaxLength) return text;
+        if (text.Length <= MaxLength) return (text, null);
         Directory.CreateDirectory(folder);
         var safe = string.Concat(name.Select(c => char.IsAsciiLetterOrDigit(c) || c is '-' or '_' ? c : '-'));
         var stem = $"{DateTimeOffset.Now:yyyyMMdd-HHmmss}-{safe}-{Guid.NewGuid():N}";
         var file = Path.Combine(folder, stem[..Math.Min(60, stem.Length)] + ".txt");
         File.WriteAllText(file, text, new System.Text.UTF8Encoding(encoderShouldEmitUTF8Identifier: true));
         var preview = text[..Math.Min(PreviewLength, text.Length)].TrimEnd();
-        return $"[Trayvora: this message is long ({text.Length:N0} characters), so the full text is attached as a file. " +
-            $"Read the whole file before you answer: {file}]\n\nBeginning of the message:\n{preview}\n[… continues in the file]";
+        return ($"[Trayvora: this message is long ({text.Length:N0} characters), so the full text is attached as a file. " +
+            $"Read the whole file before you answer: {file}]\n\nBeginning of the message:\n{preview}\n[… continues in the file]", file);
     }
 
     internal const int PreviewLength = 1500;
@@ -1374,13 +1379,20 @@ internal sealed class DiscussionWindow(
             room.Title = DiscussionStore.TitleFrom(text);
             _title.Text = room.Title;
         }
+        // Files attached while another session was open are moved into this session's folder first.
+        try { attached = [.. Attachments.MoveInto(AttachmentsFolder(room))]; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException)
+        {
+            _status.Text = "Could not move the attachments into this session: " + error.Message;
+            return;
+        }
         _editor.Clear();
         text = ComposerAttachments.WithFiles(text, attached);
         sent = ComposerAttachments.WithFiles(sent, attached);
         Attachments.Clear();
         Append(room, new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
             RelayTo: relayTo, DiscussWith: discuss?.Partner));
-        await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss)));
+        await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss, attached)));
     }
 
     private async Task ForwardAsync(DiscussionMessage message, DiscussionMember target)
@@ -1393,7 +1405,8 @@ internal sealed class DiscussionWindow(
         }
         if (!Ready(room, [target])) return;
         Append(room, new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender));
-        await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender)]);
+        await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender,
+            Files: ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room)))]);
     }
 
     private bool Ready(DiscussionRoom room, IEnumerable<DiscussionMember> targets)
@@ -1455,9 +1468,11 @@ internal sealed class DiscussionWindow(
             string? answer;
             try
             {
-                var body = await Task.Run(() => ForAgent(delivery.Text, Path.Combine(store.Directory, "attachments", room.Id.ToString("N")), $"{delivery.From}-to-{agent}"));
+                var (body, file) = await Task.Run(() => ForAgentWithFile(delivery.Text, AttachmentsFolder(room), $"{delivery.From}-to-{agent}"));
+                // The agent gets the files themselves, not paths parsed back out of the text.
+                IReadOnlyList<string> files = file is null ? delivery.Files ?? [] : [file, .. delivery.Files ?? []];
                 answer = await send(agent, Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss),
-                    room, stream, cancel.Token);
+                    room, stream, files, cancel.Token);
             }
             catch (Exception error)
             {

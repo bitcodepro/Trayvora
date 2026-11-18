@@ -173,7 +173,7 @@ public sealed class DesktopEventsTests
             var store = new DiscussionStore(folder.FullName);
             var sent = new List<(DiscussionMember Agent, string Text)>();
             var claudeFails = false;
-            var view = new DiscussionWindow(store, (agent, text, _, _, _) =>
+            var view = new DiscussionWindow(store, (agent, text, _, _, _, _) =>
                 {
                     sent.Add((agent, text));
                     if (claudeFails && agent == DiscussionMember.Claude) throw new IOException("Claude Code was not found.");
@@ -312,7 +312,7 @@ public sealed class DesktopEventsTests
             };
             var endless = false;
             var rounds = 5;
-            var view = new DiscussionWindow(store, (agent, text, _, _, _) =>
+            var view = new DiscussionWindow(store, (agent, text, _, _, _, _) =>
                 {
                     calls.Add((agent, text));
                     if (endless) return Task.FromResult<string?>(agent == DiscussionMember.Codex ? "Claude: one more question?" : "Codex: and one more from me");
@@ -390,7 +390,7 @@ public sealed class DesktopEventsTests
             var started = new List<DiscussionMember>();
             var replies = new Dictionary<DiscussionMember, TaskCompletionSource<string?>>();
             var streams = new Dictionary<DiscussionMember, ReplyStream>();
-            var view = new DiscussionWindow(store, async (agent, _, _, stream, ct) =>
+            var view = new DiscussionWindow(store, async (agent, _, _, stream, _, ct) =>
                 {
                     started.Add(agent);
                     streams[agent] = stream;
@@ -454,6 +454,14 @@ public sealed class DesktopEventsTests
             var message = ComposerAttachments.WithFiles("Посмотри", attachments.Files);
             Assert.Contains(attachments.Files[1], message);
             Assert.Equal("Посмотри", ComposerAttachments.WithFiles("Посмотри", []));
+
+            // Attached in one session, sent from another: the files move into the sending session's folder.
+            var other = Path.Combine(folder.FullName, "other-session");
+            var moved = attachments.MoveInto(other);
+            Assert.Equal(["notes.txt", "notes (2).txt"], moved.Select(Path.GetFileName));
+            Assert.All(moved, file => Assert.True(File.Exists(file) && file.StartsWith(other + Path.DirectorySeparatorChar)));
+            Assert.Equal(moved, attachments.Files);
+            Assert.Equal(moved, ComposerAttachments.FilesIn(ComposerAttachments.WithFiles("x", moved), other));
 
             using (var image = new Avalonia.Media.Imaging.WriteableBitmap(new Avalonia.PixelSize(4, 4), new Avalonia.Vector(96, 96)))
                 Assert.True(attachments.AddImage(image));
@@ -529,7 +537,7 @@ public sealed class DesktopEventsTests
             for (var i = 0; i < 130; i++)
                 room.Messages.Add(new DiscussionMessage(DiscussionMember.Codex, DiscussionMember.Boss, $"message {i}", DateTimeOffset.Now));
             store.Save(room);
-            var view = new DiscussionWindow(store, (_, _, _, _, _) => Task.FromResult<string?>("ok"),
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => Task.FromResult<string?>("ok"),
                 () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
             view.Initialize();
             window.Content = view;
