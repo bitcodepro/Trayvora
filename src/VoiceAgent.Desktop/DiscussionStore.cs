@@ -47,6 +47,10 @@ internal sealed class DiscussionStore(string directory)
     public const string DefaultTitle = "New session";
     private const long MaxFileBytes = 64L * 1024 * 1024;
     private static readonly JsonSerializerOptions Json = new() { WriteIndented = true };
+    // Reading a session while it is replaced fails on Windows, so reads and writes in this app take turns.
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, Lock> Gates = new(StringComparer.OrdinalIgnoreCase);
+    private Lock Gate => Gates.GetOrAdd(Path.GetFullPath(Directory), _ => new Lock());
+    internal const int Attempts = 8;
 
     public string Directory { get; } = directory;
 
@@ -60,6 +64,11 @@ internal sealed class DiscussionStore(string directory)
 
     public IReadOnlyList<DiscussionRoom> Load()
     {
+        lock (Gate) return LoadLocked();
+    }
+
+    private IReadOnlyList<DiscussionRoom> LoadLocked()
+    {
         if (!System.IO.Directory.Exists(Directory)) return [];
         var rooms = new List<DiscussionRoom>();
         foreach (var file in System.IO.Directory.EnumerateFiles(Directory, "*.json"))
@@ -67,39 +76,63 @@ internal sealed class DiscussionStore(string directory)
             if (!Guid.TryParse(Path.GetFileNameWithoutExtension(file), out var id)) continue;
             try
             {
-                using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.Read);
-                if (stream.Length > MaxFileBytes) continue;
-                var room = JsonSerializer.Deserialize<DiscussionRoom>(stream, Json);
+                // Another program (an antivirus or indexer) may hold the file for a moment: try again before skipping it.
+                var room = Retry(() =>
+                {
+                    using var stream = new FileStream(file, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
+                    return stream.Length > MaxFileBytes ? null : JsonSerializer.Deserialize<DiscussionRoom>(stream, Json);
+                });
                 if (room is null || room.Id != id) continue;
                 room.Messages ??= [];
                 if (room.CodexChatId == Guid.Empty) room.CodexChatId = room.Id;
                 rooms.Add(room);
             }
-            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException) { }
+            catch (FileNotFoundException) { } // deleted meanwhile
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
+            {
+                ErrorLog.Write(error, "Sessions · load", $"file {Path.GetFileName(file)}");
+            }
         }
         return rooms.OrderByDescending(room => room.Updated).ToArray();
     }
 
+    /// <summary>Writes the session through a temporary file; throws if it could not be saved after several tries.</summary>
     public void Save(DiscussionRoom room)
     {
         System.IO.Directory.CreateDirectory(Directory);
         var file = FileFor(room.Id);
         var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
+        var bytes = JsonSerializer.SerializeToUtf8Bytes(room, Json);
         try
         {
-            File.WriteAllBytes(temporary, JsonSerializer.SerializeToUtf8Bytes(room, Json));
-            File.Move(temporary, file, overwrite: true);
+            File.WriteAllBytes(temporary, bytes);
+            lock (Gate) Retry(() => { File.Move(temporary, file, overwrite: true); return true; });
         }
         finally
         {
-            File.Delete(temporary);
+            try { File.Delete(temporary); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
         }
     }
 
     public void Delete(Guid id)
     {
         var file = FileFor(id);
-        if (File.Exists(file)) File.Delete(file);
+        lock (Gate) Retry(() => { if (File.Exists(file)) File.Delete(file); return true; });
+    }
+
+    /// <summary>Runs <paramref name="action"/> again while the file is briefly locked by someone else.</summary>
+    private static T Retry<T>(Func<T> action)
+    {
+        for (var attempt = 1; ; attempt++)
+        {
+            try { return action(); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException
+                && error is not FileNotFoundException and not DirectoryNotFoundException && attempt < Attempts)
+            {
+                Thread.Sleep(15 * attempt);
+            }
+        }
     }
 
     private string FileFor(Guid id) => Path.Combine(Directory, $"{id:N}.json");
