@@ -28,7 +28,7 @@ dotnet publish $project -m:1 -c Release -r win-x64 --self-contained true -p:Publ
 if ($LASTEXITCODE) { throw "dotnet publish failed ($LASTEXITCODE)." }
 
 Copy-Item -Path (Join-Path $PSScriptRoot 'portable\*') -Destination $package
-Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../docs/setup.md') -Destination (Join-Path $package 'Setup.md')
+Copy-Item -LiteralPath (Join-Path $PSScriptRoot '../README.md') -Destination (Join-Path $package 'README.md')
 
 if ($ModelFile) {
     $model = (Resolve-Path -LiteralPath $ModelFile).Path

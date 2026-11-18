@@ -47,10 +47,3 @@ Or start `Trayvora.exe` from a published build. It creates its own data folders 
 | `src/VoiceAgent.Speech` | Whisper and OpenAI speech, audio capture |
 | `src/VoiceAgent.Application`, `src/VoiceAgent.Infrastructure` | Core logic and storage |
 | `tests/VoiceAgent.UnitTests` | Tests; live tests run only when their environment variables are set |
-
-More detail:
-
-- [setup](docs/setup.md)
-- [architecture](docs/architecture.md)
-- [security](docs/security.md)
-- [plan](plan.md)

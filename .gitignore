@@ -20,3 +20,8 @@ TestResults/
 /logs/
 /artifacts/
 *.log
+
+# Local development notes (not published)
+/plan.md
+/AGENTS.md
+/docs/

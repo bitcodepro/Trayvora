@@ -32,7 +32,7 @@ $expected = @('Trayvora.exe', 'runtimes/win-x64/whisper.dll', 'runtimes/win-x64/
 $actual = @(Get-ChildItem $package -File -Recurse | ForEach-Object { [IO.Path]::GetRelativePath($package, $_.FullName).Replace('\','/') })
 if (@(Compare-Object $expected $actual).Count) { throw "Unexpected compact package layout: $($actual -join ', ')" }
 Copy-Item scripts/portable/START.txt $package
-Copy-Item docs/setup.md (Join-Path $package 'Setup.md')
+Copy-Item README.md (Join-Path $package 'README.md')
 $metadata = @{version=$version;commit=$sha;runtime='win-x64';selfContained=$true;singleFile=$true}
 $metadata | ConvertTo-Json | Set-Content (Join-Path $package 'release.json') -Encoding utf8
 $zip = Join-Path $release 'trayvora-win-x64.zip'
