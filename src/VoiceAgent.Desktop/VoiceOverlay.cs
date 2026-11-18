@@ -1556,7 +1556,10 @@ internal sealed class VoiceOverlay : Window
             else GetPreview().ShowAnswer(answer);
         }
         if (answer is not null && (readAloud || _sharedChat?.ReadAloud == true) && _replyAudio is not null)
+        {
+            Activity.Add("Speech", "Reading the answer aloud.");
             _ = _replyAudio.ReadAsync(answer);
+        }
     }
 
     private Task SendSharedTrackedAsync(string text, bool silent)
@@ -2064,6 +2067,9 @@ internal sealed class VoiceOverlay : Window
         _progress.IsIndeterminate = false;
         _progress.Value = 0;
         _feed.Finish(_status.Text);
+        // The answer text arrives while the operation still runs, so the read-aloud panel saw "busy";
+        // mark it idle again or ReadAsync silently skips the answer.
+        _replyAudio?.Refresh(!_suspended);
         RefreshControls();
         if (_refreshOnResume && IsVisible) _ = RefreshDevicesAsync();
     }
