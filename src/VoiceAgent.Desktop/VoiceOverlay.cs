@@ -183,6 +183,8 @@ internal sealed class VoiceOverlay : Window
         textToAudioButton.Click += (_, _) => { if (OperatingSystem.IsWindows()) OpenTextToAudio(); };
         var activityButton = TrayvoraTheme.NavItem(TrayvoraTheme.IconHistory, "Activity", "Shortcuts · OpenAI requests");
         activityButton.Click += (_, _) => OpenActivity();
+        var errorLogButton = TrayvoraTheme.NavItem("", "Error log", "Errors of the last 7 days");
+        errorLogButton.Click += (_, _) => OpenErrorLog();
         var terminalButton = TrayvoraTheme.NavItem("", "Terminal", "Claude Code · Codex CLI");
         terminalButton.Click += (_, _) =>
         {
@@ -460,7 +462,7 @@ internal sealed class VoiceOverlay : Window
                 new Border { Height = 8 },
                 TrayvoraTheme.Caption("Workspace"), discussionButton, historyButton,
                 new Border { Height = 8 },
-                TrayvoraTheme.Caption("Tools"), audioToTextButton, textToAudioButton, activityButton, terminalButton,
+                TrayvoraTheme.Caption("Tools"), audioToTextButton, textToAudioButton, activityButton, errorLogButton, terminalButton,
                 new Border { Height = 8 },
                 TrayvoraTheme.Caption("Accounts"), _chatGptButton, _claudeButton,
             },
@@ -971,6 +973,19 @@ internal sealed class VoiceOverlay : Window
     private ActivityView? _activityView;
     private static ActivityLog Activity => ActivityLog.Shared;
 
+    private ErrorLogView? _errorLogView;
+
+    private void OpenErrorLog()
+    {
+        if (_errorLogView is null)
+        {
+            _errorLogView = new ErrorLogView();
+            _errorLogView.BackRequested += CloseDiscussion;
+        }
+        _errorLogView.Refresh();
+        ShowPage(_errorLogView, "Trayvora · Error log");
+    }
+
     private void OpenActivity()
     {
         if (_activityView is null)
@@ -1113,6 +1128,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is COMException or UnauthorizedAccessException or InvalidOperationException)
         {
+            ErrorLog.Write(error, "Microphone list");
             _microphone.ItemsSource = Array.Empty<Microphone>();
             _status.Text = FriendlyError(error, "Could not find microphones");
         }
@@ -1266,6 +1282,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "Recording / speech recognition", $"shortcut mode {mode}");
             if (error is WhisperModelVerificationException)
             {
                 _modelNeedsReplacement = true;
@@ -1330,6 +1347,10 @@ internal sealed class VoiceOverlay : Window
     /// Records from the selected microphone until <paramref name="stopRecording"/> fires (or the 30-second limit)
     /// and returns the transcript. Used by session dictation; shares the main window's microphone, language and recognizer.
     /// </summary>
+    /// <summary>Which recognizer a place uses, for the Error log.</summary>
+    private string RecognizerName(RecognitionPlace place) =>
+        OperatingSystem.IsWindows() && _speech is not null ? (_speech.CloudFor(place) ? "OpenAI" : "local Whisper") : "default";
+
     public async Task<string?> DictateAsync(CancellationToken stopRecording, CancellationToken cancel, IProgress<double> level)
     {
         if (_suspended || _operation is not null) throw new IOException("Trayvora is busy with another recording or request. Try again when it finishes.");
@@ -1356,10 +1377,20 @@ internal sealed class VoiceOverlay : Window
             operation.Token.ThrowIfCancellationRequested();
             return string.IsNullOrWhiteSpace(text) ? null : text.Trim();
         }
-        catch (Exception error) when (error is not OperationCanceledException and not IOException)
+        catch (OperationCanceledException) when (operation.IsCancellationRequested)
         {
+            throw;
+        }
+        catch (Exception error)
+        {
+            // Every failure is logged, including OpenAI errors (401, 429, 5xx, IOException) and timeouts
+            // (a TaskCanceledException that nobody asked for).
+            ErrorLog.Write(error, "Sessions · speech recognition", $"recognizer {RecognizerName(RecognitionPlace.Sessions)}, language {language}");
             if (error is WhisperModelVerificationException) _modelNeedsReplacement = true;
-            throw new IOException(FriendlyError(error, "Could not record or transcribe"));
+            if (error is IOException) throw;
+            throw new IOException(error is OperationCanceledException
+                ? "Speech recognition timed out. Try again."
+                : FriendlyError(error, "Could not record or transcribe"), error);
         }
         finally
         {
@@ -1555,11 +1586,13 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is IOException or ArgumentException)
         {
+            ErrorLog.Write(error, "OpenAI question", useLong ? "deep question" : "quick question");
             _status.Text = error.Message;
             Activity.Add("OpenAI", $"Failed: {error.Message}");
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "OpenAI question", useLong ? "deep question" : "quick question");
             _status.Text = "Could not get an answer. Check the saved API key and connection.";
             Activity.Add("OpenAI", $"Failed: {error.GetType().Name}. Check the key and connection.");
         }
@@ -1616,8 +1649,9 @@ internal sealed class VoiceOverlay : Window
             shared.Report(_status.Text);
             if (background && !_suspended && !operation.IsCancellationRequested) GetPreview().ShowStatus(_status.Text);
         }
-        catch (Exception)
+        catch (Exception error)
         {
+            ErrorLog.Write(error, "Codex Desktop chat", shared.TargetTitle);
             _status.Text = "Could not confirm delivery or read the reply. Check the selected Desktop chat before resending.";
             shared.Report(_status.Text);
             if (background && !_suspended && !operation.IsCancellationRequested) GetPreview().ShowStatus(_status.Text);
@@ -1845,11 +1879,13 @@ internal sealed class VoiceOverlay : Window
         catch (Exception error) when (error is IOException or InvalidDataException or InvalidOperationException
             or TimeoutException or ArgumentException or UnauthorizedAccessException)
         {
+            ErrorLog.Write(error, "Codex request", $"chat {chatId}");
             _status.Text = error.Message;
             detail = "Codex could not start the request.";
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "Codex request", $"chat {chatId}");
             _status.Text = FriendlyError(error, "Could not connect to Codex");
             detail = "Could not connect to Codex.";
         }
@@ -1983,6 +2019,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "Whisper model download");
             _status.Text = FriendlyError(error, "Model download failed. Try again");
         }
         finally

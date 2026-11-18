@@ -23,8 +23,15 @@ internal sealed class App : Avalonia.Application
         // A failure in one UI handler must not close the tray app: log it and keep running.
         Dispatcher.UIThread.UnhandledException += (_, args) =>
         {
-            ErrorLog.Write(args.Exception);
+            ErrorLog.Write(args.Exception, "Interface");
             args.Handled = true;
+        };
+        _ = Task.Run(ErrorLog.Prune); // entries older than 7 days are removed even if the Error log is never opened
+        // Failures in background work, and a crash, are recorded too.
+        TaskScheduler.UnobservedTaskException += (_, args) => ErrorLog.Write(args.Exception, "Background task");
+        AppDomain.CurrentDomain.UnhandledException += (_, args) =>
+        {
+            if (args.ExceptionObject is Exception error) ErrorLog.Write(error, "Crash");
         };
     }
 

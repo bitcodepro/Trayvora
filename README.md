@@ -17,7 +17,8 @@ A Windows tray app for talking to coding agents by voice. Trayvora transcribes s
   - audio to text (files of any length, can also save subtitles);
   - text to audio;
   - history of requests;
-  - an activity log of shortcut presses.
+  - an activity log of shortcut presses;
+  - an error log: every error of the last 7 days with where it happened and which chat or session.
 - **Settings:**
   - shortcuts;
   - speech engine;

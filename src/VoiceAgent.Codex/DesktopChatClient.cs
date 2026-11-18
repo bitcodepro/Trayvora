@@ -50,8 +50,17 @@ public sealed class DesktopChatClient(string scratchDirectory)
     {
         await using var server = Connect(profile);
         await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
-        return await ReadTurnsAsync(server, chat, ct).ConfigureAwait(false);
+        return await ReadTurnsAsync(server, chat, ct, HistoryTurns).ConfigureAwait(false);
     }
+
+    /// <summary>Turns loaded by Read history.</summary>
+    internal const int HistoryTurns = 20;
+
+    /// <summary>
+    /// Turns read while waiting for a reply. The message just queued is among the newest, so only those are read:
+    /// a long chat's last 20 turns with their full items can be tens of megabytes.
+    /// </summary>
+    internal const int PollTurns = 3;
 
     /// <param name="answer">Receives the reply written so far while the turn runs.</param>
     /// <param name="wait">How long to wait for the reply before returning null (the turn stays queued in Codex Desktop).</param>
@@ -85,7 +94,7 @@ public sealed class DesktopChatClient(string scratchDirectory)
         var shown = "";
         while (limit == Timeout.InfiniteTimeSpan || deadline.Elapsed < limit)
         {
-            var turns = await ReadTurnsAsync(server, chat, ct).ConfigureAwait(false);
+            var turns = await ReadTurnsAsync(server, chat, ct, PollTurns).ConfigureAwait(false);
             var turn = turns.FirstOrDefault(turn => turn.ClientIds.Contains(messageId));
             // A separate reader can report a running Desktop turn as interrupted until it persists its final status.
             if (turn is { Status: "completed" or "failed" }) return turn;
@@ -151,11 +160,11 @@ public sealed class DesktopChatClient(string scratchDirectory)
         return (chat, ct.IsCancellationRequested ? "interrupted" : "unknown", answer.ToString());
     }
 
-    private static async Task<IReadOnlyList<DesktopTurn>> ReadTurnsAsync(ICodexConnection server, Guid chat, CancellationToken ct)
+    private static async Task<IReadOnlyList<DesktopTurn>> ReadTurnsAsync(ICodexConnection server, Guid chat, CancellationToken ct, int limit)
     {
         var result = await server.RequestAsync("thread/turns/list", new
         {
-            threadId = chat.ToString(), limit = 20, itemsView = "full",
+            threadId = chat.ToString(), limit, itemsView = "full",
         }, ct).ConfigureAwait(false);
         return ParseTurns(result);
     }
