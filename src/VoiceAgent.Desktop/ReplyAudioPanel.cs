@@ -269,11 +269,11 @@ internal sealed class ReplyAudioPanel : StackPanel, IDisposable
         catch (OperationCanceledException) when (token.IsCancellationRequested) { }
         catch (Exception error) when (error is ArgumentException or InvalidOperationException or IOException)
         {
-            if (!token.IsCancellationRequested) _status.Text = error.Message;
+            if (!token.IsCancellationRequested) { ErrorLog.Write(error, "Reading aloud"); _status.Text = error.Message; }
         }
-        catch (Exception)
+        catch (Exception error)
         {
-            if (!token.IsCancellationRequested) _status.Text = "Could not generate or play OpenAI speech.";
+            if (!token.IsCancellationRequested) { ErrorLog.Write(error, "Reading aloud (OpenAI voice)"); _status.Text = "Could not generate or play OpenAI speech."; }
         }
         finally
         {

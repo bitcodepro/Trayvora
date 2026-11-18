@@ -1331,7 +1331,11 @@ internal sealed class DiscussionWindow(
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         { _status.Text = "Dictation cancelled."; }
         catch (IOException error) { _status.Text = error.Message; }
-        catch (Exception) { _status.Text = "Could not record. Check the microphone in the main window."; }
+        catch (Exception error)
+        {
+            ErrorLog.Write(error, "Sessions · dictation");
+            _status.Text = "Could not record. Check the microphone in the main window.";
+        }
         finally
         {
             _dictationStop = null;

@@ -283,6 +283,7 @@ internal sealed class AudioToTextView : ToolPage
         catch (OperationCanceledException) { _status.Text = "Download stopped."; }
         catch (Exception error) when (error is IOException or InvalidDataException or HttpRequestException or UnauthorizedAccessException)
         {
+            ErrorLog.Write(error, "Audio to text");
             _status.Text = error is HttpRequestException ? "Download failed. Check your internet connection and try again." : error.Message;
         }
         finally

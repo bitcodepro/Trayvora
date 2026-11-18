@@ -16,12 +16,17 @@ internal static class ErrorLog
     private const int MaxDetails = 16_000;
     private static readonly Lock Gate = new();
     private static string? _folder;
+    private static DateTimeOffset _pruned = DateTimeOffset.MinValue;
 
     /// <summary>Raised (on any thread) after an error is written or the log is cleared.</summary>
     public static event Action? Changed;
 
     /// <summary>Uses another settings folder (tests); null returns to the default.</summary>
-    internal static void UseFolder(string? folder) => _folder = folder;
+    internal static void UseFolder(string? folder)
+    {
+        _folder = folder;
+        _pruned = DateTimeOffset.MinValue;
+    }
 
     public static string File => Path.Combine(
         _folder ?? Environment.GetEnvironmentVariable("VOICEAGENT_SETTINGS_DIR") ?? Path.Combine(AppContext.BaseDirectory, "settings"),
@@ -41,6 +46,8 @@ internal static class ErrorLog
                 var file = File;
                 Directory.CreateDirectory(Path.GetDirectoryName(file)!);
                 if (System.IO.File.Exists(file) && new FileInfo(file).Length > MaxBytes) Rewrite(file, Read(file).Take(200));
+                // Old entries go even if the Error log page is never opened (checked at most once an hour).
+                if (DateTimeOffset.Now - _pruned > TimeSpan.FromHours(1)) PruneLocked(file);
                 System.IO.File.AppendAllText(file, JsonSerializer.Serialize(entry) + "\n");
             }
             Changed?.Invoke();
@@ -53,17 +60,22 @@ internal static class ErrorLog
     {
         try
         {
-            lock (Gate)
-            {
-                var file = File;
-                if (!System.IO.File.Exists(file)) return [];
-                var all = Read(file);
-                var kept = all.Where(entry => DateTimeOffset.Now - entry.Time <= KeepFor).ToList();
-                if (kept.Count != all.Count) Rewrite(file, kept);
-                return kept;
-            }
+            lock (Gate) return PruneLocked(File);
         }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return []; }
+    }
+
+    /// <summary>Removes entries older than 7 days (called when Trayvora starts and while it writes errors).</summary>
+    public static void Prune() => Entries();
+
+    private static List<ErrorEntry> PruneLocked(string file)
+    {
+        _pruned = DateTimeOffset.Now;
+        if (!System.IO.File.Exists(file)) return [];
+        var all = Read(file);
+        var kept = all.Where(entry => DateTimeOffset.Now - entry.Time <= KeepFor).ToList();
+        if (kept.Count != all.Count) Rewrite(file, kept);
+        return kept;
     }
 
     public static void Clear()

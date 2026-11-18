@@ -1128,6 +1128,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is COMException or UnauthorizedAccessException or InvalidOperationException)
         {
+            ErrorLog.Write(error, "Microphone list");
             _microphone.ItemsSource = Array.Empty<Microphone>();
             _status.Text = FriendlyError(error, "Could not find microphones");
         }
@@ -1281,6 +1282,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "Recording / speech recognition", $"shortcut mode {mode}");
             if (error is WhisperModelVerificationException)
             {
                 _modelNeedsReplacement = true;
@@ -1571,11 +1573,13 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error) when (error is IOException or ArgumentException)
         {
+            ErrorLog.Write(error, "OpenAI question", useLong ? "deep question" : "quick question");
             _status.Text = error.Message;
             Activity.Add("OpenAI", $"Failed: {error.Message}");
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "OpenAI question", useLong ? "deep question" : "quick question");
             _status.Text = "Could not get an answer. Check the saved API key and connection.";
             Activity.Add("OpenAI", $"Failed: {error.GetType().Name}. Check the key and connection.");
         }
@@ -1632,8 +1636,9 @@ internal sealed class VoiceOverlay : Window
             shared.Report(_status.Text);
             if (background && !_suspended && !operation.IsCancellationRequested) GetPreview().ShowStatus(_status.Text);
         }
-        catch (Exception)
+        catch (Exception error)
         {
+            ErrorLog.Write(error, "Codex Desktop chat", shared.TargetTitle);
             _status.Text = "Could not confirm delivery or read the reply. Check the selected Desktop chat before resending.";
             shared.Report(_status.Text);
             if (background && !_suspended && !operation.IsCancellationRequested) GetPreview().ShowStatus(_status.Text);
@@ -2001,6 +2006,7 @@ internal sealed class VoiceOverlay : Window
         }
         catch (Exception error)
         {
+            ErrorLog.Write(error, "Whisper model download");
             _status.Text = FriendlyError(error, "Model download failed. Try again");
         }
         finally

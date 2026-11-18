@@ -188,11 +188,14 @@ public sealed class DesktopEventsTests
 
             var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(box => box.PlaceholderText?.StartsWith("Message Codex", StringComparison.Ordinal) == true);
             var send = view.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Send");
+            var replies = 0;
             foreach (var message in new[] { "First question", "Second question" })
             {
                 editor.Text = message;
                 send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-                Pump(Task.Delay(150));
+                // Wait for the reply itself: a fixed delay was too short on slower CI machines.
+                replies++;
+                PumpUntil(() => store.Load().SingleOrDefault()?.Messages.Count >= replies * 2);
             }
 
             var room = Assert.Single(store.Load());
@@ -208,7 +211,7 @@ public sealed class DesktopEventsTests
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             editor.Text = "Other topic";
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Pump(Task.Delay(150));
+            PumpUntil(() => store.Load().Any(item => item.Title == "Other topic" && item.Messages.Count >= 2));
             Assert.Equal(2, store.Load().Count);
             view.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "First question")
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
@@ -223,7 +226,8 @@ public sealed class DesktopEventsTests
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             editor.Text = "Say hello to Claude";
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Pump(Task.Delay(200));
+            PumpUntil(() => sent.Count >= 3 && store.Load().Single(item => item.Title == "First question").Messages.Count(message => message.Failed) >= 2);
+            Pump(Task.Delay(50));
             Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude, DiscussionMember.Claude], sent.Select(item => item.Agent));
             Assert.Contains("hello from Codex", sent[2].Text);
             Assert.StartsWith("Codex wrote:", sent[2].Text);
@@ -704,6 +708,13 @@ public sealed class DesktopEventsTests
         {
             agent.Close();
         }
+    }
+
+    /// <summary>Runs the UI loop until <paramref name="done"/> is true (at most 8 seconds).</summary>
+    private static void PumpUntil(Func<bool> done)
+    {
+        var deadline = DateTime.UtcNow.AddSeconds(8);
+        while (!done() && DateTime.UtcNow < deadline) Pump(Task.Delay(20));
     }
 
     private static void Pump(Task task)

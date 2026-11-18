@@ -26,6 +26,7 @@ internal sealed class App : Avalonia.Application
             ErrorLog.Write(args.Exception, "Interface");
             args.Handled = true;
         };
+        _ = Task.Run(ErrorLog.Prune); // entries older than 7 days are removed even if the Error log is never opened
         // Failures in background work, and a crash, are recorded too.
         TaskScheduler.UnobservedTaskException += (_, args) => ErrorLog.Write(args.Exception, "Background task");
         AppDomain.CurrentDomain.UnhandledException += (_, args) =>

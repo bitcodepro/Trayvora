@@ -23,6 +23,8 @@ public sealed class ErrorLogTests
             ErrorLog.Write(new IOException("wrapped", new InvalidDataException("Codex App Server emitted an oversized JSON line.")),
                 "Sessions · Codex", "session \"Synthetic\" · Codex Desktop chat \"Test\"");
             ErrorLog.Write(new OperationCanceledException()); // a cancel is not an error
+            // Writing already removed the 8-day-old entry; the Error log page was never opened.
+            Assert.DoesNotContain("\"Old\"", File.ReadAllText(ErrorLog.File));
 
             var entries = ErrorLog.Entries();
             var entry = Assert.Single(entries);
