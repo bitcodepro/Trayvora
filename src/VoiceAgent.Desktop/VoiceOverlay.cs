@@ -630,7 +630,8 @@ internal sealed class VoiceOverlay : Window
                 CodexTurnStatus result;
                 try
                 {
-                    result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId);
+                    result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
+                        steps: new ReplyStream.Reporter(stream.Activity));
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
                 {
@@ -1453,6 +1454,8 @@ internal sealed class VoiceOverlay : Window
             _answer.Text = partial;
             _answer.CaretIndex = partial.Length;
             _status.Text = activity is null ? $"Claude Code · {chat.Title}" : $"Claude Code · {activity}";
+            var (recent, total) = stream.Steps;
+            _feed.Steps(ReplyStream.FormatSteps(recent, total, running: activity is not null));
         };
         timer.Start();
         try
@@ -1807,9 +1810,22 @@ internal sealed class VoiceOverlay : Window
                 ? "Use the Revqora MCP tools for the Git request. Discover repositories with list_repositories before selecting a repository when needed. If the relevant tool is unavailable, say so. User request:\n" + text
                 : text;
             var localResults = historyUnavailable ? null : await Task.Run(() => _history.RecentLocalResults(chatId));
+            var stepLog = new ReplyStream();
+            var stepsReporter = new ReplyStream.Reporter(step =>
+            {
+                stepLog.Activity(step);
+                var (recent, total) = stepLog.Steps;
+                var shown = ReplyStream.FormatSteps(recent, total, running: true);
+                Dispatcher.UIThread.Post(() =>
+                {
+                    if (!ReferenceEquals(_operation, operation)) return;
+                    _feed.Steps(shown);
+                    if (!operation.IsCancellationRequested) _status.Text = $"Codex · {step}";
+                });
+            });
             var status = await Task.Run(() => _codex.RunAsync(routedText, progress, operation.Token,
                 activities => tools = activities, abort.Token, useRevqora: route == RequestRoute.AppMcp,
-                chatId: chatId, localResults: localResults));
+                chatId: chatId, localResults: localResults, steps: stepsReporter));
             (historyStatus, _status.Text) = status switch
             {
                 CodexTurnStatus.Completed => (RequestStatus.Completed, "Codex completed the request."),

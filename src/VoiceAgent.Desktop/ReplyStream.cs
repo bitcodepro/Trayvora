@@ -12,6 +12,8 @@ internal sealed class ReplyStream
     private readonly StringBuilder _text = new();
     private readonly List<string> _notes = [];
     private string? _activity;
+    private readonly List<string> _steps = [];
+    public const int StepsShown = 8;
     private int _version;
 
     /// <summary>Adds text the agent has just produced.</summary>
@@ -60,6 +62,7 @@ internal sealed class ReplyStream
         {
             if (_activity == activity) return;
             _activity = activity;
+            if (activity is not null) AddStep(activity);
             _version++;
         }
     }
@@ -71,6 +74,33 @@ internal sealed class ReplyStream
         {
             if (!_notes.Contains(note)) _notes.Add(note);
         }
+    }
+
+    /// <summary>Adds a step to the visible list; a more detailed label of the same tool replaces the bare one.</summary>
+    private void AddStep(string step)
+    {
+        if (_steps.Count > 0 && (_steps[^1] == step || step.StartsWith(_steps[^1] + " ·", StringComparison.Ordinal)))
+            _steps[^1] = step;
+        else
+            _steps.Add(step);
+        if (_steps.Count > 200) _steps.RemoveRange(0, _steps.Count - 200);
+    }
+
+    /// <summary>The last steps (oldest first) and how many there were in total.</summary>
+    public (IReadOnlyList<string> Recent, int Total) Steps
+    {
+        get { lock (_gate) return (_steps.Skip(Math.Max(0, _steps.Count - StepsShown)).ToArray(), _steps.Count); }
+    }
+
+    /// <summary>Formats steps for a muted list: done steps get ✓, the current one an arrow.</summary>
+    public static string FormatSteps(IReadOnlyList<string> recent, int total, bool running)
+    {
+        if (recent.Count == 0) return "";
+        var lines = new List<string>();
+        if (total > recent.Count) lines.Add($"… {total - recent.Count} earlier steps");
+        for (var i = 0; i < recent.Count; i++)
+            lines.Add((running && i == recent.Count - 1 ? "▸ " : "✓ ") + recent[i]);
+        return string.Join("\n", lines);
     }
 
     public (string Text, string? Activity, int Version) Snapshot()

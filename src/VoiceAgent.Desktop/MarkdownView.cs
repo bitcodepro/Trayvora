@@ -37,13 +37,32 @@ internal sealed class MarkdownView : StackPanel
     private static readonly Cursor Hand = new(StandardCursorType.Hand);
 
     private readonly List<(string Source, Control Control)> _blocks = [];
-    private readonly double _size;
+    private readonly double _baseSize;
+    private double _size;
     private string? _text;
 
+    /// <param name="fontSize">Size at the default theme; the Theme setting for chat text shifts it.</param>
     public MarkdownView(double fontSize = 13.5)
     {
-        _size = fontSize;
+        _baseSize = fontSize;
+        _size = ThemedSize();
         Spacing = 8;
+        AttachedToVisualTree += (_, _) => { Appearance.Changed += Restyle; Restyle(); };
+        DetachedFromVisualTree += (_, _) => Appearance.Changed -= Restyle;
+    }
+
+    private double ThemedSize() => Math.Clamp(_baseSize + Appearance.ChatSize - Appearance.DefaultChatSize, Appearance.MinSize, Appearance.MaxSize);
+
+    /// <summary>Redraws with the new chat text size.</summary>
+    private void Restyle()
+    {
+        var size = ThemedSize();
+        if (size == _size) return;
+        _size = size;
+        var text = _text;
+        _text = null;
+        Truncate(0);
+        if (text is not null) Show(text);
     }
 
     /// <summary>Number of top-level blocks built by the last <see cref="Show"/> calls (for tests of incremental updates).</summary>

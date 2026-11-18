@@ -70,12 +70,13 @@ internal sealed class DiscussionWindow(
     }
 
     /// <summary>The bubble of a reply that is still being written.</summary>
-    private sealed class LiveBubble(ReplyStream stream, Control row, MarkdownView view, TextBlock activity, TextBlock waiting)
+    private sealed class LiveBubble(ReplyStream stream, Control row, MarkdownView view, TextBlock activity, TextBlock waiting, TextBlock steps)
     {
         public ReplyStream Stream { get; } = stream;
         public Control Row { get; } = row;
         public MarkdownView View { get; } = view;
         public TextBlock Activity { get; } = activity;
+        public TextBlock Steps { get; } = steps;
         public TextBlock Waiting { get; } = waiting;
         public DateTime Started { get; } = DateTime.Now;
         public int Version { get; set; } = -1;
@@ -747,6 +748,15 @@ internal sealed class DiscussionWindow(
             TrayvoraTheme.SetSelected(row, ReferenceEquals(room, _room));
             Avalonia.Automation.AutomationProperties.SetName(row, room.Title);
             row.Click += (_, _) => { if (!ReferenceEquals(room, _room)) Open(room); };
+            var rename = new MenuItem { Header = "Rename", InputGesture = new KeyGesture(Key.F2) };
+            rename.Click += (_, _) => StartRename(room, row);
+            row.ContextMenu = new ContextMenu { Items = { rename } };
+            row.KeyDown += (_, args) =>
+            {
+                if (args.Key != Key.F2) return;
+                args.Handled = true;
+                StartRename(room, row);
+            };
             _roomRows.Children.Add(row);
         }
         _roomsEmpty.IsVisible = _items.Count == 0;
@@ -837,6 +847,39 @@ internal sealed class DiscussionWindow(
                 Dispatcher.UIThread.Post(() => _status.Text = failure);
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+    }
+
+    /// <summary>Turns a session row into a text box: Enter or leaving it saves the name, Escape keeps the old one.</summary>
+    private void StartRename(DiscussionRoom room, Button row)
+    {
+        var box = new TextBox { Text = room.Title, MaxLength = 120, MinWidth = 120 };
+        TrayvoraTheme.StyleControls(box);
+        Avalonia.Automation.AutomationProperties.SetName(box, "Session name");
+        var done = false;
+        void Finish(bool save)
+        {
+            if (done) return;
+            done = true;
+            var title = (box.Text ?? "").Trim();
+            if (save && title.Length > 0 && title != room.Title)
+            {
+                room.Title = title;
+                Persist(room);
+                if (ReferenceEquals(room, _room)) _title.Text = title;
+            }
+            RefreshListNow();
+        }
+        box.KeyDown += (_, args) =>
+        {
+            if (args.Key == Key.Enter) { args.Handled = true; Finish(true); }
+            else if (args.Key == Key.Escape) { args.Handled = true; Finish(false); }
+        };
+        box.LostFocus += (_, _) => Finish(true);
+        // Swap the row for the box (not inside the button, which would treat Space and Enter as clicks).
+        var index = _roomRows.Children.IndexOf(row);
+        if (index < 0) return;
+        _roomRows.Children[index] = box;
+        Avalonia.Threading.Dispatcher.UIThread.Post(() => { box.Focus(); box.SelectAll(); }, Avalonia.Threading.DispatcherPriority.Input);
     }
 
     private void RenameRoom()
@@ -1475,6 +1518,7 @@ internal sealed class DiscussionWindow(
     {
         var view = new MarkdownView { IsVisible = false };
         var waiting = new TextBlock { Text = "•", FontSize = 18, Foreground = MemberColor(agent), LetterSpacing = 2 };
+        var steps = new TextBlock { FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, IsVisible = false, LineHeight = 17 };
         var activity = new TextBlock { FontSize = 11, Foreground = TrayvoraTheme.Muted, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         var meta = new StackPanel
         {
@@ -1486,7 +1530,7 @@ internal sealed class DiscussionWindow(
             Background = TrayvoraTheme.Surface, BorderBrush = MemberColor(agent), BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(4, 14, 14, 14), Padding = new Thickness(14, 10), MaxWidth = BubbleWidth,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Child = new StackPanel { Children = { waiting, view } },
+            Child = new StackPanel { Spacing = 6, Children = { steps, waiting, view } },
         };
         var avatar = TrayvoraTheme.Avatar(Initials(agent), MemberColor(agent), 32);
         avatar.VerticalAlignment = VerticalAlignment.Top;
@@ -1494,7 +1538,7 @@ internal sealed class DiscussionWindow(
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(0, 0, 80, 0) };
         Grid.SetColumn(column, 1);
         row.Children.AddRange([avatar, column]);
-        _live[agent] = new LiveBubble(stream, row, view, activity, waiting);
+        _live[agent] = new LiveBubble(stream, row, view, activity, waiting, steps);
         _messages.Children.Add(row);
         UpdateLive();
         ScrollToEnd();
@@ -1511,6 +1555,14 @@ internal sealed class DiscussionWindow(
             var doing = activity ?? (text.Length == 0 ? "is working" : "is writing");
             bubble.Activity.Text = seconds < 1 ? doing + "…" : $"{doing}… · {seconds} s";
             if (text.Length == 0) bubble.Waiting.Text = new string('•', 1 + (int)(DateTime.Now - bubble.Started).TotalMilliseconds / 380 % 3);
+            var (recent, total) = bubble.Stream.Steps;
+            var steps = ReplyStream.FormatSteps(recent, total, running: activity is not null);
+            if (bubble.Steps.Text != steps)
+            {
+                bubble.Steps.Text = steps;
+                bubble.Steps.IsVisible = steps.Length > 0;
+                grew = true;
+            }
             if (version == bubble.Version) continue;
             bubble.Version = version;
             bubble.Waiting.IsVisible = text.Length == 0;

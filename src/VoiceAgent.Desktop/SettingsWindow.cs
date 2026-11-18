@@ -131,7 +131,7 @@ internal sealed class SettingsWindow : Window
             {
                 Margin = new Thickness(22),
                 Spacing = 10,
-                Children = { LanguageCard(settingsDirectory), TrayvoraTheme.Card(new VoiceSettingsPanel(initial, apply, speech, changed)), SessionsCard(discussion), TrayvoraTheme.Card(mcpButton, mcpStatus) },
+                Children = { LanguageCard(settingsDirectory), Appearance.Card(), TrayvoraTheme.Card(new VoiceSettingsPanel(initial, apply, speech, changed)), SessionsCard(discussion), TrayvoraTheme.Card(mcpButton, mcpStatus) },
             },
         };
     }

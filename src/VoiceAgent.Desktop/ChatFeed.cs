@@ -24,7 +24,7 @@ internal sealed class ChatFeed : UserControl
     private readonly DispatcherTimer _throttle = new() { Interval = TimeSpan.FromMilliseconds(120) };
     private List<Entry> _current = [];
     private string _key = "";
-    private (Entry Entry, MarkdownView View, TextBlock Waiting, StackPanel Tools)? _live;
+    private (Entry Entry, MarkdownView View, TextBlock Waiting, StackPanel Tools, TextBlock Steps)? _live;
     private string _liveText = "";
 
     /// <summary>Reads a reply aloud. Null hides the button.</summary>
@@ -85,9 +85,9 @@ internal sealed class ChatFeed : UserControl
         _current.Add(entry);
         _empty.IsVisible = false;
         if (entry.Question.Length > 0) _items.Children.Add(UserBubble(entry.Question));
-        var (bubble, view, waiting, tools) = ReplyBubble(entry);
+        var (bubble, view, waiting, tools, steps) = ReplyBubble(entry);
         _items.Children.Add(bubble);
-        _live = (entry, view, waiting, tools);
+        _live = (entry, view, waiting, tools, steps);
         _liveText = "";
         ScrollToEnd(force: true);
     }
@@ -98,6 +98,16 @@ internal sealed class ChatFeed : UserControl
         if (_live is null) return;
         _liveText = text ?? "";
         if (!_throttle.IsEnabled) _throttle.Start();
+    }
+
+    /// <summary>Shows what the agent is doing right now (commands, files, searches) in the live reply.</summary>
+    public void Steps(string text)
+    {
+        if (_live is not { } live || (live.Steps.Text ?? "") == text) return;
+        var near = NearBottom();
+        live.Steps.Text = text;
+        live.Steps.IsVisible = text.Length > 0;
+        if (near) ScrollToEnd(force: true);
     }
 
     /// <summary>Ends the live reply with its final text, or a note when nothing came back.</summary>
@@ -112,6 +122,7 @@ internal sealed class ChatFeed : UserControl
         if (index >= 0) _current[index] = done;
         _live = null;
         live.Waiting.IsVisible = false;
+        live.Steps.Text = live.Steps.Text?.Replace("▸ ", "✓ ");
         if (done.Failed)
         {
             live.View.IsVisible = true;
@@ -144,7 +155,7 @@ internal sealed class ChatFeed : UserControl
         foreach (var entry in _current.Skip(Math.Max(0, _current.Count - Shown)))
         {
             if (entry.Question.Length > 0) _items.Children.Add(UserBubble(entry.Question));
-            var (bubble, view, waiting, tools) = ReplyBubble(entry);
+            var (bubble, view, waiting, tools, _) = ReplyBubble(entry);
             waiting.IsVisible = false;
             view.IsVisible = true;
             if (entry.Failed) view.Opacity = 0.75;
@@ -173,7 +184,7 @@ internal sealed class ChatFeed : UserControl
         Child = new SelectableTextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 13.5, LineHeight = 20 },
     };
 
-    private static (Control Bubble, MarkdownView View, TextBlock Waiting, StackPanel Tools) ReplyBubble(Entry entry)
+    private static (Control Bubble, MarkdownView View, TextBlock Waiting, StackPanel Tools, TextBlock Steps) ReplyBubble(Entry entry)
     {
         var color = entry.Who.StartsWith("Claude", StringComparison.Ordinal) ? TrayvoraTheme.ClaudeColor
             : entry.Who.StartsWith("Codex", StringComparison.Ordinal) ? TrayvoraTheme.CodexColor : TrayvoraTheme.Accent;
@@ -181,7 +192,8 @@ internal sealed class ChatFeed : UserControl
         var waiting = new TextBlock { Text = "working…", FontSize = 12.5, Foreground = TrayvoraTheme.Muted, FontStyle = FontStyle.Italic };
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Opacity = 0, HorizontalAlignment = HorizontalAlignment.Left };
         var name = new TextBlock { Text = entry.Who, FontWeight = FontWeight.SemiBold, FontSize = 12.5, Foreground = color };
-        var body = new StackPanel { Spacing = 6, Children = { name, waiting, view, tools } };
+        var steps = new TextBlock { FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, IsVisible = false, LineHeight = 17 };
+        var body = new StackPanel { Spacing = 6, Children = { name, steps, waiting, view, tools } };
         var bubble = new Border
         {
             HorizontalAlignment = HorizontalAlignment.Stretch,
@@ -195,7 +207,7 @@ internal sealed class ChatFeed : UserControl
         };
         bubble.PointerEntered += (_, _) => tools.Opacity = 1;
         bubble.PointerExited += (_, _) => tools.Opacity = 0;
-        return (bubble, view, waiting, tools);
+        return (bubble, view, waiting, tools, steps);
     }
 
     private void FillTools(StackPanel tools, Entry entry)

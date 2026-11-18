@@ -17,6 +17,8 @@ internal sealed class App : Avalonia.Application
     {
         Styles.Add(new FluentTheme());
         TrayvoraTheme.AddStyles(Styles);
+        Appearance.Load(Environment.GetEnvironmentVariable("VOICEAGENT_SETTINGS_DIR") ?? Path.Combine(AppContext.BaseDirectory, "settings"));
+        Appearance.Install(Styles);
         // A failure in one UI handler must not close the tray app: log it and keep running.
         Dispatcher.UIThread.UnhandledException += (_, args) =>
         {

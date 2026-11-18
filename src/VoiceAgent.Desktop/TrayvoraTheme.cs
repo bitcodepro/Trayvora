@@ -412,6 +412,7 @@ internal static class TrayvoraTheme
         window.Foreground = Text;
         window.FontFamily = new FontFamily("Segoe UI Variable Text, Segoe UI, Inter");
         window.FontSize = 13.5;
+        Appearance.Apply(window);
         if (AppIcon is { } icon) window.Icon = icon;
     }
 
