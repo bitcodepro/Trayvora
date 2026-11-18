@@ -29,7 +29,7 @@ public sealed class VoiceSettingsTests
         var existing = System.Text.Json.JsonSerializer.Deserialize<VoiceHotkeys>(
             """{"Preview":{"Modifiers":7,"Key":68},"Background":{"Modifiers":1,"Key":66},"Send":{"Modifiers":1,"Key":88}}""")!;
         Assert.Equal("Ctrl+Alt+Shift+D", existing.Preview.ToString());
-        Assert.Equal(9, existing.Entries.Values.Distinct().Count());
+        Assert.Equal(10, existing.Entries.Values.Distinct().Count());
         Assert.True(existing.Entries[VoiceAction.Dictate].IsValid);
     }
 

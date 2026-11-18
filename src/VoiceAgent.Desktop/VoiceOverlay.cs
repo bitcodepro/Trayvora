@@ -1150,6 +1150,13 @@ internal sealed class VoiceOverlay : Window
         }
         _replyAudio?.Stop();
 
+        AnywhereDictation.Target? anywhereTarget = null;
+        if (mode == VoiceShortcutMode.Anywhere)
+        {
+            // Remember where the text cursor is before anything else gets focus.
+            anywhereTarget = AnywhereDictation.Capture();
+        }
+
         DesktopDictation.Target? dictationTarget = null;
         if (mode == VoiceShortcutMode.Dictation)
         {
@@ -1175,14 +1182,14 @@ internal sealed class VoiceOverlay : Window
             var problem = !ReadyFor(place) ? NotReadyMessage(place) : "No microphone selected. Check the microphone in Trayvora.";
             _status.Text = problem;
             Activity.Add("Not started", problem);
-            if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(problem);
+            if (mode is VoiceShortcutMode.WindowsAudio or VoiceShortcutMode.Anywhere) QuietNotice?.Invoke(problem);
             else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation || !IsVisible)
                 GetPreview().ShowStatus(problem);
             return;
         }
 
         using var operation = new CancellationTokenSource();
-        if (mode is VoiceShortcutMode.Background or VoiceShortcutMode.WindowsAudio) Hide();
+        if (mode is VoiceShortcutMode.Background or VoiceShortcutMode.WindowsAudio or VoiceShortcutMode.Anywhere) Hide();
         _preview?.Hide();
         _recordMode = mode;
         using var stopRecording = new CancellationTokenSource();
@@ -1278,9 +1285,14 @@ internal sealed class VoiceOverlay : Window
         }
         if (draft is null)
         {
-            if (mode == VoiceShortcutMode.WindowsAudio) QuietNotice?.Invoke(_status.Text ?? "No speech detected.");
+            if (mode is VoiceShortcutMode.WindowsAudio or VoiceShortcutMode.Anywhere) QuietNotice?.Invoke(_status.Text ?? "No speech detected.");
             else if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Dictation)
                 GetPreview().ShowStatus(_status.Text ?? "No speech detected.");
+            return;
+        }
+        if (mode == VoiceShortcutMode.Anywhere)
+        {
+            await DeliverAnywhereAsync(anywhereTarget, draft);
             return;
         }
         if (mode == VoiceShortcutMode.WindowsAudio)
@@ -1628,6 +1640,30 @@ internal sealed class VoiceOverlay : Window
         try { _discussion?.PendingSaves.Wait(TimeSpan.FromSeconds(3)); }
         catch (AggregateException) { }
         _replyAudio?.Dispose();
+    }
+
+    private async Task DeliverAnywhereAsync(AnywhereDictation.Target? target, string draft)
+    {
+        using var delivery = new CancellationTokenSource(TimeSpan.FromSeconds(5));
+        var result = AnywhereDictation.Result.Failed;
+        try
+        {
+            result = target is { } where
+                ? await AnywhereDictation.DeliverAsync(where, draft, delivery.Token)
+                : AnywhereDictation.SetClipboard(draft) ? AnywhereDictation.Result.Clipboard : AnywhereDictation.Result.Failed;
+        }
+        catch (OperationCanceledException)
+        {
+            result = AnywhereDictation.SetClipboard(draft) ? AnywhereDictation.Result.Clipboard : AnywhereDictation.Result.Failed;
+        }
+        _status.Text = result switch
+        {
+            AnywhereDictation.Result.Typed => "Text typed at the cursor.",
+            AnywhereDictation.Result.Clipboard => "No text cursor: the text is on the clipboard (Ctrl+V to paste).",
+            _ => "Could not type or copy the text. It is in the Trayvora window.",
+        };
+        Activity.Add("Dictation", _status.Text);
+        QuietNotice?.Invoke(_status.Text);
     }
 
     private async Task InsertDictationAsync(DesktopDictation.Target target, string draft)

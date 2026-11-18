@@ -66,6 +66,7 @@ Open **Settings…** from the tray to change all three shortcuts. Default shortc
 - **Ctrl+Shift+Z** starts and stops recording, then opens a compact editable preview.
 - **Ctrl+Alt+Shift+X** sends the current preview.
 - **Ctrl+Alt+Shift+Z** starts and stops background recording and sends the resulting text automatically.
+- **Ctrl+Alt+Shift+A** is Dictate anywhere: press, speak, press again. In any app (Notepad, Word, a browser, a messenger) the text is typed where the text cursor blinks; with no cursor it is copied to the clipboard for Ctrl+V. No window appears and nothing is sent anywhere. Apps that draw their own cursor without a Windows caret (some browsers and Electron apps) get the clipboard instead.
 - **Ctrl+Alt+Shift+S** stops any reply being read aloud at once, whether the Windows voice or an OpenAI voice reads it (Text to audio playback too). Change it in Settings → Shortcuts → Stop reading aloud.
 
 **Show floating agent** places a speaker button on the desktop. Click it to start recording and again to stop and send. The red button indicates recording. The button is disabled while processing. Drag it using the right mouse button.

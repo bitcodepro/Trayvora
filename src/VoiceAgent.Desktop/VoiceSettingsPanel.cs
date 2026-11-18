@@ -37,12 +37,14 @@ internal sealed class VoiceSettingsPanel : StackPanel
             "Press once to start recording what plays on the computer (a video, a call), press again to stop: the speech is recognized, sent to OpenAI as a question and the answer is shown and read aloud. It hears what plays in your speakers or headphones (the other side of a call), not your own microphone. Needs the OpenAI API key.");
         var stopSpeech = AddShortcut("Stop reading aloud", initial.StopSpeechShortcut, OnShortcutChanged,
             "Stops a reply that is being read aloud right away, whichever voice reads it (Windows or OpenAI), including Text to audio playback.");
+        var anywhere = AddShortcut("Dictate anywhere", initial.AnywhereShortcut, OnShortcutChanged,
+            "Works in any app (Notepad, Word, a browser, a messenger). Press once and speak, press again to stop: if a text cursor is blinking in the active window the text is typed there, otherwise it is copied to the clipboard so you can paste it with Ctrl+V. Nothing is sent anywhere else, and no window appears.");
         var feedback = new TextBlock { TextWrapping = TextWrapping.Wrap };
         shortcutsChanged = () =>
         {
             try
             {
-                feedback.Text = apply(new VoiceHotkeys(preview(), background(), send(), dictate(), shared(), longQuestions(), shortQuestions(), windowsAudio(), stopSpeech())) ?? "Shortcuts saved.";
+                feedback.Text = apply(new VoiceHotkeys(preview(), background(), send(), dictate(), shared(), longQuestions(), shortQuestions(), windowsAudio(), stopSpeech(), anywhere())) ?? "Shortcuts saved.";
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException)
             {

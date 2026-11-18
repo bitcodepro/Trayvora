@@ -3,9 +3,9 @@ using VoiceAgent.Application;
 
 namespace VoiceAgent.Desktop;
 
-internal enum VoiceAction { Preview, Background, Send, Dictate, SharedChat, LongQuestions, ShortQuestions, WindowsAudio, StopSpeech }
+internal enum VoiceAction { Preview, Background, Send, Dictate, SharedChat, LongQuestions, ShortQuestions, WindowsAudio, StopSpeech, Anywhere }
 
-internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Background, HotkeyShortcut Send, HotkeyShortcut? Dictation = null, HotkeyShortcut? Shared = null, HotkeyShortcut? Long = null, HotkeyShortcut? Short = null, HotkeyShortcut? Loopback = null, HotkeyShortcut? StopSpeech = null)
+internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Background, HotkeyShortcut Send, HotkeyShortcut? Dictation = null, HotkeyShortcut? Shared = null, HotkeyShortcut? Long = null, HotkeyShortcut? Short = null, HotkeyShortcut? Loopback = null, HotkeyShortcut? StopSpeech = null, HotkeyShortcut? Anywhere = null)
 {
     /// <summary>A readable name for the Activity page.</summary>
     public static string Describe(VoiceAction action) => action switch
@@ -19,6 +19,7 @@ internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Backg
         VoiceAction.ShortQuestions => "Quick question",
         VoiceAction.WindowsAudio => "Computer sound",
         VoiceAction.StopSpeech => "Stop reading aloud",
+        VoiceAction.Anywhere => "Dictate anywhere",
         _ => action.ToString(),
     };
 
@@ -54,6 +55,12 @@ internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Backg
             .First(key => key != Preview && key != Background && key != Send && key != DictationShortcut &&
                 key != SharedShortcut && key != LongShortcut && key != ShortShortcut && key != LoopbackShortcut);
 
+    /// <summary>Dictate into any app: typed at the text cursor, otherwise copied to the clipboard.</summary>
+    public HotkeyShortcut AnywhereShortcut => Anywhere ??
+        "AQWERTYUIOPSDFGHJKLZXCVBNM".Select(Pick)
+            .First(key => key != Preview && key != Background && key != Send && key != DictationShortcut &&
+                key != SharedShortcut && key != LongShortcut && key != ShortShortcut && key != LoopbackShortcut && key != StopSpeechShortcut);
+
     private static HotkeyShortcut Pick(char key) =>
         new(HotkeyModifiers.Ctrl | HotkeyModifiers.Alt | HotkeyModifiers.Shift, key);
 
@@ -68,6 +75,7 @@ internal sealed record VoiceHotkeys(HotkeyShortcut Preview, HotkeyShortcut Backg
         [VoiceAction.ShortQuestions] = ShortShortcut,
         [VoiceAction.WindowsAudio] = LoopbackShortcut,
         [VoiceAction.StopSpeech] = StopSpeechShortcut,
+        [VoiceAction.Anywhere] = AnywhereShortcut,
     };
 }
 

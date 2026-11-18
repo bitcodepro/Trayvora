@@ -1,3 +1,3 @@
 namespace VoiceAgent.Desktop;
 
-internal enum VoiceShortcutMode { MainWindow, Background, Preview, Dictation, SharedChat, WindowsAudio }
+internal enum VoiceShortcutMode { MainWindow, Background, Preview, Dictation, SharedChat, WindowsAudio, Anywhere }
