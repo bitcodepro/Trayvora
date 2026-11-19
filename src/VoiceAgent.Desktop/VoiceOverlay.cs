@@ -647,14 +647,14 @@ internal sealed class VoiceOverlay : Window
                 if (room.CodexDesktop)
                 {
                     if (_sharedChat is null) throw new IOException("Codex Desktop is unavailable in this build.");
+                    var profile = _sharedChat.Profile;
                     if (room.CodexChatId == Guid.Empty && room.NewCodexFolder is { } folder)
                     {
-                        var created = await _sharedChat.StartChatAsync(folder, DiscussionStore.TitleFrom(message), message, ct, stream);
+                        var created = await _sharedChat.StartChatAsync(profile, folder, DiscussionStore.TitleFrom(message), message, ct, stream);
                         // The chat exists in Codex Desktop now; later messages go to it like to any Desktop chat.
                         room.CodexChatId = created.Chat.Id;
                         if (_settingsDirectory is { } settings)
                         {
-                            var profile = _sharedChat.Profile;
                             var id = created.Chat.Id.ToString();
                             if (!await Task.Run(() => CodexDesktopChats.Register(profile, settings, id)))
                                 stream.Activity("Close Codex Desktop once to see this chat in it; Trayvora adds it when Codex Desktop is closed.");
@@ -664,10 +664,9 @@ internal sealed class VoiceOverlay : Window
                         if (created.Status != "completed") throw new IOException($"Codex Desktop returned {created.Status}.");
                         return created.Answer;
                     }
-                    var delivery = await _discussion!.StartDeliveryAsync(room, _sharedChat.Profile);
-                    var turn = await _sharedChat.SubmitToAsync(room.CodexChatId, message, ct, stream, delivery);
+                    var turn = await _discussion!.SubmitDesktopDeliveryAsync(room, profile,
+                        delivery => _sharedChat.SubmitToAsync(delivery, message, ct, stream));
                     if (turn is null) return null;
-                    _discussion.FinishDelivery(room, delivery, $"Codex Desktop · {turn.Status}");
                     if (turn.Status != "completed") throw new IOException($"Codex Desktop returned {turn.Status}.");
                     return turn.Answer;
                 }

@@ -11,6 +11,8 @@ namespace VoiceAgent.Desktop;
 
 internal enum DiscussionMember { Boss, Codex, Claude }
 
+internal sealed record DesktopDelivery(string Profile, Guid ThreadId, Guid Id);
+
 internal sealed record CodexChatOption(Guid Id, string Title, bool Desktop)
 {
     public override string ToString() => Title;
@@ -229,7 +231,8 @@ internal sealed class DiscussionWindow(
             var chosen = (ClaudePermissions)_claudeRights.SelectedIndex;
             if (chosen == room.ClaudePermissions) return;
             room.ClaudePermissions = chosen;
-            if (Persist(room)) _status.Text = $"Claude in this session: {PermissionNames[_claudeRights.SelectedIndex]}.";
+            _ = Persist(room);
+            _status.Text = $"Claude in this session: {PermissionNames[_claudeRights.SelectedIndex]}.";
         };
         _codexSearch.TextChanged += (_, _) => FillCodexChoices();
         _claudeSearch.TextChanged += (_, _) => FillClaudeChoices();
@@ -306,7 +309,7 @@ internal sealed class DiscussionWindow(
             room.CodexWorkspace = folder;
             room.NewCodexFolder = folder;
             room.CodexChatTitle = $"New Codex Desktop chat · {Path.GetFileName(folder)}";
-            Persist(room);
+            _ = Persist(room);
             FillCodexChoices();
             UpdateHeader();
             _status.Text = "The Codex Desktop chat is created with your next message to Codex.";
@@ -319,7 +322,7 @@ internal sealed class DiscussionWindow(
                 : await NewFolderAsync(pick, "Folder for the new Claude chat", _room.Claude?.Workspace ?? _room.NewCodexFolder);
             if (_room is not { } room || folder is null) return;
             room.Claude = new ClaudeChat(Guid.NewGuid(), folder, $"New Claude chat · {Path.GetFileName(folder)}");
-            Persist(room);
+            _ = Persist(room);
             FillClaudeChoices();
             UpdateHeader();
             _status.Text = "The Claude chat is created with your next message to Claude.";
@@ -383,21 +386,29 @@ internal sealed class DiscussionWindow(
     public Action<string, string?, string?, Action<DiscussionTarget, string>>? PreviewFile { get; set; }
     public Func<string, Guid, Guid, CancellationToken, Task<DesktopTurn?>>? CheckDelivery { get; set; }
 
-    public async Task<Guid> StartDeliveryAsync(DiscussionRoom room, string profile)
+    public async Task<DesktopTurn?> SubmitDesktopDeliveryAsync(DiscussionRoom room, string profile, Func<DesktopDelivery, Task<DesktopTurn?>> submit)
     {
-        var id = Guid.NewGuid();
-        Append(room, new DiscussionMessage(DiscussionMember.Codex, DiscussionMember.Boss,
-            $"Submitting to {room.CodexChatTitle ?? "Codex Desktop"}…", DateTimeOffset.Now, DeliveryId: id, DeliveryProfile: profile));
-        await _saves;
-        return id;
+        var delivery = new DesktopDelivery(profile, room.CodexChatId, Guid.NewGuid());
+        var saved = await Append(room, new DiscussionMessage(DiscussionMember.Codex, DiscussionMember.Boss,
+            $"Submitting to {room.CodexChatTitle ?? "Codex Desktop"}…", DateTimeOffset.Now, DeliveryId: delivery.Id, DeliveryProfile: delivery.Profile));
+        if (!saved)
+        {
+            room.Messages.RemoveAll(message => message.DeliveryId == delivery.Id);
+            _ = Persist(room);
+            if (ReferenceEquals(room, _room)) RefreshTimeline(room);
+            throw new IOException("Could not save the delivery record. The request was not sent.");
+        }
+        var turn = await submit(delivery);
+        if (turn is not null) FinishDelivery(room, delivery.Id, $"Codex Desktop · {turn.Status}");
+        return turn;
     }
 
-    public void FinishDelivery(DiscussionRoom room, Guid id, string status)
+    private void FinishDelivery(DiscussionRoom room, Guid id, string status)
     {
         var index = room.Messages.FindIndex(message => message.DeliveryId == id);
         if (index < 0) return;
         room.Messages[index] = room.Messages[index] with { Text = status, DeliveryId = null };
-        Persist(room);
+        _ = Persist(room);
         if (ReferenceEquals(room, _room)) RefreshTimeline(room);
     }
 
@@ -1016,7 +1027,7 @@ internal sealed class DiscussionWindow(
         UpdateEarlier();
     }
 
-    private bool Persist(DiscussionRoom room)
+    private Task<bool> Persist(DiscussionRoom room)
     {
         var snapshot = new DiscussionRoom
         {
@@ -1025,22 +1036,24 @@ internal sealed class DiscussionWindow(
             Claude = room.Claude, Messages = [.. room.Messages],
             ClaudePermissions = room.ClaudePermissions, NewCodexFolder = room.NewCodexFolder, CodexWorkspace = room.CodexWorkspace,
         };
-        Enqueue(() => store.Save(snapshot), "Could not save this session. Check access to the settings folder.");
-        return true;
+        return Enqueue(() => store.Save(snapshot), "Could not save this session. Check access to the settings folder.");
     }
 
-    private void Enqueue(Action write, string failure)
+    private Task<bool> Enqueue(Action write, string failure)
     {
-        _saves = _saves.ContinueWith(_ =>
+        var result = _saves.ContinueWith(_ =>
         {
-            try { write(); }
+            try { write(); return true; }
             catch (Exception error)
             {
                 // Never silent: the reason goes to the Error log and the window says the session was not saved.
                 ErrorLog.Write(error, "Sessions · save");
                 Dispatcher.UIThread.Post(() => _status.Text = failure);
+                return false;
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
+        _saves = result;
+        return result;
     }
 
     /// <summary>Turns a session row into a text box: Enter or leaving it saves the name, Escape keeps the old one.</summary>
@@ -1069,7 +1082,7 @@ internal sealed class DiscussionWindow(
             if (save && title.Length > 0 && title != room.Title)
             {
                 room.Title = title;
-                Persist(room);
+                _ = Persist(room);
                 if (ReferenceEquals(room, _room)) _title.Text = title;
             }
             RefreshListNow();
@@ -1094,7 +1107,7 @@ internal sealed class DiscussionWindow(
         if (title.Length == 0) { _title.Text = room.Title; return; }
         if (title == room.Title) return;
         room.Title = title;
-        Persist(room);
+        _ = Persist(room);
         RefreshList();
     }
 
@@ -1102,7 +1115,7 @@ internal sealed class DiscussionWindow(
     {
         if (_room is not { } room || CurrentRun is not null) return;
         var id = room.Id;
-        Enqueue(() => store.Delete(id), "Could not delete this session.");
+        _ = Enqueue(() => store.Delete(id), "Could not delete this session.");
         _items.Remove(room);
         _drafts.Remove(room.Id);
         RefreshList();
@@ -1125,7 +1138,7 @@ internal sealed class DiscussionWindow(
             if (selected is not null && selected.Id != room.Id && selected.Title != room.CodexChatTitle)
             {
                 room.CodexChatTitle = selected.Title;
-                Persist(room);
+                _ = Persist(room);
             }
             options = options.Where(option => option == selected || Matches(option.Title, _codexSearch.Text) || option.Id.ToString().Equals(_codexSearch.Text?.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
             if (selected is null)
@@ -1156,7 +1169,7 @@ internal sealed class DiscussionWindow(
             if (room.Claude is { } saved && _claudeItems.FirstOrDefault(chat => chat.Id == saved.Id) is { } fresh && fresh != saved)
             {
                 room.Claude = fresh;
-                Persist(room);
+                _ = Persist(room);
             }
             var items = _claudeItems.Where(chat => Matches(chat.Title, _claudeSearch.Text) || chat.Id == room.Claude?.Id).ToList();
             if (room.Claude is { } bound && items.All(chat => chat.Id != bound.Id)) items.Insert(0, bound);
@@ -1175,7 +1188,8 @@ internal sealed class DiscussionWindow(
         room.CodexChatId = option.Id;
         room.CodexDesktop = option.Desktop;
         room.CodexChatTitle = option.Id == room.Id ? null : option.Title;
-        if (Persist(room)) _status.Text = $"Codex in this session now uses: {option.Title}.";
+        _ = Persist(room);
+        _status.Text = $"Codex in this session now uses: {option.Title}.";
         UpdateHeader();
     }
 
@@ -1183,7 +1197,8 @@ internal sealed class DiscussionWindow(
     {
         if (_switching || _room is not { } room || _claudeChat.SelectedItem is not ClaudeChat chat || chat.Id == room.Claude?.Id) return;
         room.Claude = chat;
-        if (Persist(room)) _status.Text = $"Claude in this session now uses: {chat.Title}.";
+        _ = Persist(room);
+        _status.Text = $"Claude in this session now uses: {chat.Title}.";
         UpdateHeader();
     }
 
@@ -1530,7 +1545,7 @@ internal sealed class DiscussionWindow(
         text = ComposerAttachments.WithFiles(text, attached);
         sent = ComposerAttachments.WithFiles(sent, attached);
         Attachments.Clear();
-        Append(room, new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
+        _ = Append(room, new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
             RelayTo: relayTo, DiscussWith: discuss?.Partner));
         await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss, attached)));
     }
@@ -1544,7 +1559,7 @@ internal sealed class DiscussionWindow(
             return;
         }
         if (!Ready(room, [target])) return;
-        Append(room, new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender));
+        _ = Append(room, new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender));
         await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender,
             Files: ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room)))]);
     }
@@ -1621,13 +1636,13 @@ internal sealed class DiscussionWindow(
                 // Claude Code prints its own error (for example a sign-in failure) as reply text; show it once, as the failure.
                 var echo = error is IOException && partial.Length > 0 && error.Message.Contains(partial, StringComparison.Ordinal);
                 if (partial.Length > 0 && !echo)
-                    Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes, Interrupted: true));
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes, Interrupted: true));
                 if (!cancel.IsCancellationRequested)
                 {
                     var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
                         or InvalidDataException or TimeoutException
                         ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
-                    Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
+                    _ = Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
                     ErrorLog.Write(error, $"Sessions · {agent}", $"room {room.Id}, chat {(agent == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId)}");
                 }
                 return;
@@ -1642,7 +1657,7 @@ internal sealed class DiscussionWindow(
                 // Codex Desktop has not finished in time: say so in the session, not only in the status line.
                 var chatName = room.CodexChatTitle ?? "the selected Codex Desktop chat";
                 var partial = stream.Text.Trim();
-                Append(room, new DiscussionMessage(agent, DiscussionMember.Boss,
+                _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss,
                     partial.Length > 0 ? partial : $"Sent to {chatName}. It has not answered here yet; the reply will appear in Codex Desktop.",
                     DateTimeOffset.Now, Note: $"Still running in Codex Desktop ({chatName}). Open that chat there to see the rest.", Interrupted: partial.Length > 0));
                 outcome = $"Codex is still working in Codex Desktop. Its reply will appear in {chatName}.";
@@ -1661,7 +1676,7 @@ internal sealed class DiscussionWindow(
                 if (agent == plan.Partner)
                 {
                     // The partner always answers the lead.
-                    Append(room, new DiscussionMessage(agent, plan.Lead, body, DateTimeOffset.Now, Note: note));
+                    _ = Append(room, new DiscussionMessage(agent, plan.Lead, body, DateTimeOffset.Now, Note: note));
                     queue.Enqueue(new Delivery(plan.Lead, agent, body, null, Discuss: plan));
                 }
                 else if (next == plan.Partner && plan.ExchangesLeft > 0)
@@ -1669,18 +1684,18 @@ internal sealed class DiscussionWindow(
                     if (plan.Partner == DiscussionMember.Claude && room.Claude is null)
                     {
                         outcome = "Codex wants to discuss with Claude, but this session has no Claude chat selected.";
-                        Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note));
+                        _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note));
                         stop = true;
                         return;
                     }
-                    Append(room, new DiscussionMessage(agent, plan.Partner, body, DateTimeOffset.Now, Note: note));
+                    _ = Append(room, new DiscussionMessage(agent, plan.Partner, body, DateTimeOffset.Now, Note: note));
                     queue.Enqueue(new Delivery(plan.Partner, agent, body, null, Discuss: plan with { ExchangesLeft = plan.ExchangesLeft - 1 }));
                     partnerAsked = true;
                 }
                 else
                 {
                     // The lead's answer to Boss (or anything after the last exchange) ends the discussion.
-                    Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Final: true, Note: note));
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Final: true, Note: note));
                     outcome = partnerAsked
                         ? $"{plan.Lead} and {plan.Partner} finished the discussion. {plan.Lead} sent you the final answer."
                         : $"{plan.Lead} answered without asking {plan.Partner}.";
@@ -1689,7 +1704,7 @@ internal sealed class DiscussionWindow(
             }
             if (next == agent || next == DiscussionMember.Boss) next = null;
             if (delivery.Relay) next = agent == DiscussionMember.Codex ? DiscussionMember.Claude : DiscussionMember.Codex;
-            Append(room, new DiscussionMessage(agent, next ?? DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note));
+            _ = Append(room, new DiscussionMessage(agent, next ?? DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note));
             if (next is not { } handoff) return;
             if (handoff == DiscussionMember.Claude && room.Claude is null)
             {
@@ -1741,7 +1756,7 @@ internal sealed class DiscussionWindow(
             ?? _desktopItems.FirstOrDefault(item => item.Id == room.CodexChatId)?.Workspace
         : Path.Combine(Environment.GetEnvironmentVariable("CODEX_HOME") ?? Path.Combine(AppContext.BaseDirectory, "codex-data"), "workspace");
 
-    private void Append(DiscussionRoom room, DiscussionMessage message)
+    private Task<bool> Append(DiscussionRoom room, DiscussionMessage message)
     {
         if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed
             && message.DeliveryId is null && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
@@ -1752,7 +1767,7 @@ internal sealed class DiscussionWindow(
                 ThreadId = message.Sender == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId };
         room.Messages.Add(message);
         room.Updated = message.Time;
-        Persist(room);
+        var saved = Persist(room);
         if (ReferenceEquals(room, _room))
         {
             if (room.Messages.Count == 1) { _messages.Children.Clear(); _rendered.Clear(); }
@@ -1763,6 +1778,7 @@ internal sealed class DiscussionWindow(
             ScrollToEnd(force: message.Sender == DiscussionMember.Boss);
         }
         RefreshList();
+        return saved;
     }
 
     // ── Rendering ────────────────────────────────────────────────────────
@@ -2093,7 +2109,7 @@ internal sealed class DiscussionWindow(
                     var index = room.Messages.FindIndex(item => item.DeliveryId == delivery);
                     room.Messages[index] = message with { DeliveryId = null, Text = string.IsNullOrEmpty(turn.Answer) ? turn.Status : turn.Answer,
                         Failed = turn.Status == "failed" };
-                    Persist(room);
+                    _ = Persist(room);
                     if (ReferenceEquals(room, _room)) RefreshTimeline(room);
                 }
                 catch (Exception error) { _status.Text = error.Message; }
@@ -2154,7 +2170,7 @@ internal sealed class DiscussionWindow(
         if (index < 0) return;
         room.Messages.RemoveAt(index);
         if (index < _shownFrom) _shownFrom--;
-        Persist(room);
+        _ = Persist(room);
         if (_rendered.Remove(message, out var control)) _messages.Children.Remove(control);
         UpdateEarlier();
         if (room.Messages.Count == 0)

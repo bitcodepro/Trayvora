@@ -13,6 +13,7 @@ internal sealed record DiscussionPlan(DiscussionMember Lead, DiscussionMember Pa
 /// <summary>A saved session: a viewer of everything sent between Boss, Codex and Claude, bound to one Codex chat and one Claude session.</summary>
 internal sealed class DiscussionRoom
 {
+    [System.Text.Json.Serialization.JsonRequired]
     public Guid Id { get; set; } = Guid.NewGuid();
     public string Title { get; set; } = DiscussionStore.DefaultTitle;
     public DateTimeOffset Created { get; set; } = DateTimeOffset.Now;
@@ -83,7 +84,7 @@ internal sealed class DiscussionStore(string directory)
         {
             using var stream = new FileStream(FileFor(id), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
             var room = JsonSerializer.Deserialize<DiscussionRoom>(stream, Json);
-            if (room?.Id != id) throw new InvalidDataException("Invalid session file.");
+            if (room?.Id != id || id == Guid.Empty) throw new JsonException("Session ID does not match its filename.");
             room.Messages ??= [];
             if (room.CodexDesktop && room.NewCodexFolder is not null && room.CodexChatId == room.Id) room.CodexChatId = Guid.Empty;
             else if (room.CodexChatId == Guid.Empty && !room.CodexDesktop) room.CodexChatId = room.Id;

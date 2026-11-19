@@ -75,18 +75,26 @@ internal sealed class ComposerAttachments
             {
                 stop.Token.ThrowIfCancellationRequested();
                 if (folder is null || folder != _folder()) return;
-                var info = new FileInfo(path);
-                if (!info.Exists || info.Length > MaxFileBytes) { Problem?.Invoke("Choose a file of 200 MiB or less."); continue; }
-                var target = Target(info.Name);
-                using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
-                var dest = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true);
                 try
                 {
-                    using (dest) await source.CopyToAsync(dest, stop.Token);
-                    stop.Token.ThrowIfCancellationRequested();
+                    var info = new FileInfo(path);
+                    if (!info.Exists) { Problem?.Invoke($"File unavailable: {info.Name}."); continue; }
+                    if (info.Length > MaxFileBytes) { Problem?.Invoke($"{info.Name} is larger than 200 MiB."); continue; }
+                    var target = Target(info.Name);
+                    using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
+                    var dest = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true);
+                    try
+                    {
+                        using (dest) await source.CopyToAsync(dest, stop.Token);
+                        stop.Token.ThrowIfCancellationRequested();
+                    }
+                    catch { File.Delete(target); throw; }
                     Add(target);
                 }
-                catch { File.Delete(target); throw; }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                {
+                    Problem?.Invoke($"Could not attach {Path.GetFileName(path)}: {error.Message}");
+                }
             }
         }
         catch (OperationCanceledException) when (stop.IsCancellationRequested) { }

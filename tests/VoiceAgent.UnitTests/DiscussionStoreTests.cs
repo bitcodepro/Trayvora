@@ -58,8 +58,12 @@ public sealed class DiscussionStoreTests
         {
             File.WriteAllText(Path.Combine(folder.FullName, $"{Guid.NewGuid():N}.json"), "{ not json");
             File.WriteAllText(Path.Combine(folder.FullName, "notes.json"), "{}");
+            File.WriteAllText(Path.Combine(folder.FullName, $"{Guid.NewGuid():N}.json"), "{}");
+            File.WriteAllText(Path.Combine(folder.FullName, $"{Guid.NewGuid():N}.json"),
+                System.Text.Json.JsonSerializer.Serialize(new { Id = Guid.NewGuid() }));
             var store = new DiscussionStore(folder.FullName);
             var room = store.Create(null);
+            Assert.Equal([room.Id], store.ListHeaders().Select(item => item.Id));
             Assert.Equal([room.Id], store.Load().Select(item => item.Id));
         }
         finally
