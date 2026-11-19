@@ -6,7 +6,7 @@ using VoiceAgent.Codex;
 
 namespace VoiceAgent.Desktop;
 
-internal sealed record SharedChatOptions(string Profile, Guid? ChatId = null, bool ReadAloud = true, string? ChatTitle = null);
+internal sealed record SharedChatOptions(string Profile, Guid? ChatId = null, bool ReadAloud = true, string? ChatTitle = null, string? Workspace = null);
 
 internal sealed class DesktopChatPanel : StackPanel
 {
@@ -18,6 +18,9 @@ internal sealed class DesktopChatPanel : StackPanel
     private readonly TextBox _search = new() { PlaceholderText = "Search chats by title" };
     private readonly ProgressBar _busy = new() { IsIndeterminate = true, Height = 3, IsVisible = false };
     private readonly Button _open = new() { Content = "Open in Codex", IsEnabled = false };
+    private string? _cursor;
+    private string? _cursorProfile;
+    private readonly Button _more = new() { Content = "Load more", IsVisible = false };
     private readonly Button _new = new() { Content = "New in Codex" };
     private readonly Button _read = new() { Content = "Read history", IsEnabled = false };
     private readonly Button _local = new() { Content = "Switch to Trayvora chats" };
@@ -46,7 +49,7 @@ internal sealed class DesktopChatPanel : StackPanel
         _reply.TextChanged += (_, _) => _reply.IsVisible = !string.IsNullOrWhiteSpace(_reply.Text);
         Spacing = 9;
         Children.AddRange([
-            _search, _chats, Row(_open, _new), Row(_load, _local), _busy, _status,
+            _search, _chats, Row(_open, _new), Row(_load, _more, _local), _busy, _status,
             new Expander { Header = "Desktop chat history", Content = new StackPanel
             {
                 Spacing = 8,
@@ -54,6 +57,7 @@ internal sealed class DesktopChatPanel : StackPanel
             } },
             new Expander { Header = "Desktop profile folder", Content = _profile },
         ]);
+        _more.Click += async (_, _) => await LoadAsync(more: true);
         _load.Click += async (_, _) => await LoadAsync();
         _search.TextChanged += (_, _) => FilterChats();
         _read.Click += async (_, _) => await ReadAsync();
@@ -62,14 +66,14 @@ internal sealed class DesktopChatPanel : StackPanel
         _chats.SelectionChanged += (_, _) =>
         {
             if (!_idle || _loading || _changingChatList || _chats.SelectedItem is not DesktopChat chat) return;
-            if (TrySave(_options with { ChatId = chat.Id, ChatTitle = chat.Title }))
+            if (TrySave(_options with { ChatId = chat.Id, ChatTitle = chat.Title, Workspace = chat.Workspace }))
                 ChangeTarget($"Active Desktop chat: {TargetTitle}");
             else
                 FilterChats();
         };
         _local.Click += (_, _) =>
         {
-            if (_idle && !_loading && TrySave(_options with { ChatId = null, ChatTitle = null }))
+            if (_idle && !_loading && TrySave(_options with { ChatId = null, ChatTitle = null, Workspace = null }))
             {
                 FilterChats();
                 ChangeTarget("Trayvora chats are active.");
@@ -82,6 +86,8 @@ internal sealed class DesktopChatPanel : StackPanel
     public Control AutoPlaybackControl => _auto;
     public bool ReadAloud => _auto.IsChecked == true;
 
+    public Guid? TargetId => _options.ChatId;
+    public string? TargetWorkspace => _options.Workspace ?? _items.FirstOrDefault(item => item.Id == TargetId)?.Workspace;
     public bool HasChat => _options.ChatId is not null;
     public string TargetTitle => _options.ChatTitle ?? (_options.ChatId is { } id ? $"Chat {id.ToString()[..8]}" : "");
     public event Action? TargetChanged;
@@ -99,6 +105,7 @@ internal sealed class DesktopChatPanel : StackPanel
         _idle = idle;
         var unlocked = _idle && !_loading;
         _profile.IsEnabled = _load.IsEnabled = _new.IsEnabled = _chats.IsEnabled = _search.IsEnabled = unlocked;
+        _more.IsEnabled = unlocked;
         _busy.IsVisible = _loading;
         _local.IsEnabled = unlocked && HasChat;
         _read.IsEnabled = unlocked && HasChat;
@@ -134,16 +141,35 @@ internal sealed class DesktopChatPanel : StackPanel
     public string Profile => _options.Profile;
 
     /// <summary>Creates a Codex Desktop chat in <paramref name="workspace"/> with its first message.</summary>
-    public Task<(DesktopChat Chat, string Status, string Answer)> StartChatAsync(string workspace, string title, string text, CancellationToken ct, ReplyStream stream) =>
-        _client.StartChatAsync(_options.Profile, workspace, title, text,
+    public Task<(DesktopChat Chat, string Status, string Answer)> StartChatAsync(string profile, string workspace, string title, string text, CancellationToken ct, ReplyStream stream) =>
+        _client.StartChatAsync(profile, workspace, title, text,
             new ReplyStream.Reporter(status => stream.Activity(status)), new ReplyStream.Reporter(stream.Append), ct);
 
     /// <summary>Sends to a specific Codex Desktop chat without changing the main-window selection.</summary>
     /// <remarks>Shows the reply while it is written and waits for it until the session is paused.</remarks>
-    public Task<DesktopTurn?> SubmitToAsync(Guid chat, string text, CancellationToken ct, ReplyStream? stream = null) =>
-        _client.SubmitAsync(_options.Profile, chat, text,
-            new ReplyStream.Reporter(status => stream?.Activity(status)), ct,
-            new ReplyStream.Reporter(partial => stream?.Replace(partial)), Timeout.InfiniteTimeSpan);
+    public Task<DesktopTurn?> SubmitToAsync(DesktopDelivery delivery, string text, CancellationToken ct, ReplyStream stream) =>
+        _client.SubmitAsync(delivery.Profile, delivery.ThreadId, text,
+            new ReplyStream.Reporter(status => stream.Activity(status)), ct,
+            new ReplyStream.Reporter(partial => stream.Replace(partial)), TimeSpan.FromMinutes(10), delivery.Id);
+
+    public Task<DesktopTurn?> CheckDeliveryAsync(string profile, Guid chat, Guid delivery, CancellationToken ct) =>
+        _client.CheckDeliveryAsync(profile, chat, delivery, ct);
+
+    public async Task<bool> SelectIdeChatAsync(Guid id)
+    {
+        if (TargetId == id) return true;
+        var chat = _items.FirstOrDefault(item => item.Id == id);
+        if (chat is null)
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+            _items = await ListChatsAsync(timeout.Token);
+            chat = _items.FirstOrDefault(item => item.Id == id);
+        }
+        if (chat is null || !TrySave(_options with { ChatId = id, ChatTitle = chat.Title, Workspace = chat.Workspace })) return false;
+        FilterChats();
+        ChangeTarget($"Active Desktop chat: {chat.Title}");
+        return true;
+    }
 
     public Task LoadOnceAsync() => _loaded ? Task.CompletedTask : LoadAsync();
 
@@ -151,7 +177,7 @@ internal sealed class DesktopChatPanel : StackPanel
     {
         var query = _search.Text?.Trim() ?? "";
         var selected = _options.ChatId;
-        var matches = _items.Where(chat => chat.Title.Contains(query, StringComparison.CurrentCultureIgnoreCase)).ToArray();
+        var matches = _items.Where(chat => (chat.Title.Contains(query, StringComparison.CurrentCultureIgnoreCase) || chat.Id.ToString().Equals(query.Trim(), StringComparison.OrdinalIgnoreCase))).ToArray();
         _changingChatList = true;
         try
         {
@@ -162,7 +188,7 @@ internal sealed class DesktopChatPanel : StackPanel
         Refresh(_idle);
     }
 
-    private async Task LoadAsync()
+    private async Task LoadAsync(bool more = false)
     {
         if (_loading || !_idle) return;
         _loading = true;
@@ -173,12 +199,17 @@ internal sealed class DesktopChatPanel : StackPanel
         {
             using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             var path = (_profile.Text ?? "").Trim().Trim('"');
-            var chats = await _client.ListAsync(path, timeout.Token);
+            more = more && string.Equals(path, _cursorProfile, StringComparison.OrdinalIgnoreCase) && _cursor is not null;
+            var page = await _client.PageAsync(path, more ? _cursor : null, timeout.Token);
+            IReadOnlyList<DesktopChat> chats = more ? _items.Concat(page.Chats).DistinctBy(chat => chat.Id).ToArray() : page.Chats;
+            _cursor = page.Next == _cursor && more ? null : page.Next;
+            _cursorProfile = path;
+            _more.IsVisible = !string.IsNullOrEmpty(_cursor);
             var previous = _options;
             var sameProfile = string.Equals(Path.GetFullPath(path), (Path.IsPathFullyQualified(previous.Profile) ? Path.GetFullPath(previous.Profile) : previous.Profile), StringComparison.OrdinalIgnoreCase);
             var selected = sameProfile ? chats.FirstOrDefault(c => c.Id == previous.ChatId) : null;
             var options = new SharedChatOptions(path, sameProfile ? previous.ChatId : null,
-                _auto.IsChecked == true, sameProfile ? selected?.Title ?? previous.ChatTitle : null);
+                _auto.IsChecked == true, sameProfile ? selected?.Title ?? previous.ChatTitle : null, sameProfile ? selected?.Workspace ?? previous.Workspace : null);
             if (!TrySave(options)) return;
             _items = chats;
             _loaded = true;

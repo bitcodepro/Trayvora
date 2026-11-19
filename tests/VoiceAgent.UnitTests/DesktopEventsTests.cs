@@ -50,10 +50,13 @@ public sealed class DesktopEventsTests
                 VerifyStreamingSession();
                 VerifyMarkdown();
                 VerifyAttachments();
+                VerifyDesktopDelivery();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
                 VerifyFloatingAgent();
                 VerifyDictationDraft();
+                VerifyUpdateDialog();
+                VerifyVoiceRecipient();
                 result.SetResult();
             }
             catch (Exception error)
@@ -145,6 +148,67 @@ public sealed class DesktopEventsTests
             File.Delete(Path.Combine(folder.FullName, "history.lock"));
             folder.Delete();
         }
+    }
+
+    private static void VerifyVoiceRecipient()
+    {
+        var tmp = Directory.CreateTempSubdirectory();
+        var window = new Window { Width = 960, Height = 640 };
+        try
+        {
+            var store = new DiscussionStore(tmp.FullName);
+            var first = store.Create(null);
+            first.Title = "Original room";
+            var second = store.Create(null);
+            second.Title = "Second room";
+            first.Updated = second.Updated.AddSeconds(1);
+            store.Save(first);
+            store.Save(second);
+            var voice = new TaskCompletionSource<string?>();
+            var sent = 0;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => { sent++; return Task.FromResult<string?>("ok"); },
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null, (_, _, _) => voice.Task);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == first.Id);
+            var mic = view.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Dictate a message");
+            view.GetLogicalDescendants().OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(button => Equals(button.Content, "Voice mode")).IsChecked = true;
+            mic.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            WaitForButton(view, second.Title).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.CurrentRoom?.Id == second.Id);
+            voice.SetResult("original voice note");
+            Pump(Task.Delay(20));
+            Assert.Equal(0, sent);
+            WaitForButton(view, first.Title).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.CurrentRoom?.Id == first.Id);
+            Assert.Contains(view.GetLogicalDescendants().OfType<TextBox>(), box => box.Text == "original voice note");
+        }
+        finally { window.Close(); tmp.Delete(true); }
+    }
+
+    private static void VerifyUpdateDialog()
+    {
+        CancellationToken downloadToken = default;
+        var dialog = new UpdateWindow(_ => Task.FromResult<AvailableUpdate?>(new(new Version(99, 0), "", "", "")),
+            async (_, progress, token) =>
+            {
+                downloadToken = token;
+                progress("Downloading · 42%", 0.42);
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            });
+        try
+        {
+            dialog.Show();
+            Button Action(string label) => dialog.GetLogicalDescendants().OfType<Button>().Single(button => Equals(button.Content, label));
+            PumpUntil(() => Action("Update").IsEnabled);
+            Action("Update").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(0.42, dialog.GetLogicalDescendants().OfType<ProgressBar>().Single().Value);
+            Assert.False(Action("Update").IsEnabled);
+            Action("Cancel").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.True(downloadToken.IsCancellationRequested);
+        }
+        finally { if (dialog.IsVisible) dialog.Close(); }
     }
 
     private static void VerifyDictationDraft()
@@ -443,6 +507,50 @@ public sealed class DesktopEventsTests
         }
     }
 
+    private static void VerifyDesktopDelivery()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-delivery-");
+        try
+        {
+            var directory = Path.Combine(folder.FullName, "sessions");
+            File.WriteAllText(directory, "Block directory creation during the first save");
+            var store = new DiscussionStore(directory);
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+            var originalChat = Guid.NewGuid();
+            var room = new DiscussionRoom { CodexDesktop = true, CodexChatId = originalChat };
+            var originalProfile = Path.Combine(folder.FullName, "profile-a");
+            string selectedProfile = originalProfile;
+            var submissions = 0;
+            Task<DesktopTurn?> Submit(DesktopDelivery delivery)
+            {
+                submissions++;
+                var persisted = Assert.Single(store.ReadRoom(room.Id).Messages);
+                Assert.Equal(originalChat, delivery.ThreadId);
+                Assert.Equal(originalProfile, delivery.Profile);
+                Assert.Equal(delivery.ThreadId, persisted.ThreadId);
+                Assert.Equal(delivery.Profile, persisted.DeliveryProfile);
+                Assert.Equal(delivery.Id, persisted.DeliveryId);
+                return Task.FromResult<DesktopTurn?>(null);
+            }
+
+            var failed = view.SubmitDesktopDeliveryAsync(room, selectedProfile, Submit);
+            Assert.Throws<IOException>(() => Pump(failed));
+            Pump(view.PendingSaves);
+            Assert.Equal(0, submissions);
+            Assert.Empty(room.Messages);
+
+            File.Delete(directory);
+            var retry = view.SubmitDesktopDeliveryAsync(room, selectedProfile, Submit);
+            selectedProfile = Path.Combine(folder.FullName, "profile-b");
+            room.CodexChatId = Guid.NewGuid();
+            Pump(retry);
+            Assert.Equal(1, submissions);
+            Assert.NotEqual(selectedProfile, room.Messages.Single().DeliveryProfile);
+        }
+        finally { folder.Delete(true); }
+    }
+
     private static void VerifyAttachments()
     {
         var folder = Directory.CreateTempSubdirectory("trayvora-attach-ui-");
@@ -475,6 +583,16 @@ public sealed class DesktopEventsTests
             attachments.Clear();
             Assert.Empty(attachments.Files);
             Assert.False(attachments.Chips.IsVisible);
+
+            var locked = Path.Combine(folder.FullName, "locked.txt");
+            var problems = new List<string>();
+            attachments.Problem += problems.Add;
+            using (File.Open(locked, FileMode.CreateNew, FileAccess.Write, FileShare.None))
+                Pump(attachments.AddFilesAsync([source, locked, source]));
+            Assert.Equal(["notes.txt", "notes (2).txt"], attachments.Files.Select(Path.GetFileName));
+            Assert.Contains("locked.txt", Assert.Single(problems));
+            Assert.False(File.Exists(Path.Combine(target, "locked.txt")));
+            Assert.False(attachments.Copying);
 
             var box = new TextBox { Text = "Hello world" };
             box.SelectionStart = 6;

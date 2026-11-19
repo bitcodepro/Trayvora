@@ -20,6 +20,9 @@ internal static class ClaudeChats
         _ => "default",
     };
 
+    private sealed record CachedChat(long Size, DateTime Changed, ClaudeChat Chat);
+    private static readonly System.Collections.Concurrent.ConcurrentDictionary<string, CachedChat> Cached = new(StringComparer.OrdinalIgnoreCase);
+
     public static IReadOnlyList<ClaudeChat> Find(string profile)
     {
         var projects = Path.Combine(profile, "projects");
@@ -29,6 +32,11 @@ internal static class ClaudeChats
         foreach (var file in new DirectoryInfo(directory).EnumerateFiles("*.jsonl"))
         {
             if (!Guid.TryParse(Path.GetFileNameWithoutExtension(file.Name), out var id)) continue;
+            if (Cached.TryGetValue(file.FullName, out var previous) && previous.Size == file.Length && previous.Changed == file.LastWriteTimeUtc && Directory.Exists(previous.Chat.Workspace))
+            {
+                chats.Add((previous.Chat, previous.Changed));
+                continue;
+            }
             string? workspace = null;
             string? title = null;
             try
@@ -53,7 +61,9 @@ internal static class ClaudeChats
             // A name given in Claude Desktop (or with /rename) wins over the first message.
             if (CustomTitle(file.FullName) is { } named) title = named;
             title = string.IsNullOrWhiteSpace(title) ? $"{Path.GetFileName(workspace)} · {id.ToString()[..8]}" : title.ReplaceLineEndings(" ");
-            chats.Add((new ClaudeChat(id, workspace, title[..Math.Min(title.Length, 110)]), file.LastWriteTimeUtc));
+            var chat = new ClaudeChat(id, workspace, title[..Math.Min(title.Length, 110)]);
+            Cached[file.FullName] = new(file.Length, file.LastWriteTimeUtc, chat);
+            chats.Add((chat, file.LastWriteTimeUtc));
         }
         // The chat used most recently comes first.
         return chats.OrderByDescending(item => item.Changed).Select(item => item.Chat).ToArray();
@@ -229,6 +239,7 @@ internal static class ClaudeChats
 
         if (!Path.IsPathFullyQualified(profile))
             throw new IOException("Set the Claude Code profile folder under Claude Code.");
+        using var turn = await VoiceAgent.Codex.AgentTurnQueue.EnterAsync(profile, chat.Id, ct);
         var start = new ProcessStartInfo(executable)
         {
             WorkingDirectory = chat.Workspace, UseShellExecute = false, CreateNoWindow = true,

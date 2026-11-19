@@ -32,15 +32,21 @@ internal static class ErrorLog
         _folder ?? Environment.GetEnvironmentVariable("VOICEAGENT_SETTINGS_DIR") ?? Path.Combine(AppContext.BaseDirectory, "settings"),
         "logs", "errors.jsonl");
 
+    internal static string Redact(string text)
+    {
+        text = System.Text.RegularExpressions.Regex.Replace(text, @"(?i)\b(?:sk|ghp|github_pat)[-_][A-Za-z0-9_-]{8,}", "[redacted]");
+        return System.Text.RegularExpressions.Regex.Replace(text, @"(?i)(authorization\s*[:=]\s*(?:bearer|basic)\s+)\S+", "$1[redacted]");
+    }
+
     public static void Write(Exception error, string? where = null, string? context = null)
     {
         if (error is OperationCanceledException) return;
         try
         {
-            var details = error.ToString();
+            var details = Redact(error.ToString());
             if (details.Length > MaxDetails) details = details[..MaxDetails] + "\n…";
-            var entry = new ErrorEntry(DateTimeOffset.Now, where ?? Origin(error), context, error.GetType().Name,
-                Innermost(error).Message, details);
+            var entry = new ErrorEntry(DateTimeOffset.Now, where ?? Origin(error), context is null ? null : Redact(context), error.GetType().Name,
+                Redact(Innermost(error).Message), details);
             lock (Gate)
             {
                 var file = File;

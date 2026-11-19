@@ -59,6 +59,51 @@ internal sealed class ComposerAttachments
         return added;
     }
 
+    private CancellationTokenSource? _copy;
+    public bool Copying => _copy is not null;
+
+    public async Task AddFilesAsync(IEnumerable<string> paths)
+    {
+        if (_copy is not null) return;
+        using var stop = new CancellationTokenSource();
+        _copy = stop;
+        var folder = _folder();
+        Changed?.Invoke();
+        try
+        {
+            foreach (var path in paths.ToArray())
+            {
+                stop.Token.ThrowIfCancellationRequested();
+                if (folder is null || folder != _folder()) return;
+                try
+                {
+                    var info = new FileInfo(path);
+                    if (!info.Exists) { Problem?.Invoke($"File unavailable: {info.Name}."); continue; }
+                    if (info.Length > MaxFileBytes) { Problem?.Invoke($"{info.Name} is larger than 200 MiB."); continue; }
+                    var target = Target(info.Name);
+                    using var source = new FileStream(path, FileMode.Open, FileAccess.Read, FileShare.Read, 65536, true);
+                    var dest = new FileStream(target, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true);
+                    try
+                    {
+                        using (dest) await source.CopyToAsync(dest, stop.Token);
+                        stop.Token.ThrowIfCancellationRequested();
+                    }
+                    catch { File.Delete(target); throw; }
+                    Add(target);
+                }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException or NotSupportedException)
+                {
+                    Problem?.Invoke($"Could not attach {Path.GetFileName(path)}: {error.Message}");
+                }
+            }
+        }
+        catch (OperationCanceledException) when (stop.IsCancellationRequested) { }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or ArgumentException) { Problem?.Invoke(error.Message); }
+        finally { _copy = null; Changed?.Invoke(); }
+    }
+
+    public void CancelCopy() => _copy?.Cancel();
+
     /// <summary>Saves a pasted or dropped picture as PNG and attaches it.</summary>
     public bool AddImage(Bitmap image)
     {
@@ -141,6 +186,14 @@ internal sealed class ComposerAttachments
         {
             return false;
         }
+    }
+
+    public void Restore(IEnumerable<string> files)
+    {
+        _files.Clear();
+        CancelCopy();
+        _files.AddRange(files);
+        Redraw();
     }
 
     public void Clear()
@@ -238,12 +291,12 @@ internal sealed class ComposerAttachments
         target.AddHandler(DragDrop.DragEnterEvent, Over);
         target.AddHandler(DragDrop.DragOverEvent, Over);
         target.AddHandler(DragDrop.DragLeaveEvent, (_, _) => highlight(false));
-        target.AddHandler(DragDrop.DropEvent, (_, args) =>
+        target.AddHandler(DragDrop.DropEvent, async (_, args) =>
         {
             highlight(false);
             args.Handled = true;
             if (args.DataTransfer.TryGetFiles() is { } files)
-                AddFiles(files.Select(file => file.TryGetLocalPath()).OfType<string>());
+                await AddFilesAsync(files.Select(file => file.TryGetLocalPath()).OfType<string>());
             else if (args.DataTransfer.TryGetBitmap() is { } image)
                 AddImage(image);
         });
@@ -262,7 +315,7 @@ internal sealed class ComposerAttachments
             {
                 if (await clipboard.TryGetFilesAsync() is { Length: > 0 } files)
                 {
-                    AddFiles(files.Select(file => file.TryGetLocalPath()).OfType<string>());
+                    await AddFilesAsync(files.Select(file => file.TryGetLocalPath()).OfType<string>());
                     return;
                 }
                 if (await clipboard.TryGetTextAsync() is { Length: > 0 } text)

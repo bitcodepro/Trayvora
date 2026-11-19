@@ -43,12 +43,12 @@ internal static class GitHubUpdate
     {
         var json = await Http.GetStringAsync($"https://api.github.com/repos/{Repository}/releases/latest", cancellation).ConfigureAwait(false);
         var release = Parse(json);
-        if (release is null) return null;
+        if (release is null) throw new InvalidDataException("The release has no Windows package or manifest.");
         var (zipUrl, manifestUrl, page) = release.Value;
         var manifest = JsonNode.Parse(await Http.GetStringAsync(manifestUrl, cancellation).ConfigureAwait(false));
         var versionText = manifest?["version"]?.GetValue<string>();
         var sha = manifest?["sha256"]?.GetValue<string>();
-        if (versionText is null || sha is null || !Version.TryParse(versionText, out var version)) return null;
+        if (sha?.Length != 64 || !sha.All(Uri.IsHexDigit) || !Version.TryParse(versionText, out var version)) throw new InvalidDataException("Invalid release manifest.");
         return IsNewer(version, CurrentVersion()) ? new AvailableUpdate(version, zipUrl, sha, page) : null;
     }
 
@@ -68,32 +68,46 @@ internal static class GitHubUpdate
         url.StartsWith($"https://github.com/{Repository}/releases/download/", StringComparison.OrdinalIgnoreCase);
 
     /// <summary>Downloads the update zip into <paramref name="folder"/> and returns its path once the SHA-256 matches.</summary>
-    public static async Task<string> DownloadAsync(AvailableUpdate update, string folder, IProgress<double>? progress = null, CancellationToken cancellation = default)
+    public static Task<string> DownloadAsync(AvailableUpdate update, string folder, IProgress<double>? progress = null, CancellationToken cancellation = default) =>
+        DownloadAsync(Http, update, folder, progress, cancellation);
+
+    internal static async Task<string> DownloadAsync(HttpClient http, AvailableUpdate update, string folder, IProgress<double>? progress, CancellationToken cancellation)
     {
         Directory.CreateDirectory(folder);
         var path = Path.Combine(folder, ZipName);
-        using var response = await Http.GetAsync(update.ZipUrl, HttpCompletionOption.ResponseHeadersRead, cancellation).ConfigureAwait(false);
-        response.EnsureSuccessStatusCode();
-        var total = response.Content.Headers.ContentLength;
-        await using (var source = await response.Content.ReadAsStreamAsync(cancellation).ConfigureAwait(false))
-        await using (var target = new FileStream(path, FileMode.Create, FileAccess.Write, FileShare.None))
+        var temporary = Path.Combine(folder, Guid.NewGuid().ToString("N") + ".part");
+        try
         {
-            var buffer = new byte[1 << 16];
-            long done = 0;
-            int read;
-            while ((read = await source.ReadAsync(buffer, cancellation).ConfigureAwait(false)) > 0)
+            using var response = await http.GetAsync(update.ZipUrl, HttpCompletionOption.ResponseHeadersRead, cancellation).ConfigureAwait(false);
+            response.EnsureSuccessStatusCode();
+            var total = response.Content.Headers.ContentLength;
+            using var hash = IncrementalHash.CreateHash(HashAlgorithmName.SHA256);
+            await using (var source = await response.Content.ReadAsStreamAsync(cancellation).ConfigureAwait(false))
+            await using (var target = new FileStream(temporary, FileMode.CreateNew, FileAccess.Write, FileShare.None, 65536, true))
             {
-                await target.WriteAsync(buffer.AsMemory(0, read), cancellation).ConfigureAwait(false);
-                done += read;
-                if (total > 0) progress?.Report((double)done / total.Value);
+                var buffer = new byte[65536];
+                long done = 0;
+                int read, lastPercent = -1;
+                while ((read = await source.ReadAsync(buffer, cancellation).ConfigureAwait(false)) > 0)
+                {
+                    await target.WriteAsync(buffer.AsMemory(0, read), cancellation).ConfigureAwait(false);
+                    hash.AppendData(buffer, 0, read);
+                    done += read;
+                    if (total > 0)
+                    {
+                        var share = Math.Clamp((double)done / total.Value, 0, 1);
+                        if ((int)(100 * share) != lastPercent) progress?.Report(share);
+                        lastPercent = (int)(100 * share);
+                    }
+                }
             }
+            cancellation.ThrowIfCancellationRequested();
+            if (!Convert.ToHexString(hash.GetHashAndReset()).Equals(update.Sha256, StringComparison.OrdinalIgnoreCase))
+                throw new InvalidDataException("The downloaded update failed its checksum.");
+            File.Move(temporary, path, true);
+            return path;
         }
-        if (!HashMatches(path, update.Sha256))
-        {
-            File.Delete(path);
-            throw new InvalidDataException("The downloaded update is damaged (checksum mismatch). Nothing was changed.");
-        }
-        return path;
+        finally { File.Delete(temporary); }
     }
 
     internal static bool HashMatches(string file, string expected)
