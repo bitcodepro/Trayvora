@@ -131,10 +131,10 @@ internal sealed class App : Avalonia.Application
             switch (action)
             {
                 case VoiceAction.Background:
-                    await overlay.ToggleRecordingAsync(VoiceShortcutMode.Background);
+                    await overlay.ToggleRecordingAsync(VoiceShortcutMode.Background, followIde: true);
                     break;
                 case VoiceAction.Preview:
-                    await overlay.ToggleRecordingAsync(VoiceShortcutMode.Preview);
+                    await overlay.ToggleRecordingAsync(VoiceShortcutMode.Preview, followIde: true);
                     break;
                 case VoiceAction.SharedChat:
                     await overlay.ToggleRecordingAsync(VoiceShortcutMode.SharedChat);
@@ -307,68 +307,21 @@ internal sealed class App : Avalonia.Application
         pendingChats.Tick += (_, _) => { if (!exiting && OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats(); };
         pendingChats.Start();
         if (OperatingSystem.IsWindows()) overlay.ApplyPendingCodexChats();
-        // Tray → "Check for updates": checks GitHub; when a newer release exists the same item installs it.
-        // Also checked a minute after start and then twice a day.
-        var updateItem = new NativeMenuItem("Check for updates");
-        AvailableUpdate? offered = null;
-        var updateBusy = false;
-        void Offer(AvailableUpdate found)
-        {
-            offered = found;
-            overlay.OfferUpdate(found);
-            updateItem.Header = $"Install update {found.Version}";
-            tray.ToolTipText = $"Trayvora · update {found.Version} available";
-        }
-        async Task CheckUpdatesAsync(bool quiet)
-        {
-            if (updateBusy || exiting) return;
-            updateBusy = true;
-            if (!quiet) updateItem.Header = "Checking for updates…";
-            try
-            {
-                if (await GitHubUpdate.CheckAsync() is { } found) Offer(found);
-                else
-                {
-                    // Nothing newer (or the offered release was withdrawn): back to a plain check.
-                    offered = null;
-                    updateItem.Header = "Check for updates";
-                    if (quiet) return;
-                    var current = GitHubUpdate.CurrentVersion();
-                    updateItem.Header = current is null ? "Check for updates · up to date" : $"Check for updates · {current} is the latest";
-                }
-            }
-            catch (Exception error) when (error is HttpRequestException or TaskCanceledException or System.Text.Json.JsonException or InvalidOperationException)
-            {
-                if (!quiet) updateItem.Header = "Check for updates · could not reach GitHub";
-            }
-            finally { updateBusy = false; }
-        }
-        updateItem.Click += async (_, _) =>
-        {
-            if (exiting || updateBusy) return;
-            if (offered is not { } chosen)
-            {
-                await CheckUpdatesAsync(quiet: false);
-                return;
-            }
-            updateBusy = true;
-            updateItem.Header = $"Installing {chosen.Version}…";
-            var message = await overlay.InstallUpdateFromTrayAsync(chosen, new Progress<string>(text => tray.ToolTipText = "Trayvora · " + text));
-            updateBusy = false;
-            if (message is not null && !message.StartsWith("Updating", StringComparison.Ordinal))
-            {
-                // Forget the cached offer so the next click checks GitHub again instead of retrying the same download.
-                offered = null;
-                updateItem.Header = "Check for updates · last install failed";
-                tray.ToolTipText = "Trayvora · " + message;
-            }
-        };
+        var updateItem = new NativeMenuItem("Check for updates…");
+        updateItem.Click += (_, _) => { if (!exiting) overlay.ShowUpdateWindow(); };
+        if (desktop.Args?.Contains("--updated") == true)
+            Dispatcher.UIThread.Post(() => { overlay.Show(); overlay.Activate(); });
         menu.Items.Insert(menu.Items.IndexOf(exit), updateItem);
         var updates = new DispatcherTimer { Interval = TimeSpan.FromMinutes(1) };
         updates.Tick += async (_, _) =>
         {
             updates.Interval = TimeSpan.FromHours(12);
-            await CheckUpdatesAsync(quiet: true);
+            try
+            {
+                if (!exiting && await GitHubUpdate.CheckAsync() is { } found)
+                    updateItem.Header = $"Update available · {found.Version}…";
+            }
+            catch (Exception error) { ErrorLog.Write(error, "Checking releases"); }
         };
         if (OperatingSystem.IsWindows()) updates.Start();
         // For checking the built-in terminal: TRAYVORA_OPEN_TERMINAL=powershell|claude|codex opens it at startup.

@@ -103,9 +103,15 @@ internal sealed class ReplyStream
         return string.Join("\n", lines);
     }
 
+    private string? _snapshot;
+    private int _snapshotVersion = -1;
     public (string Text, string? Activity, int Version) Snapshot()
     {
-        lock (_gate) return (_text.ToString(), _activity, _version);
+        lock (_gate)
+        {
+            if (_snapshotVersion != _version) { _snapshot = _text.ToString(); _snapshotVersion = _version; }
+            return (_snapshot ?? "", _activity, _version);
+        }
     }
 
     public string Text

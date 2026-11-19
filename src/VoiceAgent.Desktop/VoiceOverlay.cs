@@ -1,3 +1,4 @@
+using DiscussionTarget = VoiceAgent.Desktop.DiscussionWindow.DiscussionTarget;
 using System.Diagnostics;
 using System.Runtime.InteropServices;
 using System.Security.Cryptography;
@@ -44,6 +45,8 @@ internal sealed class VoiceOverlay : Window
     private bool ClaudeActive => _mode.SelectedIndex == 3;
     private ClaudeChat? _claudeChat;
     private DiscussionWindow? _discussion;
+    private readonly CheckBox _followIde = new() { Content = "Follow active IDE session" };
+    private bool _readingIde;
     private readonly Panel _root = new();
     private Control? _appView;
     private readonly TextBox _claudeExe = new() { PlaceholderText = "Auto-detect Claude Code (optional override)" };
@@ -138,6 +141,14 @@ internal sealed class VoiceOverlay : Window
         }
         _answer.TextChanged += (_, _) => _feed.Update(_answer.Text);
         if (_replyAudio is not null) _feed.Speak = text => _replyAudio.ReadAsync(text);
+        _feed.OpenFile = (path, entry) => ShowFile(path, entry.Workspace, null, (to, quote) =>
+        {
+            if (_operation is not null) return;
+            _mode.SelectedIndex = to == DiscussionTarget.Claude ? 3 : 0;
+            CloseDiscussion();
+            PromptTemplates.InsertInto(_transcript, quote);
+            _transcript.Focus();
+        });
         _feed.Reply = quote => { PromptTemplates.InsertInto(_transcript, quote); _transcript.CaretIndex = _transcript.Text?.Length ?? 0; };
         SetHotkeyMessage(hotkeyMessage);
         Title = "Trayvora";
@@ -429,6 +440,35 @@ internal sealed class VoiceOverlay : Window
         var navModes = new StackPanel { Spacing = 2 };
         navModes.Children.AddRange(_modeButtons);
         navModes.IsVisible = settingsDirectory is not null;
+        if (settingsDirectory is not null)
+        {
+            var preference = Path.Combine(settingsDirectory, "follow-ide.json");
+            try { _followIde.IsChecked = SettingsFile.Read<IdeSession.Options>(preference)?.Enabled == true; }
+            catch (Exception error) { ErrorLog.Write(error); }
+            _followIde.IsCheckedChanged += (_, _) =>
+            {
+                try { SettingsFile.Write(preference, new IdeSession.Options(_followIde.IsChecked == true)); }
+                catch (Exception error) { _status.Text = error.Message; }
+            };
+            navModes.Children.Add(_followIde);
+            var bridge = new Button { Content = "Export VS Code extension…" };
+            TrayvoraTheme.Ghost(bridge);
+            bridge.Click += async (_, _) =>
+            {
+                var picked = await StorageProvider.SaveFilePickerAsync(new Avalonia.Platform.Storage.FilePickerSaveOptions
+                { Title = "Save extension for VS Code · Install from VSIX", SuggestedFileName = "trayvora-session.vsix", DefaultExtension = "vsix" });
+                if (picked is null) return;
+                try
+                {
+                    var path = Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(picked);
+                    if (path is null) return;
+                    IdeSession.Export(path);
+                    _status.Text = "In VS Code choose Extensions → Install from VSIX and select this file.";
+                }
+                catch (Exception error) { _status.Text = error.Message; }
+            };
+            navModes.Children.Add(bridge);
+        }
         var brand = new StackPanel
         {
             Orientation = Avalonia.Layout.Orientation.Horizontal, Spacing = 10, Margin = new Thickness(6, 2, 0, 8),
@@ -624,8 +664,10 @@ internal sealed class VoiceOverlay : Window
                         if (created.Status != "completed") throw new IOException($"Codex Desktop returned {created.Status}.");
                         return created.Answer;
                     }
-                    var turn = await _sharedChat.SubmitToAsync(room.CodexChatId, message, ct, stream);
+                    var delivery = await _discussion!.StartDeliveryAsync(room, _sharedChat.Profile);
+                    var turn = await _sharedChat.SubmitToAsync(room.CodexChatId, message, ct, stream, delivery);
                     if (turn is null) return null;
+                    _discussion.FinishDelivery(room, delivery, $"Codex Desktop · {turn.Status}");
                     if (turn.Status != "completed") throw new IOException($"Codex Desktop returned {turn.Status}.");
                     return turn.Answer;
                 }
@@ -658,6 +700,8 @@ internal sealed class VoiceOverlay : Window
             DictateAsync,
             () => new DiscussionSettings(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings")).Rounds,
             OpenTerminal);
+            _discussion.StopSpeaking = () => _replyAudio?.Stop();
+            if (_sharedChat is not null) _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
             _discussion.Initialize();
             _discussion.BackRequested += CloseDiscussion;
             if (_replyAudio is not null) _discussion.Speak = text => _replyAudio.ReadAsync(text);
@@ -667,6 +711,7 @@ internal sealed class VoiceOverlay : Window
             {
                 if (outcome is null || !outcome.StartsWith("Paused", StringComparison.Ordinal)) RequestEnded?.Invoke(RequestStatus.Completed);
             };
+            _discussion.PreviewFile = ShowFile;
             _root.Children.Add(_discussion);
         }
         ShowPage(_discussion, "Trayvora · Sessions");
@@ -691,7 +736,7 @@ internal sealed class VoiceOverlay : Window
     private DiscussionRoom? _terminalRoom;
     private Button? _terminalButton;
     private TerminalPanel? _terminal;
-    private readonly Grid _shell = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,0") };
+    private readonly Grid _shell = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,0,Auto") };
     private readonly GridSplitter _terminalSplitter = new() { Width = 5, Background = Brushes.Transparent, IsVisible = false, ResizeDirection = GridResizeDirection.Columns };
 
     /// <summary>Opens the built-in terminal beside the chat (or restarts it with another program).</summary>
@@ -712,6 +757,18 @@ internal sealed class VoiceOverlay : Window
         _terminal.IsVisible = _terminalSplitter.IsVisible = true;
         if (!_terminal.Running || kind != TerminalKind.Claude) _terminal.Start(kind);
         else _terminal.FocusConsole();
+    }
+
+    private FilePreview? _fileView;
+    private void ShowFile(string path, string? workspace, string? attachments, Action<DiscussionTarget, string> reply)
+    {
+        if (_fileView is not null) _shell.Children.Remove(_fileView);
+        var pane = new FilePreview(path, workspace, attachments, reply) { Width = Math.Clamp(Bounds.Width * .46, 310, 720) };
+        _fileView = pane;
+        pane.CloseRequested += () => { _shell.Children.Remove(pane); if (_fileView == pane) _fileView = null; };
+        Grid.SetColumn(pane, 3);
+        _shell.Children.Add(pane);
+        pane.Focus();
     }
 
     private void HideTerminal()
@@ -832,11 +889,10 @@ internal sealed class VoiceOverlay : Window
         Activate();
         if (_readiness is null)
         {
-            _readiness = new ReadinessView(CheckReadinessAsync, OperatingSystem.IsWindows() ? UpdateFromZipAsync : null, () => GitHubUpdate.CheckAsync(), InstallUpdateAsync);
+            _readiness = new ReadinessView(CheckReadinessAsync, OperatingSystem.IsWindows() ? UpdateFromZipAsync : null, ShowUpdateWindow);
             _readiness.BackRequested += CloseDiscussion;
             _readiness.SetShortcuts(_shortcutList);
         }
-        if (_offeredUpdate is { } offered) _readiness.ShowAvailable(offered);
         ShowPage(_readiness, "Trayvora · Get started");
         _ = _readiness.RefreshAsync();
     }
@@ -887,42 +943,49 @@ internal sealed class VoiceOverlay : Window
     /// <summary>Asks the app to close (after an update is staged).</summary>
     public event Action? ExitRequested;
 
-    private AvailableUpdate? _offeredUpdate;
-
-    /// <summary>Opens "Get started" with an Install button for <paramref name="update"/>.</summary>
-    public void OfferUpdate(AvailableUpdate update)
+    private UpdateWindow? _updates;
+    public void ShowUpdateWindow()
     {
-        _offeredUpdate = update;
-        _readiness?.ShowAvailable(update);
+        if (_updates is not null) { _updates.Activate(); return; }
+        var dialog = new UpdateWindow(GitHubUpdate.CheckAsync, InstallUpdateAsync);
+        _updates = dialog;
+        dialog.Closed += (_, _) => _updates = null;
+        if (IsVisible) dialog.Show(this);
+        else dialog.Show();
+        dialog.Activate();
     }
 
-    /// <summary>Installs <paramref name="update"/> from the tray menu, without opening any window.</summary>
-    public Task<string?> InstallUpdateFromTrayAsync(AvailableUpdate update, IProgress<string> progress) => InstallUpdateAsync(update, progress);
-
-    /// <summary>Downloads a GitHub release, checks it and restarts into it; settings and data stay.</summary>
-    private async Task<string?> InstallUpdateAsync(AvailableUpdate update, IProgress<string> progress)
+    private async Task InstallUpdateAsync(AvailableUpdate update, Action<string, double?> show, CancellationToken ct)
     {
-        if (_operation is not null || _discussion?.IsRunning == true) return "Wait until the current request finishes.";
-        if (!PortableUpdate.TryBegin()) return "Another update is already in progress.";
+        bool Working() => _operation is not null || _discussion?.BusyForUpdate == true || OperatingSystem.IsWindows() && (_audioToText?.BusyForUpdate == true || _textToAudio?.BusyForUpdate == true);
+        if (Working()) throw new InvalidOperationException("Finish the active request before updating.");
+        if (!PortableUpdate.TryBegin()) throw new InvalidOperationException("Another update is in progress.");
         var app = AppContext.BaseDirectory;
+        var download = Path.Combine(app, "settings", "update-download");
         try
         {
-            var download = Path.Combine(PortableUpdate.StagingRoot(app), "..", "update-download");
-            var percent = new Progress<double>(share => progress.Report($"Downloading Trayvora {update.Version}… {share:P0}"));
-            var zip = await GitHubUpdate.DownloadAsync(update, Path.GetFullPath(download), percent);
-            progress.Report("Unpacking…");
-            var staged = await Task.Run(() => PortableUpdate.Stage(zip, app));
-            try { File.Delete(zip); } catch (IOException) { }
+            var downloading = true;
+            var percent = new Progress<double>(share =>
+            {
+                if (downloading && !ct.IsCancellationRequested) show($"Downloading · {share:P0}", share);
+            });
+            var zip = await GitHubUpdate.DownloadAsync(update, download, percent, ct);
+            downloading = false;
+            ct.ThrowIfCancellationRequested();
+            show("Preparing the update…", null);
+            var staged = await Task.Run(() => PortableUpdate.Stage(zip, app, ct), ct);
+            ct.ThrowIfCancellationRequested();
+            if (Working()) throw new InvalidOperationException("Finish the active request before updating.");
+            show("Restarting Trayvora…", 1);
             PortableUpdate.Launch(staged, app);
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidDataException or HttpRequestException
-            or TaskCanceledException or System.ComponentModel.Win32Exception)
+        catch { PortableUpdate.End(); throw; }
+        finally
         {
-            PortableUpdate.End();
-            return $"Could not update: {error.Message}";
+            try { File.Delete(Path.Combine(download, GitHubUpdate.ZipName)); }
+            catch (Exception error) when (error is IOException or UnauthorizedAccessException) { ErrorLog.Write(error); }
         }
         ExitRequested?.Invoke();
-        return "Updating… Trayvora restarts in a few seconds.";
     }
 
     private async Task<string?> UpdateFromZipAsync()
@@ -1142,7 +1205,7 @@ internal sealed class VoiceOverlay : Window
     public Task ToggleFloatingRecordingAsync() =>
         ToggleRecordingAsync(_stop is { IsCancellationRequested: false } ? _recordMode : VoiceShortcutMode.Background);
 
-    public async Task ToggleRecordingAsync(VoiceShortcutMode mode = VoiceShortcutMode.MainWindow)
+    public async Task ToggleRecordingAsync(VoiceShortcutMode mode = VoiceShortcutMode.MainWindow, bool followIde = false)
     {
         if (_stop is { IsCancellationRequested: false } stop)
         {
@@ -1160,6 +1223,35 @@ internal sealed class VoiceOverlay : Window
         {
             Activity.Add("Ignored", "Trayvora is busy with another request.");
             return;
+        }
+
+        if (_readingIde) return;
+        if (followIde && _followIde.IsChecked == true && IdeSession.InCode())
+        {
+            _readingIde = true;
+            try
+            {
+                var target = await IdeSession.ReadAsync();
+                if (target is null) throw new IOException("Choose the chat in Trayvora, or pin this tab using the Trayvora command in VS Code.");
+                if (target.Agent == "Codex")
+                {
+                    if (_sharedChat is null || !await _sharedChat.SelectIdeChatAsync(target.Id)) throw new IOException("The active Codex chat was not found in this profile.");
+                    _mode.SelectedIndex = 0;
+                }
+                else
+                {
+                    var profile = ClaudeProfile();
+                    var chats = await Task.Run(() => ClaudeChats.Find(profile));
+                    var chat = chats.FirstOrDefault(item => item.Id == target.Id) ?? throw new IOException("The active Claude chat was not found in this profile.");
+                    _claudeItems = chats;
+                    _claudeChats.ItemsSource = chats;
+                    _claudeChats.SelectedItem = chat;
+                    _mode.SelectedIndex = 3;
+                }
+                if (_operation is not null || _suspended) return;
+            }
+            catch (Exception error) { GetPreview().ShowStatus(error.Message); return; }
+            finally { _readingIde = false; }
         }
 
         if (mode == VoiceShortcutMode.SharedChat && _sharedChat?.HasChat != true)
@@ -1187,6 +1279,7 @@ internal sealed class VoiceOverlay : Window
             }
         }
 
+        var origin = Destination();
         var loopback = mode == VoiceShortcutMode.WindowsAudio;
         if (!loopback && _microphone.SelectedItem is null)
         {
@@ -1324,6 +1417,12 @@ internal sealed class VoiceOverlay : Window
             QuietNotice?.Invoke(_status.Text ?? "done");
             return;
         }
+        if (mode is VoiceShortcutMode.Preview or VoiceShortcutMode.Background or VoiceShortcutMode.SharedChat && Destination() != origin)
+        {
+            GetPreview().ShowDictationDraft(draft);
+            QuietNotice?.Invoke("The destination changed. Your transcript was kept as a draft.");
+            return;
+        }
         if (mode is VoiceShortcutMode.Background)
         {
             _codexRun = SendToActiveChatAsync(draft, RequestRoute.Auto, silent: true);
@@ -1335,7 +1434,8 @@ internal sealed class VoiceOverlay : Window
         }
         else if (mode == VoiceShortcutMode.Preview)
         {
-            GetPreview().ShowDraft(draft, PreviewSendShortcut, !QuestionsActive && _sharedChat?.HasChat == true ? _sharedChat.TargetTitle : null, QuestionsActive);
+            _previewDestination = origin;
+            GetPreview().ShowDraft(draft, PreviewSendShortcut, ClaudeActive ? _claudeChat?.Title : !QuestionsActive && _sharedChat?.HasChat == true ? _sharedChat.TargetTitle : null, QuestionsActive);
         }
         else if (dictationTarget is { } target)
         {
@@ -1472,7 +1572,7 @@ internal sealed class VoiceOverlay : Window
         _operation = operation;
         _replyAudio?.Stop();
         _answer.Clear();
-        _feed.Begin(text, "Claude Code");
+        _feed.Begin(text, "Claude Code", _claudeChat?.Workspace);
         _status.Text = $"Waiting for Claude Code · {chat.Title}";
         RefreshControls();
         // Show Claude's reply while it is written.
@@ -1625,7 +1725,7 @@ internal sealed class VoiceOverlay : Window
         _operation = operation;
         _replyAudio?.Stop();
         _answer.Clear();
-        _feed.Begin(text, "Codex Desktop");
+        _feed.Begin(text, "Codex Desktop", shared.TargetWorkspace);
         _status.Text = $"Sending to Codex Desktop: {shared.TargetTitle}…";
         var background = !silent && !IsVisible;
         if (background) GetPreview().ShowStatus(_status.Text);
@@ -1759,10 +1859,19 @@ internal sealed class VoiceOverlay : Window
         await _historyWindow.SetChatAsync(_chatId);
     }
 
+    private (int Mode, Guid? Thread, string? Profile) Destination() => ClaudeActive
+        ? (3, _claudeChat?.Id, ClaudeProfile()) : (_mode.SelectedIndex, _sharedChat?.TargetId ?? _chatId, _sharedChat?.Profile);
+    private (int Mode, Guid? Thread, string? Profile)? _previewDestination;
+
     public async Task SendPreviewAsync()
     {
         if (_suspended || _operation is not null || _preview?.TakeDraft() is not { } draft) return;
         _transcript.Text = draft;
+        if (_previewDestination is { } origin && origin != Destination())
+        {
+            GetPreview().ShowDictationDraft(draft);
+            return;
+        }
         _codexRun = SendToActiveChatAsync(draft, RequestRoute.Auto);
         await _codexRun;
     }
@@ -1789,11 +1898,12 @@ internal sealed class VoiceOverlay : Window
         _emergencyRequested = false;
         _replyAudio?.Stop();
         _answer.Text = "";
-        _feed.Begin(text, "Codex");
         _status.Text = "Waiting for Codex…";
         RefreshControls();
         var route = RequestRouting.Select(text, selectedRoute ?? (RequestRoute)Math.Max(0, _route.SelectedIndex));
         var localWorkspace = LocalWorkspace;
+        _feed.Begin(text, "Codex", route == RequestRoute.LocalGit ? localWorkspace :
+            Path.Combine(Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_DIR") ?? Path.Combine(AppContext.BaseDirectory, "codex-data"), "workspace"));
         var chatId = _chatId;
         var reply = new StringBuilder();
         Guid? historyId = null;
@@ -2069,7 +2179,7 @@ internal sealed class VoiceOverlay : Window
             _feed.Use("questions:short", "Ask a quick question by voice or type. GPT remembers the last six exchanges.",
                 () => _questions.Select(item => new ChatFeed.Entry(item.Question, item.Answer, "GPT")).ToList());
         else if (desktopActive)
-            _feed.Use($"desktop:{_sharedChat!.TargetTitle}", "Messages you send to this Codex Desktop chat appear here.");
+            _feed.Use($"desktop:{_sharedChat!.Profile}:{_sharedChat.TargetId}", "Messages you send to this Codex Desktop chat appear here.");
         else
         {
             var chat = _chatId;

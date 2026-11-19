@@ -19,31 +19,45 @@ public sealed class DesktopChatClient(string scratchDirectory)
         return await ListAsync(server, ct).ConfigureAwait(false);
     }
 
+    public sealed record ChatPage(IReadOnlyList<DesktopChat> Chats, string? Next);
+
+    public async Task<ChatPage> PageAsync(string profile, string? cursor, CancellationToken ct)
+    {
+        await using var server = Connect(profile);
+        await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
+        return await PageAsync(server, cursor, ct).ConfigureAwait(false);
+    }
+
+    private static async Task<ChatPage> PageAsync(ICodexConnection server, string? cursor, CancellationToken ct)
+    {
+        var result = await server.RequestAsync("thread/list", new
+        {
+            limit = 50, cursor, sortKey = "updated_at",
+            sourceKinds = new[] { "cli", "vscode", "appServer", "unknown" },
+        }, ct).ConfigureAwait(false);
+        var page = new List<DesktopChat>();
+        foreach (var entry in result.GetProperty("data").EnumerateArray())
+        {
+            if (!Guid.TryParse(ReadString(entry, "id"), out var id)) continue;
+            var title = ReadString(entry, "name") ?? ReadString(entry, "preview");
+            title = string.IsNullOrWhiteSpace(title) ? $"Chat {id.ToString()[..8]}" : title.ReplaceLineEndings(" ");
+            page.Add(new DesktopChat(id, title, ReadString(entry, "cwd")));
+        }
+        return new(page, ReadString(result, "nextCursor"));
+    }
+
     internal static async Task<IReadOnlyList<DesktopChat>> ListAsync(ICodexConnection server, CancellationToken ct)
     {
-        var chats = new List<DesktopChat>();
-        var seen = new HashSet<Guid>();
+        var chats = new Dictionary<Guid, DesktopChat>();
+        var seen = new HashSet<string>();
         string? cursor = null;
-        for (var page = 0; page < 8; page++)
+        do
         {
-            var result = await server.RequestAsync("thread/list", new
-            {
-                limit = 50, cursor, sortKey = "updated_at",
-                sourceKinds = new[] { "cli", "vscode", "appServer", "unknown" },
-            }, ct).ConfigureAwait(false);
-            foreach (var entry in result.GetProperty("data").EnumerateArray())
-            {
-                if (!Guid.TryParse(ReadString(entry, "id"), out var id) || !seen.Add(id)) continue;
-                var title = ReadString(entry, "name") ?? ReadString(entry, "preview");
-                title = string.IsNullOrWhiteSpace(title) ? $"Chat {id.ToString()[..8]}" : title.ReplaceLineEndings(" ");
-                chats.Add(new DesktopChat(id, title, ReadString(entry, "cwd")));
-            }
-
-            var next = ReadString(result, "nextCursor");
-            if (string.IsNullOrWhiteSpace(next) || next == cursor) break;
-            cursor = next;
-        }
-        return chats;
+            var page = await PageAsync(server, cursor, ct).ConfigureAwait(false);
+            foreach (var chat in page.Chats) chats.TryAdd(chat.Id, chat);
+            cursor = page.Next;
+        } while (!string.IsNullOrWhiteSpace(cursor) && seen.Add(cursor));
+        return chats.Values.ToArray();
     }
 
     public async Task<IReadOnlyList<DesktopTurn>> ReadTurnsAsync(string profile, Guid chat, CancellationToken ct)
@@ -65,19 +79,20 @@ public sealed class DesktopChatClient(string scratchDirectory)
     /// <param name="answer">Receives the reply written so far while the turn runs.</param>
     /// <param name="wait">How long to wait for the reply before returning null (the turn stays queued in Codex Desktop).</param>
     public async Task<DesktopTurn?> SubmitAsync(string profile, Guid chat, string text,
-        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null)
+        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null, Guid? delivery = null)
     {
         if (chat == Guid.Empty || string.IsNullOrWhiteSpace(text) || text.Length > 16000)
             throw new ArgumentException("Select a chat and enter up to 16,000 characters.");
+        using var slot = await AgentTurnQueue.EnterAsync(profile, chat, ct).ConfigureAwait(false);
         await using var server = Connect(profile);
         await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
-        return await SubmitAsync(server, chat, text, progress, ct, answer, wait).ConfigureAwait(false);
+        return await SubmitAsync(server, chat, text, progress, ct, answer, wait, delivery).ConfigureAwait(false);
     }
 
     internal static async Task<DesktopTurn?> SubmitAsync(ICodexConnection server, Guid chat, string text,
-        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null)
+        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null, Guid? delivery = null)
     {
-        var messageId = Guid.NewGuid().ToString();
+        var messageId = (delivery ?? Guid.NewGuid()).ToString();
         ct.ThrowIfCancellationRequested();
         progress.Report("Submitting to the selected Codex chat…");
         var queued = await server.RequestAsync("thread/queue/add", new
@@ -92,10 +107,10 @@ public sealed class DesktopChatClient(string scratchDirectory)
         var deadline = Stopwatch.StartNew();
         var limit = wait ?? TimeSpan.FromMinutes(2);
         var shown = "";
+        var searchedBoundaries = new HashSet<string>();
         while (limit == Timeout.InfiniteTimeSpan || deadline.Elapsed < limit)
         {
-            var turns = await ReadTurnsAsync(server, chat, ct, PollTurns).ConfigureAwait(false);
-            var turn = turns.FirstOrDefault(turn => turn.ClientIds.Contains(messageId));
+            var turn = await FindTurnAsync(server, chat, messageId, ct, searchedBoundaries).ConfigureAwait(false);
             // A separate reader can report a running Desktop turn as interrupted until it persists its final status.
             if (turn is { Status: "completed" or "failed" }) return turn;
             if (turn is not null)
@@ -109,6 +124,32 @@ public sealed class DesktopChatClient(string scratchDirectory)
             }
             await Task.Delay(TimeSpan.FromSeconds(2), ct).ConfigureAwait(false);
         }
+        return null;
+    }
+
+    public async Task<DesktopTurn?> CheckDeliveryAsync(string profile, Guid chat, Guid delivery, CancellationToken ct)
+    {
+        await using var server = Connect(profile);
+        await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
+        return await FindTurnAsync(server, chat, delivery.ToString(), ct).ConfigureAwait(false);
+    }
+
+    private static async Task<DesktopTurn?> FindTurnAsync(ICodexConnection server, Guid chat, string messageId, CancellationToken ct, HashSet<string>? searchedBoundaries = null)
+    {
+        string? cursor = null;
+        var seen = new HashSet<string>();
+        do
+        {
+            var result = await server.RequestAsync("thread/turns/list", new
+            {
+                threadId = chat.ToString(), limit = PollTurns, cursor, itemsView = "full",
+            }, ct).ConfigureAwait(false);
+            var turns = ParseTurns(result);
+            var found = turns.FirstOrDefault(turn => turn.ClientIds.Contains(messageId));
+            if (found is not null) { searchedBoundaries?.Clear(); return found; }
+            if (cursor is null && turns.Count > 0 && searchedBoundaries is not null && !searchedBoundaries.Add(turns[^1].Id)) return null;
+            cursor = ReadString(result, "nextCursor");
+        } while (cursor is { Length: > 0 } && seen.Add(cursor));
         return null;
     }
 
@@ -141,8 +182,10 @@ public sealed class DesktopChatClient(string scratchDirectory)
         progress.Report("Codex is working on it…");
         var answer = new System.Text.StringBuilder();
         var chat = new DesktopChat(id, title, workspace);
+        using var drain = new CancellationTokenSource();
+        using var boundWait = ct.Register(() => drain.CancelAfter(TimeSpan.FromSeconds(5)));
         using var interrupt = ct.Register(() => _ = server.RequestAsync("turn/interrupt", new { threadId, turnId }, CancellationToken.None));
-        await foreach (var message in server.ReadEventsAsync(CancellationToken.None).WithCancellation(CancellationToken.None))
+        await foreach (var message in server.ReadEventsAsync(drain.Token).WithCancellation(drain.Token))
         {
             if (!message.TryGetProperty("params", out var data) || data.ValueKind != JsonValueKind.Object ||
                 ReadString(data, "threadId") != threadId || !message.TryGetProperty("method", out var method)) continue;

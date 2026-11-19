@@ -36,6 +36,7 @@ internal sealed class TextToAudioView : ToolPage, IDisposable
     private bool _loading;
     private string? _audio;
     private string? _audioText;
+    internal bool BusyForUpdate => _run is not null;
     private CancellationTokenSource? _run;
     private CancellationTokenSource? _playback;
     private WasapiPlayer? _player;

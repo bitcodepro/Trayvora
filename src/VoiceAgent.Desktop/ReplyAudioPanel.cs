@@ -239,30 +239,34 @@ internal sealed class ReplyAudioPanel : StackPanel, IDisposable
         var token = playback.Token;
         try
         {
-            _status.Text = "Generating speech with OpenAI…";
-            using var audio = await GenerateCloudAsync(options, text, token);
-            token.ThrowIfCancellationRequested();
-            using var wave = new WaveFileReader(audio);
-            await using var output = new WasapiPlayerBuilder().Build();
-            var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
-            output.PlaybackStopped += (_, args) =>
+            foreach (var piece in SpeechFiles.Split(text, OpenAiSpeechOutput.MaxInputLength - 96))
             {
-                if (args.Exception is null) completed.TrySetResult();
-                else completed.TrySetException(args.Exception);
-            };
-            output.Init(wave);
-            output.Volume = Math.Clamp(_options.Volume, 0, 100) / 100f;
-            _cloudOutput = output;
-            _status.Text = "Playing AI-generated voice.";
-            try
-            {
-                output.Play();
-                await completed.Task.WaitAsync(token);
-            }
-            finally
-            {
-                if (ReferenceEquals(_cloudOutput, output)) _cloudOutput = null;
-                output.Stop();
+                token.ThrowIfCancellationRequested();
+                _status.Text = "Generating speech with OpenAI…";
+                using var audio = await GenerateCloudAsync(options, piece, token);
+                token.ThrowIfCancellationRequested();
+                using var wave = new WaveFileReader(audio);
+                await using var output = new WasapiPlayerBuilder().Build();
+                var completed = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+                output.PlaybackStopped += (_, args) =>
+                {
+                    if (args.Exception is null) completed.TrySetResult();
+                    else completed.TrySetException(args.Exception);
+                };
+                output.Init(wave);
+                output.Volume = Math.Clamp(_options.Volume, 0, 100) / 100f;
+                _cloudOutput = output;
+                _status.Text = "Playing AI-generated voice.";
+                try
+                {
+                    output.Play();
+                    await completed.Task.WaitAsync(token);
+                }
+                finally
+                {
+                    if (ReferenceEquals(_cloudOutput, output)) _cloudOutput = null;
+                    output.Stop();
+                }
             }
             if (!token.IsCancellationRequested) _status.Text = "Playback complete.";
         }

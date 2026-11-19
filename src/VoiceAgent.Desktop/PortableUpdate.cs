@@ -19,7 +19,7 @@ internal static class PortableUpdate
     public static string StagingRoot(string appDirectory) => Path.Combine(appDirectory, "settings", "update-staging");
 
     /// <summary>Unpacks <paramref name="zip"/> and returns the folder that holds the new Trayvora.exe.</summary>
-    public static string Stage(string zip, string appDirectory)
+    public static string Stage(string zip, string appDirectory, CancellationToken ct = default)
     {
         var root = StagingRoot(appDirectory);
         if (Directory.Exists(root)) Directory.Delete(root, recursive: true);
@@ -30,6 +30,7 @@ internal static class PortableUpdate
         {
             foreach (var entry in archive.Entries)
             {
+                ct.ThrowIfCancellationRequested();
                 var path = Path.GetFullPath(Path.Combine(target, entry.FullName));
                 if (!path.StartsWith(full, StringComparison.OrdinalIgnoreCase)) throw new InvalidDataException("The zip contains an unsafe path.");
                 if (entry.FullName.EndsWith('/') || entry.FullName.EndsWith('\\')) { Directory.CreateDirectory(path); continue; }
@@ -56,7 +57,8 @@ internal static class PortableUpdate
         info.ArgumentList.Add(ApplyArgument);
         info.ArgumentList.Add(Path.TrimEndingDirectorySeparator(appDirectory));
         info.ArgumentList.Add(Environment.ProcessId.ToString(System.Globalization.CultureInfo.InvariantCulture));
-        Process.Start(info)?.Dispose();
+        info.Environment["DOTNET_BUNDLE_EXTRACT_BASE_DIR"] = Path.Combine(appDirectory, "tmp", "dotnet-bundle");
+        using var updater = Process.Start(info) ?? throw new IOException("The update helper could not start.");
     }
 
     /// <summary>Runs in the staged copy: waits for the old process, copies program files, starts the updated app.</summary>
@@ -65,7 +67,7 @@ internal static class PortableUpdate
         try
         {
             using var old = Process.GetProcessById(oldProcess);
-            old.WaitForExit(60_000);
+            if (!old.WaitForExit(60_000)) return;
         }
         catch (ArgumentException) { }
         catch (InvalidOperationException) { }
@@ -92,21 +94,60 @@ internal static class PortableUpdate
         {
             try { File.WriteAllText(Path.Combine(appDirectory, "settings", "update-failed.txt"), last.ToString()); } catch (IOException) { }
         }
-        Process.Start(new ProcessStartInfo(Path.Combine(appDirectory, ExeName)) { UseShellExecute = false, WorkingDirectory = appDirectory })?.Dispose();
+        Process.Start(new ProcessStartInfo(Path.Combine(appDirectory, ExeName)) { UseShellExecute = false, WorkingDirectory = appDirectory, ArgumentList = { "--updated" } })?.Dispose();
     }
 
     /// <summary>Copies every program file from <paramref name="source"/>; data folders and an existing model are kept.</summary>
     internal static void CopyProgram(string source, string target)
     {
-        foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+        // Keep originals until every new program file is in place so a locked DLL cannot leave a mixed install.
+        var backup = Path.Combine(target, "settings", "update-rollback", Guid.NewGuid().ToString("N"));
+        var changes = new Stack<(string Destination, string? Original)>();
+        var completed = false;
+        Directory.CreateDirectory(backup);
+        try
         {
-            var relative = Path.GetRelativePath(source, file);
-            var top = relative.Split(Path.DirectorySeparatorChar, 2)[0];
-            if (relative.Contains(Path.DirectorySeparatorChar) && DataFolders.Contains(top, StringComparer.OrdinalIgnoreCase)) continue;
-            var destination = Path.Combine(target, relative);
-            if (top.Equals("models", StringComparison.OrdinalIgnoreCase) && File.Exists(destination)) continue;
-            Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
-            File.Copy(file, destination, overwrite: true);
+            foreach (var file in Directory.EnumerateFiles(source, "*", SearchOption.AllDirectories))
+            {
+                var relative = Path.GetRelativePath(source, file);
+                var top = relative.Split(Path.DirectorySeparatorChar, 2)[0];
+                if (DataFolders.Contains(top, StringComparer.OrdinalIgnoreCase)) continue;
+                var destination = Path.Combine(target, relative);
+                if (top.Equals("models", StringComparison.OrdinalIgnoreCase) && File.Exists(destination)) continue;
+                Directory.CreateDirectory(Path.GetDirectoryName(destination)!);
+                var temp = Path.Combine(backup, Guid.NewGuid().ToString("N"));
+                File.Copy(file, temp);
+                if (File.Exists(destination))
+                {
+                    var original = temp + ".old";
+                    File.Replace(temp, destination, original);
+                    changes.Push((destination, original));
+                }
+                else
+                {
+                    File.Move(temp, destination);
+                    changes.Push((destination, null));
+                }
+            }
+            completed = true;
+        }
+        catch
+        {
+            foreach (var (destination, original) in changes)
+            {
+                if (original is null) File.Delete(destination);
+                else File.Move(original, destination, true);
+            }
+            throw;
+        }
+        finally
+        {
+            // An .old file can remain if Windows refused to restore an original; keep it for recovery.
+            if (completed || !Directory.EnumerateFiles(backup, "*.old").Any())
+            {
+                try { Directory.Delete(backup, recursive: true); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException) { }
+            }
         }
     }
 

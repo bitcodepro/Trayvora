@@ -54,6 +54,8 @@ public sealed class DesktopEventsTests
                 VerifyAccounts();
                 VerifyFloatingAgent();
                 VerifyDictationDraft();
+                VerifyUpdateDialog();
+                VerifyVoiceRecipient();
                 result.SetResult();
             }
             catch (Exception error)
@@ -145,6 +147,67 @@ public sealed class DesktopEventsTests
             File.Delete(Path.Combine(folder.FullName, "history.lock"));
             folder.Delete();
         }
+    }
+
+    private static void VerifyVoiceRecipient()
+    {
+        var tmp = Directory.CreateTempSubdirectory();
+        var window = new Window { Width = 960, Height = 640 };
+        try
+        {
+            var store = new DiscussionStore(tmp.FullName);
+            var first = store.Create(null);
+            first.Title = "Original room";
+            var second = store.Create(null);
+            second.Title = "Second room";
+            first.Updated = second.Updated.AddSeconds(1);
+            store.Save(first);
+            store.Save(second);
+            var voice = new TaskCompletionSource<string?>();
+            var sent = 0;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => { sent++; return Task.FromResult<string?>("ok"); },
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null, (_, _, _) => voice.Task);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == first.Id);
+            var mic = view.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Dictate a message");
+            view.GetLogicalDescendants().OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(button => Equals(button.Content, "Voice mode")).IsChecked = true;
+            mic.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            WaitForButton(view, second.Title).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.CurrentRoom?.Id == second.Id);
+            voice.SetResult("original voice note");
+            Pump(Task.Delay(20));
+            Assert.Equal(0, sent);
+            WaitForButton(view, first.Title).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.CurrentRoom?.Id == first.Id);
+            Assert.Contains(view.GetLogicalDescendants().OfType<TextBox>(), box => box.Text == "original voice note");
+        }
+        finally { window.Close(); tmp.Delete(true); }
+    }
+
+    private static void VerifyUpdateDialog()
+    {
+        CancellationToken downloadToken = default;
+        var dialog = new UpdateWindow(_ => Task.FromResult<AvailableUpdate?>(new(new Version(99, 0), "", "", "")),
+            async (_, progress, token) =>
+            {
+                downloadToken = token;
+                progress("Downloading · 42%", 0.42);
+                await Task.Delay(Timeout.InfiniteTimeSpan, token);
+            });
+        try
+        {
+            dialog.Show();
+            Button Action(string label) => dialog.GetLogicalDescendants().OfType<Button>().Single(button => Equals(button.Content, label));
+            PumpUntil(() => Action("Update").IsEnabled);
+            Action("Update").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(0.42, dialog.GetLogicalDescendants().OfType<ProgressBar>().Single().Value);
+            Assert.False(Action("Update").IsEnabled);
+            Action("Cancel").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.True(downloadToken.IsCancellationRequested);
+        }
+        finally { if (dialog.IsVisible) dialog.Close(); }
     }
 
     private static void VerifyDictationDraft()

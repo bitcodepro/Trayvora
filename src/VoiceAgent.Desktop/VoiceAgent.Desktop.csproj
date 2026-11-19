@@ -19,6 +19,8 @@
     <PackageReference Include="Avalonia.Themes.Fluent" />
     <PackageReference Include="Microsoft.Extensions.DependencyInjection" />
     <PackageReference Include="Markdig" />
+    <EmbeddedResource Include="../../integrations/vscode/extension.js" LogicalName="Trayvora.IDE.extension.js" />
+    <EmbeddedResource Include="../../integrations/vscode/package.json" LogicalName="Trayvora.IDE.package.json" />
     <EmbeddedResource Include="Assets/tray.png" />
     <EmbeddedResource Include="Assets/trayvora.ico" />
     <EmbeddedResource Include="Assets/uk.json" Condition="Exists('Assets/uk.json')" />

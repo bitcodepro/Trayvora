@@ -117,6 +117,7 @@ internal sealed class AudioToTextView : ToolPage
     private readonly List<QueueItem> _queue = [];
     private QueueItem? _selected;
     private bool _showing;
+    internal bool BusyForUpdate => _run is not null || _downloading is not null;
     private CancellationTokenSource? _run;
 
     internal enum ItemState { Reading, Waiting, Transcribing, Done, Failed, Stopped }
