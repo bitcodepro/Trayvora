@@ -35,7 +35,8 @@ function activate(context) {
         vscode.commands.registerCommand("trayvora.pinSession", async () => {
             const tab = active();
             if (!tab) return;
-            const agent = await vscode.window.showQuickPick(["Codex", "Claude"], { title: "Agent for this tab" });
+            const isClaudeEditor = ["claudeVSCodePanel", "mainThreadWebview-claudeVSCodePanel"].includes(tab.input?.viewType);
+            const agent = isClaudeEditor ? "Claude" : await vscode.window.showQuickPick(["Codex", "Claude"], { title: "Agent for this tab" });
             if (!agent) return;
             const id = await vscode.window.showInputBox({ title: "Existing chat ID", validateInput: text => uuid.test(text.trim()) ? null : "Enter the chat UUID" });
             if (id) { pins.set(tab, { agent, id: id.trim() }); vscode.window.showInformationMessage("Trayvora binding saved for this tab."); }
