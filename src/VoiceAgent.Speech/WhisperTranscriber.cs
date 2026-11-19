@@ -20,8 +20,8 @@ public sealed class WhisperTranscriber(WhisperModel model, string? initialPrompt
                 return string.Empty;
             }
 
-            await using var verified = await model.OpenVerifiedAsync(cancellationToken);
-            using var factory = WhisperFactory.FromPath(model.Path);
+            using var lease = await WarmModel.AcquireAsync(model, cancellationToken);
+            var factory = lease.Factory;
             var builder = factory.CreateBuilder().WithLanguage(language);
             if (!string.IsNullOrWhiteSpace(initialPrompt)) builder.WithPrompt(initialPrompt);
             await using var processor = builder.Build();
@@ -93,6 +93,60 @@ public sealed class WhisperTranscriber(WhisperModel model, string? initialPrompt
             await verified.DisposeAsync();
         }
     }
+
+    // Short dictations share one verified, read-locked model. Processors keep their own prompt and language.
+    private sealed class WarmModel : IDisposable
+    {
+        private static readonly SemaphoreSlim Gate = new(1, 1);
+        private static FileStream? _verified;
+        private static WhisperFactory? _factory;
+        private static long _lastUse;
+        private static readonly Timer Idle = new(_ =>
+        {
+            if (!Gate.Wait(0)) return;
+            try
+            {
+                if (Environment.TickCount64 - _lastUse >= 120_000) ReleaseModel();
+            }
+            finally { Gate.Release(); }
+        }, null, 60_000, 60_000);
+        public WhisperFactory Factory => _factory!;
+
+        public static async Task<WarmModel> AcquireAsync(WhisperModel model, CancellationToken ct)
+        {
+            await Gate.WaitAsync(ct).ConfigureAwait(false);
+            try
+            {
+                if (_factory is null || !string.Equals(_verified?.Name, Path.GetFullPath(model.Path), StringComparison.OrdinalIgnoreCase))
+                {
+                    ReleaseModel();
+                    _verified = await model.OpenVerifiedAsync(ct).ConfigureAwait(false);
+                    _factory = WhisperFactory.FromPath(model.Path);
+                }
+                return new WarmModel();
+            }
+            catch { ReleaseModel(); Gate.Release(); throw; }
+        }
+
+        public static async Task InvalidateAsync(string path, CancellationToken ct)
+        {
+            await Gate.WaitAsync(ct).ConfigureAwait(false);
+            try { if (string.Equals(_verified?.Name, Path.GetFullPath(path), StringComparison.OrdinalIgnoreCase)) ReleaseModel(); }
+            finally { Gate.Release(); }
+        }
+
+        private static void ReleaseModel()
+        {
+            _factory?.Dispose();
+            _factory = null;
+            _verified?.Dispose();
+            _verified = null;
+        }
+
+        public void Dispose() { _lastUse = Environment.TickCount64; Gate.Release(); }
+    }
+
+    internal static Task ReleaseCachedAsync(string path, CancellationToken ct) => WarmModel.InvalidateAsync(path, ct);
 
     private static float[] Decode(ReadOnlySpan<byte> pcm)
     {

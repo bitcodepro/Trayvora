@@ -94,6 +94,7 @@ public sealed class WhisperModel(string path)
             }
 
             ct.ThrowIfCancellationRequested();
+            await WhisperTranscriber.ReleaseCachedAsync(Path, ct);
             File.Move(partial, Path, overwrite: true);
         }
         finally

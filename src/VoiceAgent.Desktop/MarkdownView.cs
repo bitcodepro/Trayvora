@@ -391,6 +391,12 @@ internal sealed class MarkdownView : StackPanel
                     Text("\n");
                     break;
                 case CodeInline code:
+                    if (OpenFile is not null && FilePreview.IsReference(code.Content))
+                    {
+                        map.Links.Add((map.Position, map.Position + code.Content.Length, code.Content));
+                        Text(code.Content, run => { run.Foreground = TrayvoraTheme.Accent; run.TextDecorations = TextDecorations.Underline; });
+                        break;
+                    }
                     Text(code.Content, run =>
                     {
                         run.FontFamily = Mono;
@@ -426,7 +432,7 @@ internal sealed class MarkdownView : StackPanel
                 case LinkInline link:
                 {
                     var start = map.Position;
-                    var url = SafeUrl(link.Url);
+                    var url = SafeUrl(link.Url) ?? (OpenFile is not null && FilePreview.IsReference(link.Url) ? link.Url : null);
                     var span = new Span();
                     if (url is not null)
                     {
@@ -468,7 +474,9 @@ internal sealed class MarkdownView : StackPanel
         Uri.TryCreate(url, UriKind.Absolute, out var uri) && (uri.Scheme == Uri.UriSchemeHttps || uri.Scheme == Uri.UriSchemeHttp)
             ? uri.AbsoluteUri : null;
 
-    private static void AttachLinks(SelectableTextBlock block, List<(int Start, int End, string Url)> links)
+    internal Action<string>? OpenFile { get; init; }
+
+    private void AttachLinks(SelectableTextBlock block, List<(int Start, int End, string Url)> links)
     {
         string? shown = null;
 
@@ -482,6 +490,28 @@ internal sealed class MarkdownView : StackPanel
             return null;
         }
 
+        void Open(string url)
+        {
+            if (SafeUrl(url) is { } web && TopLevel.GetTopLevel(block)?.Launcher is { } launcher)
+                _ = launcher.LaunchUriAsync(new Uri(web));
+            else OpenFile?.Invoke(url);
+        }
+
+        block.Focusable = true;
+        block.KeyDown += (_, args) =>
+        {
+            if (args.Key != Key.Enter) return;
+            args.Handled = true;
+            if (links.Count == 1) { Open(links[0].Url); return; }
+            var menu = new ContextMenu();
+            foreach (var entry in links)
+            {
+                var item = new MenuItem { Header = entry.Url };
+                item.Click += (_, _) => Open(entry.Url);
+                menu.Items.Add(item);
+            }
+            menu.Open(block);
+        };
         block.PointerMoved += (_, args) =>
         {
             var url = At(args);
@@ -494,8 +524,7 @@ internal sealed class MarkdownView : StackPanel
         block.PointerReleased += (_, args) =>
         {
             if (args.InitialPressMouseButton != MouseButton.Left || !string.IsNullOrEmpty(block.SelectedText)) return;
-            if (At(args) is { } url && TopLevel.GetTopLevel(block)?.Launcher is { } launcher)
-                _ = launcher.LaunchUriAsync(new Uri(url));
+            if (At(args) is { } url) Open(url);
         };
     }
 }

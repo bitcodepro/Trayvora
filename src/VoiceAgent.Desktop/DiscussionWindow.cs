@@ -263,14 +263,14 @@ internal sealed class DiscussionWindow(
         _newRoom.Click += (_, _) => NewRoom();
         ToolTip.SetTip(_editor, "Enter sends · Shift+Enter starts a new line");
         TrayvoraTheme.StyleControls(_roomSearch, _export, _voiceMode);
-        _roomSearch.TextChanged += (_, _) => RefreshList();
+        _roomSearch.TextChanged += async (_, _) => await SearchRoomsAsync();
         _export.Click += async (_, _) => await ExportAsync();
         ToolTip.SetTip(_export, "Save this session as a Markdown file");
         ToolTip.SetTip(_voiceMode, "Voice mode: dictated messages are sent at once and replies addressed to you are read aloud.");
         _voiceMode.IsCheckedChanged += (_, _) => _status.Text = _voiceMode.IsChecked == true
             ? "Voice mode on: press the microphone, speak, press it again — the message is sent and replies are read aloud." : "Voice mode off.";
         _send.Click += async (_, _) => await PostAsync();
-        _pause.Click += (_, _) => CurrentRun?.Cancel.Cancel();
+        _pause.Click += (_, _) => { if (Attachments.Copying) Attachments.CancelCopy(); else CurrentRun?.Cancel.Cancel(); };
         _delete.Click += (_, _) => _confirm.IsVisible = true;
         _toCodex.Click += (_, _) => SetTarget(DiscussionTarget.Codex);
         _toClaude.Click += (_, _) => SetTarget(DiscussionTarget.Claude);
@@ -303,6 +303,7 @@ internal sealed class DiscussionWindow(
             if (_room is not { } room || await NewFolderAsync(pick, "Folder for the new Codex chat", room.Claude?.Workspace) is not { } folder) return;
             room.CodexDesktop = true;
             room.CodexChatId = Guid.Empty;
+            room.CodexWorkspace = folder;
             room.NewCodexFolder = folder;
             room.CodexChatTitle = $"New Codex Desktop chat · {Path.GetFileName(folder)}";
             Persist(room);
@@ -375,11 +376,42 @@ internal sealed class DiscussionWindow(
         Content = shell;
 
         SetTarget(DiscussionTarget.Codex);
-        ReloadRooms();
-        Open(_items.FirstOrDefault());
+        _ = ReloadRoomsAsync();
         AttachedToVisualTree += (_, _) => Dispatcher.UIThread.Post(() => _editor.Focus(), DispatcherPriority.Background);
     }
 
+    public Action<string, string?, string?, Action<DiscussionTarget, string>>? PreviewFile { get; set; }
+    public Func<string, Guid, Guid, CancellationToken, Task<DesktopTurn?>>? CheckDelivery { get; set; }
+
+    public async Task<Guid> StartDeliveryAsync(DiscussionRoom room, string profile)
+    {
+        var id = Guid.NewGuid();
+        Append(room, new DiscussionMessage(DiscussionMember.Codex, DiscussionMember.Boss,
+            $"Submitting to {room.CodexChatTitle ?? "Codex Desktop"}…", DateTimeOffset.Now, DeliveryId: id, DeliveryProfile: profile));
+        await _saves;
+        return id;
+    }
+
+    public void FinishDelivery(DiscussionRoom room, Guid id, string status)
+    {
+        var index = room.Messages.FindIndex(message => message.DeliveryId == id);
+        if (index < 0) return;
+        room.Messages[index] = room.Messages[index] with { Text = status, DeliveryId = null };
+        Persist(room);
+        if (ReferenceEquals(room, _room)) RefreshTimeline(room);
+    }
+
+    private void RefreshTimeline(DiscussionRoom room)
+    {
+        _messages.Children.Clear();
+        _rendered.Clear();
+        _live.Clear();
+        RenderLatest(room);
+        ShowRunState();
+    }
+
+    public Action? StopSpeaking { get; set; }
+    public bool BusyForUpdate => IsRunning || _dictationStop is not null || _attachments?.Copying == true || !_saves.IsCompleted;
     public bool IsRunning => _runs.Count > 0;
     public DiscussionRoom? CurrentRoom => _room;
 
@@ -766,20 +798,22 @@ internal sealed class DiscussionWindow(
         if (_room is null) NewRoom();
         if (TopLevel.GetTopLevel(this)?.StorageProvider is not { } storage) return;
         var files = await storage.OpenFilePickerAsync(new Avalonia.Platform.Storage.FilePickerOpenOptions { Title = "Attach files", AllowMultiple = true });
-        Attachments.AddFiles(files.Select(file => Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(file)).OfType<string>());
+        await Attachments.AddFilesAsync(files.Select(file => Avalonia.Platform.Storage.StorageProviderExtensions.TryGetLocalPath(file)).OfType<string>());
     }
 
     // ── Sessions ─────────────────────────────────────────────────────────
 
-    private void ReloadRooms()
+    private async Task ReloadRoomsAsync()
     {
-        try { _items = store.Load().ToList(); }
+        IsEnabled = false;
+        try { _items = await Task.Run(store.ListHeaders); }
         catch (Exception error) when (error is IOException or UnauthorizedAccessException)
         {
             _items = [];
             _status.Text = "Could not read saved sessions.";
         }
-        RefreshList();
+        await OpenSavedAsync(_items.FirstOrDefault());
+        IsEnabled = true;
     }
 
     /// <summary>Rebuilds the session list once after a burst of changes.</summary>
@@ -792,6 +826,33 @@ internal sealed class DiscussionWindow(
             _listPending = false;
             RefreshListNow();
         }, DispatcherPriority.Background);
+    }
+
+    private HashSet<Guid> _searchHits = [];
+    private int _searchVersion;
+    private async Task SearchRoomsAsync()
+    {
+        var version = ++_searchVersion;
+        var query = _roomSearch.Text?.Trim();
+        _searchHits = [];
+        RefreshList();
+        if (string.IsNullOrEmpty(query)) return;
+        await Task.Delay(180);
+        if (version != _searchVersion) return;
+        var ids = _items.Where(room => room.IndexedPreview is not null).Select(room => room.Id).ToArray();
+        var hits = await Task.Run(() =>
+        {
+            var found = new HashSet<Guid>();
+            foreach (var id in ids)
+            {
+                if (Volatile.Read(ref _searchVersion) != version) break;
+                try { if (RoomMatches(store.ReadRoom(id), query)) found.Add(id); }
+                catch (Exception error) when (error is IOException or UnauthorizedAccessException or System.Text.Json.JsonException)
+                { ErrorLog.Write(error, "Searching sessions"); }
+            }
+            return found;
+        });
+        if (version == _searchVersion) { _searchHits = hits; RefreshList(); }
     }
 
     /// <summary>A session matches a search by its title or the text of any message.</summary>
@@ -844,12 +905,12 @@ internal sealed class DiscussionWindow(
         var query = _roomSearch.Text;
         foreach (var room in _items)
         {
-            if (!RoomMatches(room, query) && !ReferenceEquals(room, _room)) continue;
+            if (room.IndexedPreview is null ? !RoomMatches(room, query) && !ReferenceEquals(room, _room) : !string.IsNullOrWhiteSpace(query) && !Matches(room.Title, query) && !_searchHits.Contains(room.Id)) continue;
             var row = new Button { Content = RoomItem(room) };
             row.Classes.Add("nav");
             TrayvoraTheme.SetSelected(row, ReferenceEquals(room, _room));
             Avalonia.Automation.AutomationProperties.SetName(row, room.Title);
-            row.Click += (_, _) => { if (!ReferenceEquals(room, _room)) Open(room); };
+            row.Click += async (_, _) => { if (!ReferenceEquals(room, _room)) await OpenSavedAsync(room); };
             var rename = new MenuItem { Header = "Rename", InputGesture = new KeyGesture(Key.F2) };
             rename.Click += (_, _) => StartRename(room, row);
             row.ContextMenu = new ContextMenu { Items = { rename } };
@@ -870,6 +931,7 @@ internal sealed class DiscussionWindow(
         {
             var room = store.Create(defaultClaude());
             _items.Insert(0, room);
+            if (_room is null) _drafts[room.Id] = new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
             Open(room);
             RefreshList();
             _title.Focus();
@@ -879,9 +941,37 @@ internal sealed class DiscussionWindow(
         { _status.Text = "Could not create a session. Check access to the settings folder."; }
     }
 
+    private int _openVersion;
+    private async Task OpenSavedAsync(DiscussionRoom? row)
+    {
+        var opening = ++_openVersion;
+        if (row?.IndexedPreview is null) { Open(row); return; }
+        try
+        {
+            var full = await Task.Run(() => store.ReadRoom(row.Id));
+            var index = _items.IndexOf(row);
+            if (opening != _openVersion || index < 0) return;
+            _items[index] = full;
+            Open(full);
+        }
+        catch (Exception error) { _status.Text = error.Message; }
+    }
+
+    private sealed record Draft(string Text, string[] Files, DiscussionTarget To, bool RelayCodex, bool RelayClaude);
+    private readonly Dictionary<Guid, Draft> _drafts = [];
+
     private void Open(DiscussionRoom? room)
     {
+        _openVersion++;
+        if (_room is { } previous && _items.Contains(previous))
+            _drafts[previous.Id] = new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
         _room = room;
+        var draft = room is null ? null : _drafts.GetValueOrDefault(room.Id);
+        _editor.Text = draft?.Text ?? "";
+        Attachments.Restore(draft?.Files ?? []);
+        _relayFromCodex = draft?.RelayCodex ?? false;
+        _relayFromClaude = draft?.RelayClaude ?? false;
+        SetTarget(draft?.To ?? DiscussionTarget.Codex);
         _confirm.IsVisible = false;
         _status.Text = "";
         _live.Clear();
@@ -933,7 +1023,7 @@ internal sealed class DiscussionWindow(
             Id = room.Id, Title = room.Title, Created = room.Created, Updated = room.Updated,
             CodexChatId = room.CodexChatId, CodexDesktop = room.CodexDesktop, CodexChatTitle = room.CodexChatTitle,
             Claude = room.Claude, Messages = [.. room.Messages],
-            ClaudePermissions = room.ClaudePermissions, NewCodexFolder = room.NewCodexFolder,
+            ClaudePermissions = room.ClaudePermissions, NewCodexFolder = room.NewCodexFolder, CodexWorkspace = room.CodexWorkspace,
         };
         Enqueue(() => store.Save(snapshot), "Could not save this session. Check access to the settings folder.");
         return true;
@@ -954,8 +1044,19 @@ internal sealed class DiscussionWindow(
     }
 
     /// <summary>Turns a session row into a text box: Enter or leaving it saves the name, Escape keeps the old one.</summary>
-    private void StartRename(DiscussionRoom room, Button row)
+    private async void StartRename(DiscussionRoom room, Button row)
     {
+        if (room.IndexedPreview is not null)
+        {
+            try
+            {
+                var full = await Task.Run(() => store.ReadRoom(room.Id));
+                var i = _items.IndexOf(room);
+                if (i < 0) return;
+                _items[i] = room = full;
+            }
+            catch (Exception error) { _status.Text = error.Message; return; }
+        }
         var box = new TextBox { Text = room.Title, MaxLength = 120, MinWidth = 120 };
         TrayvoraTheme.StyleControls(box);
         Avalonia.Automation.AutomationProperties.SetName(box, "Session name");
@@ -1003,8 +1104,9 @@ internal sealed class DiscussionWindow(
         var id = room.Id;
         Enqueue(() => store.Delete(id), "Could not delete this session.");
         _items.Remove(room);
+        _drafts.Remove(room.Id);
         RefreshList();
-        Open(_items.FirstOrDefault());
+        _ = OpenSavedAsync(_items.FirstOrDefault());
     }
 
     // ── Bindings ─────────────────────────────────────────────────────────
@@ -1025,7 +1127,7 @@ internal sealed class DiscussionWindow(
                 room.CodexChatTitle = selected.Title;
                 Persist(room);
             }
-            options = options.Where(option => option == selected || Matches(option.Title, _codexSearch.Text)).ToList();
+            options = options.Where(option => option == selected || Matches(option.Title, _codexSearch.Text) || option.Id.ToString().Equals(_codexSearch.Text?.Trim(), StringComparison.OrdinalIgnoreCase)).ToList();
             if (selected is null)
             {
                 selected = new CodexChatOption(room.CodexChatId,
@@ -1068,6 +1170,8 @@ internal sealed class DiscussionWindow(
     {
         if (_switching || _room is not { } room || _codexChat.SelectedItem is not CodexChatOption option
             || (option.Id == room.CodexChatId && option.Desktop == room.CodexDesktop)) return;
+        room.NewCodexFolder = null;
+        room.CodexWorkspace = _desktopItems.FirstOrDefault(item => item.Id == option.Id)?.Workspace;
         room.CodexChatId = option.Id;
         room.CodexDesktop = option.Desktop;
         room.CodexChatTitle = option.Id == room.Id ? null : option.Title;
@@ -1212,8 +1316,10 @@ internal sealed class DiscussionWindow(
         var idle = CurrentRun is null;
         var open = _room is not null;
         var files = _attachments?.Files.Count ?? 0;
-        _send.IsEnabled = idle && length <= MaxTypedLength && (files > 0 || (length > 0 && !string.IsNullOrWhiteSpace(_editor.Text)));
-        _pause.IsVisible = !idle;
+        if (Attachments.Copying) _counter.Text = "Copying attachment…";
+        _send.IsEnabled = idle && !Attachments.Copying && length <= MaxTypedLength && (files > 0 || (length > 0 && !string.IsNullOrWhiteSpace(_editor.Text)));
+        _pause.Content = Attachments.Copying ? "Cancel copy" : "Pause";
+        _pause.IsVisible = !idle || Attachments.Copying;
         _delete.IsEnabled = idle && open;
         _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle;
         _codexChat.IsEnabled = _claudeChat.IsEnabled = _codexSearch.IsEnabled = _claudeSearch.IsEnabled = _claudeRights.IsEnabled = _newCodex.IsEnabled = _newClaude.IsEnabled = idle && open;
@@ -1292,6 +1398,14 @@ internal sealed class DiscussionWindow(
             return;
         }
 
+        StopSpeaking?.Invoke();
+        if (_room is null) NewRoom();
+        if (_room is not { } origin) return;
+        var target = _target;
+        var relays = (_relayFromCodex, _relayFromClaude);
+        var codex = origin.CodexChatId;
+        var claude = origin.Claude?.Id;
+        var voiceSend = _voiceMode.IsChecked == true;
         using var stopRecording = new CancellationTokenSource();
         using var cancel = new CancellationTokenSource();
         _dictationStop = stopRecording;
@@ -1323,12 +1437,22 @@ internal sealed class DiscussionWindow(
                 _status.Text = "No speech detected.";
                 return;
             }
+            if (!ReferenceEquals(origin, _room))
+            {
+                if (_items.Contains(origin))
+                {
+                    var draft = _drafts.GetValueOrDefault(origin.Id) ?? new Draft("", [], target, false, false);
+                    _drafts[origin.Id] = draft with { Text = (draft.Text + " " + text).Trim() };
+                    _status.Text = $"Transcript saved in {origin.Title}.";
+                }
+                return;
+            }
             var current = _editor.Text ?? "";
             _editor.Text = string.IsNullOrWhiteSpace(current) ? text : current.TrimEnd() + " " + text;
             _editor.CaretIndex = _editor.Text.Length;
             _status.Text = "Transcript inserted. Edit it if needed, then press Enter to send.";
             _editor.Focus();
-            if (_voiceMode.IsChecked == true && _send.IsEnabled) Dispatcher.UIThread.Post(async () => await PostAsync());
+            if (voiceSend && _send.IsEnabled && relays == (_relayFromCodex, _relayFromClaude) && target == _target && origin.CodexChatId == codex && origin.Claude?.Id == claude) await PostAsync();
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         { _status.Text = "Dictation cancelled."; }
@@ -1351,7 +1475,7 @@ internal sealed class DiscussionWindow(
     private async Task PostAsync()
     {
         var attached = Attachments.Files.ToArray();
-        if (CurrentRun is not null || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
+        if (Attachments.Copying || CurrentRun is not null || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
         var text = (_editor.Text ?? "").Trim();
         if (text.Length == 0) text = attached.All(ComposerAttachments.IsImage) ? "Look at the attached image(s)." : "Look at the attached file(s).";
         if (text.Length > MaxTypedLength)
@@ -1504,7 +1628,7 @@ internal sealed class DiscussionWindow(
                         or InvalidDataException or TimeoutException
                         ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
                     Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
-                    ErrorLog.Write(error, $"Sessions · {agent}", ChatContext(room, agent));
+                    ErrorLog.Write(error, $"Sessions · {agent}", $"room {room.Id}, chat {(agent == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId)}");
                 }
                 return;
             }
@@ -1612,11 +1736,20 @@ internal sealed class DiscussionWindow(
         UpdateComposer();
     }
 
+    private string? WorkspaceFor(DiscussionRoom room, DiscussionMember member) => member == DiscussionMember.Claude
+        ? room.Claude?.Workspace : room.CodexDesktop ? room.NewCodexFolder ?? room.CodexWorkspace
+            ?? _desktopItems.FirstOrDefault(item => item.Id == room.CodexChatId)?.Workspace
+        : Path.Combine(Environment.GetEnvironmentVariable("CODEX_HOME") ?? Path.Combine(AppContext.BaseDirectory, "codex-data"), "workspace");
+
     private void Append(DiscussionRoom room, DiscussionMessage message)
     {
         if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed
-            && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
+            && message.DeliveryId is null && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
             _ = speak(message.Text);
+        if (message.Sender != DiscussionMember.Boss)
+            message = message with { Workspace = WorkspaceFor(room, message.Sender),
+                DesktopThread = room.CodexDesktop && message.Sender == DiscussionMember.Codex,
+                ThreadId = message.Sender == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId };
         room.Messages.Add(message);
         room.Updated = message.Time;
         Persist(room);
@@ -1808,7 +1941,7 @@ internal sealed class DiscussionWindow(
             // Agents write Markdown; what you typed is shown exactly as typed.
             Child = mine && message.ForwardedFrom is null
                 ? new SelectableTextBlock { Text = message.Text, TextWrapping = TextWrapping.Wrap, FontSize = 13.5, LineHeight = 20 }
-                : Markdown(message.Text),
+                : Markdown(message),
         };
         var tools = LazyTools(alignRight: mine);
 
@@ -1819,6 +1952,25 @@ internal sealed class DiscussionWindow(
                 Text = "⚠ " + note, FontSize = 11.5, Foreground = TrayvoraTheme.Warning, TextWrapping = TextWrapping.Wrap,
                 MaxWidth = BubbleWidth, HorizontalAlignment = mine ? HorizontalAlignment.Right : HorizontalAlignment.Left,
             });
+        if (!mine && !message.Failed && !message.Interrupted && message.To == DiscussionMember.Boss && message.Text.TrimEnd().EndsWith('?'))
+        {
+            var type = new Button { Content = "Reply to " + DisplayName(sender) };
+            var voice = new Button { Content = "Answer by voice", IsVisible = dictate is not null };
+            TrayvoraTheme.StyleControls(type, voice);
+            bool Prepare()
+            {
+                if (_room is not { } active || CurrentRun is not null) return false;
+                var bound = sender == DiscussionMember.Claude ? active.Claude?.Id : active.CodexChatId;
+                if (message.ThreadId is { } expected && expected != bound)
+                { _status.Text = "Select the original chat before replying to this question."; return false; }
+                SetTarget(sender == DiscussionMember.Claude ? DiscussionTarget.Claude : DiscussionTarget.Codex);
+                _editor.Focus();
+                return true;
+            }
+            type.Click += (_, _) => Prepare();
+            voice.Click += async (_, _) => { if (Prepare()) await ToggleDictationAsync(); };
+            column.Children.Add(TrayvoraTheme.Row(type, voice));
+        }
         column.Children.Add(tools);
         var avatar = TrayvoraTheme.Avatar(Initials(sender), color, 32);
         var row = new Grid
@@ -1835,10 +1987,22 @@ internal sealed class DiscussionWindow(
         Place(message, row, scroll, insertAt);
     }
 
-    private static MarkdownView Markdown(string text)
+    private MarkdownView Markdown(DiscussionMessage message)
     {
-        var view = new MarkdownView();
-        view.Show(text);
+        var room = _room;
+        var view = new MarkdownView { OpenFile = path =>
+        {
+            if (room is null) return;
+            PreviewFile?.Invoke(path, message.Workspace, AttachmentsFolder(room), (to, quote) =>
+            {
+                if (!_items.Contains(room)) return;
+                if (!ReferenceEquals(room, _room)) Open(room);
+                SetTarget(to);
+                PromptTemplates.InsertInto(_editor, quote);
+                _editor.Focus();
+            });
+        } };
+        view.Show(message.Text);
         return view;
     }
 
@@ -1916,6 +2080,29 @@ internal sealed class DiscussionWindow(
                 await Avalonia.Input.Platform.ClipboardExtensions.SetTextAsync(clipboard, message.Text);
             _status.Text = "Message copied.";
         });
+        if (message.DeliveryProfile is { } profile && message.DeliveryId is { } delivery && message.ThreadId is { } thread && _room is { } room && CheckDelivery is { } check)
+            Add("↻", "Check reply", "Check delivery without sending again", async () =>
+            {
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+                    var turn = await check(profile, thread, delivery, timeout.Token);
+                    if (turn?.Status is not ("completed" or "failed"))
+                    { _status.Text = turn is null ? "No matching reply yet. Open the Desktop chat to check." : $"Delivery · {turn.Status}"; return; }
+                    if (room.Messages.All(item => item.DeliveryId != delivery) || _runs.ContainsKey(room.Id)) return;
+                    var index = room.Messages.FindIndex(item => item.DeliveryId == delivery);
+                    room.Messages[index] = message with { DeliveryId = null, Text = string.IsNullOrEmpty(turn.Answer) ? turn.Status : turn.Answer,
+                        Failed = turn.Status == "failed" };
+                    Persist(room);
+                    if (ReferenceEquals(room, _room)) RefreshTimeline(room);
+                }
+                catch (Exception error) { _status.Text = error.Message; }
+            });
+        if (message.ThreadId is { } id && id != Guid.Empty && message.Sender == DiscussionMember.Codex && message.DesktopThread)
+            Add("↗", "Open chat", "Open this thread in Codex Desktop", async () =>
+            {
+                if (TopLevel.GetTopLevel(this)?.Launcher is { } launcher) await launcher.LaunchUriAsync(new Uri($"codex://threads/{id}"));
+            });
         if (!message.Failed)
         {
             // Reply: the message is quoted in the text box, where you can edit it and add your answer before sending.
@@ -1925,6 +2112,12 @@ internal sealed class DiscussionWindow(
             var otherItem = new MenuItem { Header = $"Reply to {(other == DiscussionTarget.Claude ? "Claude" : "Codex")} with this quote", Icon = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 12 } };
             otherItem.Click += (_, _) => QuoteInEditor(message, other);
             items.Add(otherItem);
+        }
+        if (Speak is { } speak && message.Sender != DiscussionMember.Boss && !message.Failed)
+        {
+            Add("♪", null, "Read full reply", () => speak(message.Text));
+            var paragraphs = message.Text.ReplaceLineEndings("\n").Split("\n\n", StringSplitOptions.TrimEntries | StringSplitOptions.RemoveEmptyEntries);
+            if (paragraphs.Length > 1) Add("♪", null, "Read last paragraph", () => speak(paragraphs[^1]));
         }
         foreach (var target in ForwardTargets(message))
             Add("", target.ToString(), $"Forward to {target}", () => ForwardAsync(message, target));

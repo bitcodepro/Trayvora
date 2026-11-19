@@ -53,6 +53,19 @@ internal static class LocalActions
         return $"Branch: {branch ?? "(detached HEAD)"}{Environment.NewLine}Commit: {head ?? "(no commit yet)"}";
     }
 
+    internal static async Task<string> FileChangesAsync(string path, CancellationToken ct)
+    {
+        var directory = Workspace(Path.GetDirectoryName(path)!);
+        using var limit = CancellationTokenSource.CreateLinkedTokenSource(ct);
+        limit.CancelAfter(TimeSpan.FromSeconds(8));
+        var result = await RunGitWithLimitAsync(GitExecutable(), directory, limit.Token, 256_000, "--literal-pathspecs",
+            "diff", "--no-ext-diff", "--no-textconv", "--no-color", "HEAD", "--", Path.GetFileName(path));
+        if (result is null) throw new IOException("No Git HEAD is available for this file.");
+        if (result.Length > 0) return result;
+        var tracked = await RunGitAsync(GitExecutable(), directory, limit.Token, "--literal-pathspecs", "ls-files", "--error-unmatch", "--", Path.GetFileName(path));
+        return tracked is null ? "This file is not tracked in HEAD." : "No changes compared with HEAD.";
+    }
+
     public static async Task InitializeEmptyRepositoryAsync(string directory)
     {
         directory = Workspace(directory);
@@ -79,7 +92,10 @@ internal static class LocalActions
         return executable;
     }
 
-    private static async Task<string?> RunGitAsync(string executable, string directory, CancellationToken ct, params string[] args)
+    private static Task<string?> RunGitAsync(string executable, string directory, CancellationToken ct, params string[] args) =>
+        RunGitWithLimitAsync(executable, directory, ct, 2048, args);
+
+    private static async Task<string?> RunGitWithLimitAsync(string executable, string directory, CancellationToken ct, int capacity, params string[] args)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -103,10 +119,10 @@ internal static class LocalActions
         using var process = Process.Start(start) ?? throw new IOException("Could not start Git.");
         try
         {
-            var output = new char[2048];
+            var output = new char[capacity];
             var stderr = process.StandardError.BaseStream.CopyToAsync(Stream.Null, ct);
             var length = await process.StandardOutput.ReadBlockAsync(output.AsMemory(), ct);
-            if (length == output.Length) throw new IOException("Git returned more metadata than expected.");
+            if (length == output.Length) throw new IOException("The Git result exceeds the preview limit.");
             await process.WaitForExitAsync(ct);
             await stderr;
             return process.ExitCode == 0 ? new string(output, 0, length).Trim() : null;

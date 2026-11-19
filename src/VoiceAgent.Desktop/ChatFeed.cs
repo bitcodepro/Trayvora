@@ -13,7 +13,7 @@ namespace VoiceAgent.Desktop;
 /// </summary>
 internal sealed class ChatFeed : UserControl
 {
-    internal sealed record Entry(string Question, string Answer, string Who, bool Failed = false);
+    internal sealed record Entry(string Question, string Answer, string Who, bool Failed = false, string? Workspace = null);
 
     private const int Shown = 40;
     private static readonly FontFamily IconFont = new("Segoe Fluent Icons, Segoe MDL2 Assets");
@@ -31,6 +31,7 @@ internal sealed class ChatFeed : UserControl
     public Func<string, Task>? Speak { get; set; }
 
     /// <summary>Puts a reply into the text box as a quote to answer it. Null hides the button.</summary>
+    public Action<string, Entry>? OpenFile { get; set; }
     public Action<string>? Reply { get; set; }
 
     public ChatFeed()
@@ -78,10 +79,10 @@ internal sealed class ChatFeed : UserControl
     }
 
     /// <summary>Shows a sent message and an empty reply from <paramref name="who"/> that fills while it is written.</summary>
-    public void Begin(string question, string who)
+    public void Begin(string question, string who, string? workspace = null)
     {
         Finish(null);
-        var entry = new Entry(question.Trim(), "", who);
+        var entry = new Entry(question.Trim(), "", who, Workspace: workspace);
         _current.Add(entry);
         _empty.IsVisible = false;
         if (entry.Question.Length > 0) _items.Children.Add(UserBubble(entry.Question));
@@ -184,11 +185,11 @@ internal sealed class ChatFeed : UserControl
         Child = new SelectableTextBlock { Text = text, TextWrapping = TextWrapping.Wrap, FontSize = 13.5, LineHeight = 20 },
     };
 
-    private static (Control Bubble, MarkdownView View, TextBlock Waiting, StackPanel Tools, TextBlock Steps) ReplyBubble(Entry entry)
+    private (Control Bubble, MarkdownView View, TextBlock Waiting, StackPanel Tools, TextBlock Steps) ReplyBubble(Entry entry)
     {
         var color = entry.Who.StartsWith("Claude", StringComparison.Ordinal) ? TrayvoraTheme.ClaudeColor
             : entry.Who.StartsWith("Codex", StringComparison.Ordinal) ? TrayvoraTheme.CodexColor : TrayvoraTheme.Accent;
-        var view = new MarkdownView(14) { IsVisible = false };
+        var view = new MarkdownView(14) { IsVisible = false, OpenFile = path => OpenFile?.Invoke(path, entry) };
         var waiting = new TextBlock { Text = "working…", FontSize = 12.5, Foreground = TrayvoraTheme.Muted, FontStyle = FontStyle.Italic };
         var tools = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 4, Opacity = 0, HorizontalAlignment = HorizontalAlignment.Left };
         var name = new TextBlock { Text = entry.Who, FontWeight = FontWeight.SemiBold, FontSize = 12.5, Foreground = color };
