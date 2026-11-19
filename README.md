@@ -27,6 +27,14 @@ A Windows tray app for talking to coding agents by voice. Trayvora transcribes s
   - theme;
   - ChatGPT and Claude sign-in.
 
+## Install on Windows
+
+Download `trayvora-win-x64-setup.exe` from the [latest release](https://github.com/bitcodepro/Trayvora/releases/latest) and run it. Setup installs for your Windows account without administrator privileges. Open **Trayvora** from the Start menu, or add an optional desktop shortcut during setup.
+
+The installation and its data are in `%LOCALAPPDATA%\Programs\Trayvora`. Quit Trayvora from the tray before uninstalling it from **Settings → Apps → Installed apps**. Uninstall keeps settings, history, the local Whisper model, and Trayvora's own Codex profile in that folder for a later reinstall.
+
+For a portable copy, download `trayvora-win-x64.zip`, extract it to a writable folder, and run `Trayvora.exe`. Each copy keeps its own data beside the executable. Both installed and portable copies receive in-app updates from the release ZIP. `SHA256SUMS.txt` lists the checksums for both downloads.
+
 ## Build and run
 
 You need the .NET SDK pinned in [global.json](global.json) on Windows.
@@ -38,6 +46,8 @@ dotnet run --project src/VoiceAgent.Desktop
 ```
 
 Or start `Trayvora.exe` from a published build. It creates its own data folders and finds Codex and Claude Code by itself.
+
+To build the release ZIP and installer, run `./scripts/ci/build.ps1 -OutputRoot artifacts/windows-package` from a full Git checkout with Inno Setup 6.7.4 available. Use a fresh output directory and pass `-InnoSetupCompiler` if `ISCC.exe` is installed outside its default location. GitHub Actions runs the installer smoke test on a fresh hosted Windows runner before the release job can publish either download.
 
 ## Layout
 
