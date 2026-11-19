@@ -20,9 +20,23 @@ jobs:
       - uses: actions/setup-dotnet@26b0ec14cb23fa6904739307f278c14f94c95bf1
         with:
           global-json-file: global.json
-      - name: Build, test and validate portable package
+      - name: Set up Inno Setup compiler
         shell: pwsh
-        run: ./scripts/ci/build.ps1 -OutputRoot "$env:RUNNER_TEMP/trayvora-ci"
+        run: |
+          $setup = "$env:RUNNER_TEMP/innosetup-6.7.4.exe"
+          $compilerDir = "$env:RUNNER_TEMP\inno-setup"
+          Invoke-WebRequest 'https://github.com/jrsoftware/issrc/releases/download/is-6_7_4/innosetup-6.7.4.exe' -OutFile $setup
+          if ((Get-FileHash $setup -Algorithm SHA256).Hash -ne 'a549929319f9120716677c685535ca4671e4b937b5fdc87e2585f32d8eb30e8c') {
+            throw 'Inno Setup download checksum mismatch'
+          }
+          $process = Start-Process -FilePath $setup -ArgumentList "/CURRENTUSER /VERYSILENT /SUPPRESSMSGBOXES /NORESTART /DIR=`"$compilerDir`"" -WindowStyle Hidden -PassThru -Wait
+          if ($process.ExitCode -ne 0) { throw "Inno Setup installation failed ($($process.ExitCode))" }
+      - name: Build, test and package Trayvora
+        shell: pwsh
+        run: ./scripts/ci/build.ps1 -OutputRoot "$env:RUNNER_TEMP/trayvora-ci" -InnoSetupCompiler "$env:RUNNER_TEMP/inno-setup/ISCC.exe"
+      - name: Smoke test the installer
+        shell: pwsh
+        run: ./scripts/ci/test-installer.ps1 -OutputRoot "$env:RUNNER_TEMP/trayvora-ci"
       - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02
         with:
           name: trayvora-${{ github.sha }}-${{ github.run_id }}

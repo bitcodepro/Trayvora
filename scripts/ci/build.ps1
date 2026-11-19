@@ -1,5 +1,9 @@
-param([Parameter(Mandatory)][string]$OutputRoot)
+param(
+    [Parameter(Mandatory)][string]$OutputRoot,
+    [string]$InnoSetupCompiler = (Join-Path ${env:ProgramFiles(x86)} 'Inno Setup 6/ISCC.exe')
+)
 $ErrorActionPreference = 'Stop'
+$InnoSetupCompiler = (Resolve-Path -LiteralPath $InnoSetupCompiler).Path
 $root = [IO.Path]::GetFullPath((Join-Path $PSScriptRoot '../..'))
 Set-Location $root
 $OutputRoot = [IO.Path]::GetFullPath($OutputRoot)
@@ -56,9 +60,17 @@ try {
     $smoke = Get-Content -Raw $report | ConvertFrom-Json
     if (!$smoke.success -or !$smoke.singleFile) { throw 'Packaged native/single-file checks failed' }
 } finally { $env:DOTNET_BUNDLE_EXTRACT_BASE_DIR = $previousBundleCache }
+
+$installer = Join-Path $release 'trayvora-win-x64-setup.exe'
+& $InnoSetupCompiler "/DTrayvoraVersion=$version" "/DPackageDir=$package" "/O$release" scripts/installer/Trayvora.iss
+if ($LASTEXITCODE -or !(Test-Path -LiteralPath $installer -PathType Leaf)) { throw 'Installer compilation failed' }
+
 $hash = (Get-FileHash $zip -Algorithm SHA256).Hash.ToLowerInvariant()
+$installerHash = (Get-FileHash $installer -Algorithm SHA256).Hash.ToLowerInvariant()
 $metadata.sha256=$hash
+$metadata.installerSha256=$installerHash
 $metadata | ConvertTo-Json | Set-Content (Join-Path $release 'release.json') -Encoding utf8
-"$hash  trayvora-win-x64.zip" | Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
-Write-Host "Validated Trayvora $version from $sha ($hash)"
+@("$hash  trayvora-win-x64.zip", "$installerHash  trayvora-win-x64-setup.exe") |
+    Set-Content (Join-Path $release 'SHA256SUMS.txt') -Encoding ascii
+Write-Host "Packaged Trayvora $version from $sha"
 
