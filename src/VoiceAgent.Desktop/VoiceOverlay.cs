@@ -101,7 +101,7 @@ internal sealed class VoiceOverlay : Window
     private readonly ProgressBar _progress = new() { Minimum = 0, Maximum = 100, IsVisible = false };
     private readonly TextBox _transcript = new()
     {
-        AcceptsReturn = true, MinHeight = 100, TextWrapping = TextWrapping.Wrap, MaxLength = 16000, PlaceholderText = "Type a message or edit your transcript",
+        VerticalContentAlignment = Avalonia.Layout.VerticalAlignment.Top, AcceptsReturn = true, MinHeight = 100, TextWrapping = TextWrapping.Wrap, MaxLength = 16000, PlaceholderText = "Type a message or edit your transcript",
     };
     private readonly Microphone _defaultMicrophone = new("", "Windows default microphone");
     private CancellationTokenSource? _operation;
@@ -638,7 +638,8 @@ internal sealed class VoiceOverlay : Window
                 {
                     if (room.Claude is not { } chat) throw new IOException("Choose a Claude chat for this session first.");
                     var attachments = Path.Combine(folder, "attachments", room.Id.ToString("N"));
-                    var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions, attachments);
+                    var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions, attachments,
+                        (name, input, token) => ConfirmClaudeToolAsync(chat, name, input, token));
                     // A chat Trayvora started is added to Claude Desktop's Code tab once Claude Code has saved it.
                     if (chat.Title.StartsWith("New Claude chat", StringComparison.Ordinal)) _ = Task.Run(() => ClaudeDesktopSessions.Register(chat));
                     return reply;
@@ -794,11 +795,10 @@ internal sealed class VoiceOverlay : Window
         var start = new System.Diagnostics.ProcessStartInfo(embedded ? conhost : shell) { WorkingDirectory = folder, UseShellExecute = false };
         if (embedded) start.ArgumentList.Add(shell);
         // The real user folders, not the ones Trayvora redirects for its own Codex profile.
-        foreach (var (name, value) in ClaudeChats.RealUserFolders()) start.Environment[name] = value;
+        var profile = ClaudeProfile();
+        foreach (var (name, value) in ClaudeChats.CliEnvironment(profile)) start.Environment[name] = value;
         start.Environment.Remove("CODEX_SQLITE_HOME");
         var paths = new List<string>();
-        var profile = ClaudeProfile();
-        if (Path.IsPathFullyQualified(profile)) start.Environment["CLAUDE_CONFIG_DIR"] = profile;
         try { paths.Add(Path.GetDirectoryName(ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""))!); }
         catch (FileNotFoundException) { }
         if (Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE") is { Length: > 0 } codex && File.Exists(codex))
@@ -853,13 +853,28 @@ internal sealed class VoiceOverlay : Window
     public async Task CheckAccountsAsync()
     {
         if (_settingsDirectory is null) return;
-        foreach (var provider in new[] { AccountProviders.ChatGpt(), AccountProviders.Claude(() => _claudeExe.Text?.Trim() ?? "", ClaudeProfile) })
+        var exe = _claudeExe.Text?.Trim() ?? "";
+        var profile = ClaudeProfile();
+        var claude = AccountProviders.Claude(() => exe, () => profile);
+        async Task Check(AccountProvider provider)
         {
-            AccountStatus status;
-            try { status = await Task.Run(() => provider.Status(CancellationToken.None)); }
-            catch (Exception) { status = new(false, "Could not check"); }
+            var status = await ReadAccountAsync(provider);
+            if (provider == claude && (exe != (_claudeExe.Text?.Trim() ?? "") || profile != ClaudeProfile())) return;
             NoteAccount(provider.Name, status);
+            if (provider == claude && status.NeedsLogin && !_disposed)
+            {
+                ShowAccounts();
+                await Accounts().SignInClaudeAsync();
+            }
         }
+        await Task.WhenAll(Check(claude), Check(AccountProviders.ChatGpt()));
+    }
+
+    private static async Task<AccountStatus> ReadAccountAsync(AccountProvider provider)
+    {
+        try { return await provider.Status(CancellationToken.None); }
+        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or OperationCanceledException or InvalidOperationException)
+        { return new(false, "Could not check sign-in status."); }
     }
 
     private readonly Dictionary<string, AccountStatus> _accountStatus = [];
@@ -909,9 +924,7 @@ internal sealed class VoiceOverlay : Window
             Fix: cloud ? () => { SettingsRequested?.Invoke(); return Task.CompletedTask; } : DownloadAsync));
         foreach (var provider in new[] { AccountProviders.ChatGpt(), AccountProviders.Claude(() => _claudeExe.Text?.Trim() ?? "", ClaudeProfile) })
         {
-            AccountStatus status;
-            try { status = await Task.Run(() => provider.Status(CancellationToken.None)); }
-            catch (Exception) { status = new(false, "Could not check"); }
+            var status = await ReadAccountAsync(provider);
             NoteAccount(provider.Name, status);
             var use = provider.Name == "Claude" ? "Claude Code chats and sessions" : "Codex";
             items.Add(new($"{provider.Name} sign-in", status.SignedIn ? $"Signed in. Used by {use}." : status.Available ? $"Not signed in. Needed for {use}." : $"Not installed. Needed for {use}.",
@@ -1016,7 +1029,7 @@ internal sealed class VoiceOverlay : Window
     /// <summary>Opens "Get started" once, the first time the window is shown on this computer.</summary>
     private void ShowReadinessOnFirstRun()
     {
-        if (_settingsDirectory is null) return;
+        if (_settingsDirectory is null || _accounts?.IsVisible == true) return;
         var marker = Path.Combine(_settingsDirectory, "welcome-seen");
         if (File.Exists(marker)) return;
         try { Directory.CreateDirectory(_settingsDirectory); File.WriteAllText(marker, DateTimeOffset.Now.ToString("O")); }
@@ -1028,7 +1041,7 @@ internal sealed class VoiceOverlay : Window
     {
         if (button?.Content is not Grid grid || grid.Children.OfType<StackPanel>().FirstOrDefault() is not { } text || text.Children.Count < 2) return;
         if (text.Children[1] is not TextBlock hint) return;
-        hint.Text = status.SignedIn ? "Signed in" : status.Available ? "Not signed in · click to sign in" : "Not installed";
+        hint.Text = status.SignedIn ? "Signed in" : status.NeedsLogin ? "Sign in required" : status.Available ? status.Summary : "Not installed";
         hint.Foreground = status.SignedIn ? TrayvoraTheme.Success : status.Available ? TrayvoraTheme.Warning : TrayvoraTheme.Muted;
     }
     private TextToAudioView? _textToAudio;
@@ -1592,7 +1605,8 @@ internal sealed class VoiceOverlay : Window
         timer.Start();
         try
         {
-            var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, text, operation.Token, stream);
+            var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, text, operation.Token, stream,
+                confirm: (name, input, token) => ConfirmClaudeToolAsync(chat, name, input, token));
             timer.Stop();
             _answer.Text = reply;
             _status.Text = stream.Notes ?? "Claude response ready.";
@@ -1765,8 +1779,38 @@ internal sealed class VoiceOverlay : Window
 
     public void AdjustPlaybackVolume(int steps) => _replyAudio?.AdjustVolume(steps);
 
+    internal async Task<bool> ConfirmClaudeToolAsync(ClaudeChat chat, string tool, System.Text.Json.JsonElement input, CancellationToken ct)
+    {
+        // The CLI reader runs off the UI thread. Closing the window or cancelling a turn denies the request.
+        return await Dispatcher.UIThread.InvokeAsync(async () =>
+        {
+            if (ct.IsCancellationRequested || _disposed) return false;
+            var allow = new Button { Content = "Allow once" };
+            var deny = new Button { Content = "Deny" };
+            var args = new TextBox { Text = input.GetRawText(), IsReadOnly = true, AcceptsReturn = true,
+                TextWrapping = Avalonia.Media.TextWrapping.Wrap, MaxHeight = 260 };
+            var dialog = new Window { Title = "Claude Code · MCP permission", Width = 500, SizeToContent = SizeToContent.Height,
+                WindowStartupLocation = WindowStartupLocation.CenterScreen, Icon = TrayvoraTheme.AppIcon,
+                Content = new StackPanel { Margin = new Thickness(20), Spacing = 10, Children =
+                { TrayvoraTheme.Heading(tool), TrayvoraTheme.Hint($"{chat.Title} · {chat.Workspace}"), args, TrayvoraTheme.Row(deny, allow) } } };
+            TrayvoraTheme.Apply(dialog);
+            TrayvoraTheme.StyleControls(allow, deny, args);
+            var result = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            allow.Click += (_, _) => { result.TrySetResult(!ct.IsCancellationRequested); dialog.Close(); };
+            deny.Click += (_, _) => dialog.Close();
+            dialog.Closed += (_, _) => result.TrySetResult(false);
+            using var cancelled = ct.Register(() => Dispatcher.UIThread.Post(() => { if (dialog.IsVisible) dialog.Close(); }));
+            if (IsVisible) dialog.Show(this); else dialog.Show();
+            deny.Focus();
+            return await result.Task;
+        });
+    }
+
+    private bool _disposed;
+
     public void DisposeSharedChat()
     {
+        _disposed = true;
         _discussion?.Pause();
         _accounts?.Stop();
         if (OperatingSystem.IsWindows())

@@ -81,6 +81,20 @@ public sealed class DesktopEventsTests
                 new CodexSession(folder.FullName), history, "Test shortcut");
             Assert.False(overlay.IsVisible);
             overlay.Show();
+            using var toolInput = System.Text.Json.JsonDocument.Parse("""{"query":"test"}""");
+            var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Test chat");
+            foreach (var allow in new[] { false, true })
+            {
+                var result = overlay.ConfirmClaudeToolAsync(chat, "mcp__example__lookup", toolInput.RootElement, default);
+                PumpUntil(() => overlay.OwnedWindows.Any(w => w.Title == "Claude Code · MCP permission"));
+                var prompt = overlay.OwnedWindows.Single(w => w.Title == "Claude Code · MCP permission");
+                var controls = prompt.GetLogicalDescendants().ToArray();
+                Assert.Equal(toolInput.RootElement.GetRawText(), controls.OfType<TextBox>().Single().Text);
+                controls.OfType<Button>().Single(b => Equals(b.Content, allow ? "Allow once" : "Deny"))
+                    .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Pump(result);
+                Assert.Equal(allow, result.Result);
+            }
             Pump(overlay.RefreshDevicesAsync());
             var recording = overlay.ToggleRecordingAsync();
             Pump(overlay.ToggleRecordingAsync());
@@ -90,6 +104,7 @@ public sealed class DesktopEventsTests
             var download = buttons.Single(button => Equals(button.Content, "Download selected Whisper model"));
             Assert.False(download.IsVisible);
             var transcript = overlay.GetLogicalDescendants().OfType<TextBox>().Single(box => box.PlaceholderText == "Type a message or edit your transcript");
+            Assert.Equal(Avalonia.Layout.VerticalAlignment.Top, transcript.VerticalContentAlignment);
             Assert.Equal("Test transcript", transcript.Text);
             transcript.Text = "Edited transcript";
             Assert.Equal("Edited transcript", transcript.Text);
@@ -614,6 +629,7 @@ public sealed class DesktopEventsTests
     {
         var view = new MarkdownView();
         view.Show("# Plan\n\nUse **bold** and `code` and [docs](https://example.com) and [file](file:///c:/x).\n\n- one\n- two\n\n```cs\nvar x = 1;\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n<script>alert(1)</script>");
+        Assert.Contains("A\tB\n1\t2", view.CopyText);
         var blocks = view.GetLogicalDescendants().OfType<SelectableTextBlock>().ToArray();
         Assert.Contains(blocks, block => block.Text == "Plan" && block.FontWeight == Avalonia.Media.FontWeight.SemiBold);
         Assert.Contains(blocks, block => block.Text == "var x = 1;");
@@ -633,13 +649,17 @@ public sealed class DesktopEventsTests
         Assert.Equal(["First paragraph.", "Second paragraph"], live.GetLogicalDescendants().OfType<SelectableTextBlock>().Select(block => block.Text));
 
         // Select text: the whole message becomes one read-only box (selection can cross paragraphs, lists and code), and back.
+        live.Show("**First** paragraph.\n\n[Second](https://example.com) paragraph");
         live.ToggleSelecting();
         Assert.True(live.Selecting);
         var box = Assert.Single(live.GetLogicalDescendants().OfType<TextBox>());
         Assert.True(box.IsReadOnly);
         Assert.Equal("First paragraph.\n\nSecond paragraph", box.Text);
         Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
-        live.Show("First paragraph.\n\nSecond paragraph\n\nThird");
+        box.SelectionStart = 2;
+        box.SelectionEnd = 9;
+        live.Show("**First** paragraph.\n\nSecond paragraph\n\n`Third`");
+        Assert.Equal("rst par", box.SelectedText);
         Assert.Equal("First paragraph.\n\nSecond paragraph\n\nThird", box.Text);
         Assert.Same(box, live.Children[^1]);
         Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));

@@ -8,7 +8,7 @@ internal sealed record ClaudeChat(Guid Id, string Workspace, string Title)
     public override string ToString() => Title;
 }
 
-/// <summary>Claude Code runs without a window here, so tools that need approval are refused unless a mode allows them.</summary>
+/// <summary>Runs Claude Code in the selected workspace and routes MCP permission requests to the host.</summary>
 internal enum ClaudePermissions { Ask, AllowEdits, AllowAll }
 
 internal static class ClaudeChats
@@ -150,7 +150,8 @@ internal static class ClaudeChats
 
     public static string DefaultProfile()
     {
-        var configured = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR");
+        var configured = Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR")
+            ?? Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR", EnvironmentVariableTarget.User);
         return string.IsNullOrWhiteSpace(configured)
             ? Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude")
             : configured;
@@ -204,10 +205,19 @@ internal static class ClaudeChats
         if (Path.IsPathFullyQualified(local))
         {
             yield return ("LOCALAPPDATA", local);
-            var temp = Path.Combine(local, "Temp");
-            yield return ("TEMP", temp);
-            yield return ("TMP", temp);
+            // TEMP and TMP remain in the portable app’s temporary folder.
         }
+    }
+
+    internal static Dictionary<string, string> CliEnvironment(string profile)
+    {
+        var env = RealUserFolders().ToDictionary(item => item.Name, item => item.Value);
+        var standard = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
+        if (Path.IsPathFullyQualified(profile) && (Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") is not null ||
+            Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR", EnvironmentVariableTarget.User) is not null ||
+            !string.Equals(Path.TrimEndingDirectorySeparator(Path.GetFullPath(profile)), standard, StringComparison.OrdinalIgnoreCase)))
+            env["CLAUDE_CONFIG_DIR"] = profile;
+        return env;
     }
 
     /// <summary>Short, readable reason from Claude Code's own output (its result text or the last stderr lines).</summary>
@@ -233,7 +243,7 @@ internal static class ClaudeChats
     /// <paramref name="stream"/> receives the text as it is written and the tool in use.
     /// </summary>
     public static async Task<string> SendAsync(string executable, string profile, ClaudeChat chat, string prompt, CancellationToken ct, ReplyStream? stream = null,
-        ClaudePermissions permissions = ClaudePermissions.Ask, string? readableFolder = null)
+        ClaudePermissions permissions = ClaudePermissions.Ask, string? readableFolder = null, ClaudeToolPrompts.Confirm? confirm = null)
     {
         executable = FindExecutable(executable);
 
@@ -259,22 +269,27 @@ internal static class ClaudeChats
             start.ArgumentList.Add("--add-dir");
             start.ArgumentList.Add(readableFolder);
         }
-        start.Environment["CLAUDE_CONFIG_DIR"] = profile;
-        // The Trayvora launcher redirects these folders for its own Codex profile. Claude Code must see the
-        // user's real folders so it finds the sign-in and settings it uses outside Trayvora.
-        foreach (var (name, value) in RealUserFolders()) start.Environment[name] = value;
+        foreach (var (name, value) in CliEnvironment(profile)) start.Environment[name] = value;
+        if (confirm is not null)
+        {
+            start.ArgumentList.Add("--input-format");
+            start.ArgumentList.Add("stream-json");
+            start.ArgumentList.Add("--permission-prompt-tool");
+            start.ArgumentList.Add("stdio");
+        }
         using var process = Process.Start(start) ?? throw new IOException("Could not start Claude Code.");
         var parser = new ClaudeStreamParser(stream);
         var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
-        var stdout = Task.Run(async () =>
-        {
-            while (await process.StandardOutput.ReadLineAsync(ct) is { } line) parser.Accept(line);
-        }, CancellationToken.None);
         try
         {
-            await process.StandardInput.WriteAsync(prompt.AsMemory(), ct);
-            process.StandardInput.Close();
-            await stdout;
+            if (confirm is not null)
+                await ClaudeToolPrompts.RunAsync(process.StandardInput, process.StandardOutput, prompt, parser, confirm, ct);
+            else
+            {
+                await process.StandardInput.WriteAsync(prompt.AsMemory(), ct);
+                process.StandardInput.Close();
+                while (await process.StandardOutput.ReadLineAsync(ct) is { } line) parser.Accept(line);
+            }
             await process.WaitForExitAsync(ct);
             var errors = await stderr;
             if (process.ExitCode != 0 || parser.Failed || parser.Result is null)
@@ -288,9 +303,7 @@ internal static class ClaudeChats
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync();
             }
-            // The reader ends with the process; its failure was reported above or is the cancellation itself.
-            try { await stdout; }
-            catch (Exception error) when (error is OperationCanceledException or IOException or ObjectDisposedException) { }
+
         }
     }
 }
@@ -330,23 +343,37 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
                 Keep(line);
                 return;
             }
-            var main = !root.TryGetProperty("parent_tool_use_id", out var parent) || parent.ValueKind == JsonValueKind.Null;
-            switch (Text(root, "type"))
-            {
-                case "stream_event" when main && root.TryGetProperty("event", out var item) && item.ValueKind == JsonValueKind.Object:
-                    _partial = true;
-                    Event(item);
-                    break;
-                case "assistant" when main && root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object:
-                    Message(message);
-                    break;
-                case "result":
-                    Result = Text(root, "result");
-                    Failed = root.TryGetProperty("is_error", out var flag) && flag.ValueKind == JsonValueKind.True;
-                    Denials(root);
-                    stream?.Activity(null);
-                    break;
-            }
+            Accept(root);
+        }
+    }
+
+    internal void Accept(JsonElement root)
+    {
+        var main = !root.TryGetProperty("parent_tool_use_id", out var parent) || parent.ValueKind == JsonValueKind.Null;
+        switch (Text(root, "type"))
+        {
+            case "stream_event" when main && root.TryGetProperty("event", out var item) && item.ValueKind == JsonValueKind.Object:
+                _partial = true;
+                Event(item);
+                break;
+            case "assistant" when main && root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object:
+                Message(message);
+                break;
+            case "system" when Text(root, "subtype") == "init" && root.TryGetProperty("mcp_servers", out var servers) && servers.ValueKind == JsonValueKind.Array:
+                foreach (var server in servers.EnumerateArray())
+                {
+                    if (server.ValueKind != JsonValueKind.Object || Text(server, "name") is not { } name) continue;
+                    var status = Text(server, "status");
+                    stream?.Activity($"MCP · {name} · {status}");
+                    if (status is "failed" or "needs-auth") stream?.Note($"MCP · {name} · {status}");
+                }
+                break;
+            case "result":
+                Result = Text(root, "result");
+                Failed = root.TryGetProperty("is_error", out var flag) && flag.ValueKind == JsonValueKind.True;
+                Denials(root);
+                stream?.Activity(null);
+                break;
         }
     }
 

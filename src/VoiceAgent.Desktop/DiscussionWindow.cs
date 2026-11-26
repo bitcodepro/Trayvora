@@ -135,7 +135,7 @@ internal sealed class DiscussionWindow(
     private readonly TextBox _editor = new()
     {
         AcceptsReturn = true, TextWrapping = TextWrapping.Wrap, MinHeight = 44, MaxHeight = 160,
-        VerticalContentAlignment = VerticalAlignment.Center,
+        VerticalContentAlignment = VerticalAlignment.Top,
     };
     private readonly Button _send = new() { Content = new TextBlock { Text = TrayvoraTheme.IconSend, FontFamily = IconFont, FontSize = 16 } };
     private readonly Button _attachButton = new() { Content = new TextBlock { Text = "\uE723", FontFamily = IconFont, FontSize = 15 } };
@@ -223,7 +223,7 @@ internal sealed class DiscussionWindow(
         TrayvoraTheme.StyleControls(_claudeRights);
         Avalonia.Automation.AutomationProperties.SetName(_claudeRights, "Claude permissions");
         ToolTip.SetTip(_claudeRights,
-            "Claude runs without a window here, so it cannot ask you. Ask: edits and commands are refused. " +
+            "Trayvora can ask before an MCP tool call. Ask: other tools that require approval are declined. " +
             "Allow file edits: creates and changes files, commands are still refused. Allow everything: any command without asking — use only for trusted tasks.");
         _claudeRights.SelectionChanged += (_, _) =>
         {
@@ -2085,7 +2085,7 @@ internal sealed class DiscussionWindow(
 
         if (view is not null)
         {
-            Add("", "Select", "Select text (any part; Esc to return)", () => { view.ToggleSelecting(); return Task.CompletedTask; });
+            Add("", "Select", "Select plain text across the whole message (Esc to return)", () => { view.ToggleSelecting(); return Task.CompletedTask; });
             var all = new MenuItem { Header = "Select all text", Icon = new TextBlock { Text = "", FontFamily = IconFont, FontSize = 12 } };
             all.Click += (_, _) => { if (view.Selecting) view.ToggleSelecting(); view.ToggleSelecting(selectAll: true); };
             items.Add(all);
@@ -2093,7 +2093,7 @@ internal sealed class DiscussionWindow(
         Add(TrayvoraTheme.IconCopy, null, "Copy message", async () =>
         {
             if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)
-                await Avalonia.Input.Platform.ClipboardExtensions.SetTextAsync(clipboard, message.Text);
+                await Avalonia.Input.Platform.ClipboardExtensions.SetTextAsync(clipboard, view?.CopyText ?? message.Text);
             _status.Text = "Message copied.";
         });
         if (message.DeliveryProfile is { } profile && message.DeliveryId is { } delivery && message.ThreadId is { } thread && _room is { } room && CheckDelivery is { } check)

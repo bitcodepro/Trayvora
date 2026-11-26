@@ -108,7 +108,7 @@ internal sealed class ChatFeed : UserControl
         var near = NearBottom();
         live.Steps.Text = text;
         live.Steps.IsVisible = text.Length > 0;
-        if (near) ScrollToEnd(force: true);
+        if (near && !live.View.HasSelection) ScrollToEnd(force: true);
     }
 
     /// <summary>Ends the live reply with its final text, or a note when nothing came back.</summary>
@@ -146,7 +146,7 @@ internal sealed class ChatFeed : UserControl
         live.Waiting.IsVisible = _liveText.Length == 0;
         live.View.IsVisible = _liveText.Length > 0;
         live.View.Show(_liveText);
-        if (near) ScrollToEnd(force: true);
+        if (near && !live.View.HasSelection) ScrollToEnd(force: true);
     }
 
     private void Rebuild()
@@ -216,7 +216,7 @@ internal sealed class ChatFeed : UserControl
         tools.Children.Clear();
         if (entry.Failed || entry.Answer.Length == 0) return;
         if (view is not null)
-            tools.Children.Add(Tool("", "Select text: show the reply as one text where you can select any part (Esc to return)", _ =>
+            tools.Children.Add(Tool("", "Select plain text across the whole reply (Esc to return)", _ =>
             {
                 view.ToggleSelecting();
                 return Task.CompletedTask;
@@ -225,7 +225,7 @@ internal sealed class ChatFeed : UserControl
         {
             if (TopLevel.GetTopLevel(this)?.Clipboard is { } clipboard)
             {
-                await Avalonia.Input.Platform.ClipboardExtensions.SetTextAsync(clipboard, entry.Answer);
+                await Avalonia.Input.Platform.ClipboardExtensions.SetTextAsync(clipboard, view?.CopyText ?? MarkdownView.ReadableText(entry.Answer));
                 ToolTip.SetTip(button, "Copied");
             }
         }));

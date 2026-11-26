@@ -9,7 +9,7 @@ using Avalonia.Threading;
 
 namespace VoiceAgent.Desktop;
 
-internal sealed record AccountStatus(bool SignedIn, string Summary, bool Available = true);
+internal sealed record AccountStatus(bool SignedIn, string Summary, bool Available = true, bool NeedsLogin = false);
 
 /// <summary>
 /// One sign-in provider (ChatGPT via Codex, Claude via Claude Code). The command-line tools keep their own
@@ -123,18 +123,11 @@ internal static class AccountProviders
             string exe;
             try { exe = ClaudeChats.FindExecutable(executable()); }
             catch (FileNotFoundException) { return new(false, "Claude Code was not found. Install Claude Desktop or the Claude Code CLI.", Available: false); }
-            var (code, output) = await CliSession.RunAsync(exe, ["auth", "status", "--json"], ClaudeEnvironment(profile()), ct);
+            var (code, output) = await CliSession.RunAsync(exe, ["auth", "status", "--json"], ClaudeChats.CliEnvironment(profile()), ct);
             return ParseClaudeStatus(code, output);
         },
-        () => new CliSession(ClaudeChats.FindExecutable(executable()), ["auth", "login", "--claudeai"], ClaudeEnvironment(profile())),
-        async ct => (await CliSession.RunAsync(ClaudeChats.FindExecutable(executable()), ["auth", "logout"], ClaudeEnvironment(profile()), ct)).Code);
-
-    private static Dictionary<string, string> ClaudeEnvironment(string profile)
-    {
-        var environment = ClaudeChats.RealUserFolders().ToDictionary(item => item.Name, item => item.Value);
-        if (Path.IsPathFullyQualified(profile)) environment["CLAUDE_CONFIG_DIR"] = profile;
-        return environment;
-    }
+        () => new CliSession(ClaudeChats.FindExecutable(executable()), ["auth", "login", "--claudeai"], ClaudeChats.CliEnvironment(profile())),
+        async ct => (await CliSession.RunAsync(ClaudeChats.FindExecutable(executable()), ["auth", "logout"], ClaudeChats.CliEnvironment(profile()), ct)).Code);
 
     /// <summary>Reads <c>claude auth status --json</c>: signed in, email, plan and expiry.</summary>
     internal static AccountStatus ParseClaudeStatus(int code, string output)
@@ -146,14 +139,20 @@ internal static class AccountProviders
             using var json = JsonDocument.Parse(output[start..]);
             var root = json.RootElement;
             var signedIn = root.TryGetProperty("loggedIn", out var flag) && flag.ValueKind == JsonValueKind.True;
-            if (!signedIn) return new(false, "Not signed in");
+            if (!signedIn) return flag.ValueKind == JsonValueKind.False ? new(false, "Not signed in", NeedsLogin: true) : new(false, "Could not read the Claude sign-in status.");
             var parts = new List<string>();
-            if (root.TryGetProperty("email", out var email) && email.GetString() is { Length: > 0 } mail) parts.Add(mail);
-            if (root.TryGetProperty("subscriptionType", out var plan) && plan.GetString() is { Length: > 0 } tier) parts.Add(char.ToUpperInvariant(tier[0]) + tier[1..]);
-            if (root.TryGetProperty("loginExpiresAt", out var expires) && expires.TryGetDateTimeOffset(out var until))
-                parts.Add(until < DateTimeOffset.Now ? "sign-in expired" : $"until {until.ToLocalTime():dd.MM.yyyy}");
-            if (root.TryGetProperty("loginExpiresAt", out var expired) && expired.TryGetDateTimeOffset(out var end) && end < DateTimeOffset.Now)
-                return new(false, string.Join(" · ", parts));
+            if (root.TryGetProperty("email", out var email) && email.ValueKind == JsonValueKind.String && email.GetString() is { Length: > 0 } mail) parts.Add(mail);
+            if (root.TryGetProperty("subscriptionType", out var plan) && plan.ValueKind == JsonValueKind.String && plan.GetString() is { Length: > 0 } tier) parts.Add(char.ToUpperInvariant(tier[0]) + tier[1..]);
+            if (root.TryGetProperty("loginExpiresAt", out var expires) && expires.ValueKind == JsonValueKind.String &&
+                expires.TryGetDateTimeOffset(out var until))
+            {
+                if (until < DateTimeOffset.Now)
+                {
+                    parts.Add("sign-in expired");
+                    return new(false, string.Join(" · ", parts), NeedsLogin: true);
+                }
+                parts.Add($"until {until.ToLocalTime():dd.MM.yyyy}");
+            }
             return new(true, parts.Count > 0 ? string.Join(" · ", parts) : "Signed in");
         }
         catch (JsonException) { return new(false, "Could not read the Claude sign-in status."); }
@@ -180,6 +179,8 @@ internal sealed class AccountsView : ToolPage
         Content = Frame("Accounts", "Sign in once; Trayvora remembers it through the tools' own profiles.", stack);
         AttachedToVisualTree += async (_, _) => await RefreshAsync();
     }
+
+    public Task SignInClaudeAsync() => _cards.First(card => card.Name == "Claude").SignInAsync();
 
     public Task RefreshAsync() => Task.WhenAll(_cards.Select(card => card.RefreshAsync()));
 
@@ -213,6 +214,7 @@ internal sealed class AccountsView : ToolPage
 
         public event Action<AccountStatus>? StatusChanged;
         public Border Root { get; }
+        public string Name => _provider.Name;
 
         public AccountCard(AccountProvider provider, Control owner)
         {
@@ -273,7 +275,7 @@ internal sealed class AccountsView : ToolPage
             {
                 status = new(false, "Could not check the sign-in status.");
             }
-            Show(status);
+            if (_run is null) Show(status);
         }
 
         private void Log(string line)
@@ -289,7 +291,7 @@ internal sealed class AccountsView : ToolPage
             }
         }
 
-        private async Task SignInAsync()
+        public async Task SignInAsync()
         {
             if (_run is not null) return;
             using var run = new CancellationTokenSource(TimeSpan.FromMinutes(10));

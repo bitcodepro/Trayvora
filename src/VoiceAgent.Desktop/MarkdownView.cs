@@ -54,8 +54,14 @@ internal sealed class MarkdownView : StackPanel
     private double ThemedSize() => Math.Clamp(_baseSize + Appearance.ChatSize - Appearance.DefaultChatSize, Appearance.MinSize, Appearance.MaxSize);
 
     /// <summary>Redraws with the new chat text size.</summary>
+    private bool _plainByDefault;
     private void Restyle()
     {
+        if (_plainByDefault != Appearance.Current.PlainReplies)
+        {
+            _plainByDefault = Appearance.Current.PlainReplies;
+            if (Selecting != _plainByDefault) ToggleSelecting(focus: false);
+        }
         var size = ThemedSize();
         if (size == _size) return;
         _size = size;
@@ -69,9 +75,39 @@ internal sealed class MarkdownView : StackPanel
     internal int Rebuilt { get; private set; }
 
     private TextBox? _selectBox;
+    private string? _plain;
+    internal string CopyText => _plain ??= ReadableText(_text ?? "");
+
+    internal static string ReadableText(string text) => ReadableText(Markdown.Parse(text, Pipeline));
+
+    private static string ReadableText(MarkdownDocument document)
+    {
+        using var writer = new StringWriter();
+        var renderer = new Markdig.Renderers.HtmlRenderer(writer);
+        Pipeline.Setup(renderer);
+        renderer.EnableHtmlForBlock = renderer.EnableHtmlForInline = renderer.EnableHtmlEscape = false;
+        string Render(Block block)
+        {
+            writer.GetStringBuilder().Clear();
+            renderer.Render(block);
+            return writer.ToString().ReplaceLineEndings("\n").TrimEnd('\n');
+        }
+        var paragraphs = new List<string>();
+        foreach (var block in document)
+        {
+            if (block is LinkReferenceDefinitionGroup) continue;
+            var plain = block is Table table
+                ? string.Join("\n", table.OfType<TableRow>().Select(row =>
+                    string.Join("\t", row.OfType<TableCell>().Select(cell => string.Join(" ", cell.Select(Render))))))
+                : Render(block);
+            if (plain.Length > 0) paragraphs.Add(plain);
+        }
+        return string.Join("\n\n", paragraphs);
+    }
 
     /// <summary>True while the message is shown as one plain text box where any part can be selected.</summary>
     public bool Selecting => _selectBox is not null;
+    public bool HasSelection => _selectBox is { } box && box.SelectionStart != box.SelectionEnd;
 
     /// <summary>Raised when select mode starts or ends, so the toolbar can update its button.</summary>
     public event Action? SelectingChanged;
@@ -80,7 +116,7 @@ internal sealed class MarkdownView : StackPanel
     /// Switches between the formatted view and one read-only text box with the whole message. Formatted text is split
     /// into blocks (paragraphs, lists, code), and a selection cannot cross from one block to the next; the box can.
     /// </summary>
-    public void ToggleSelecting(bool selectAll = false)
+    public void ToggleSelecting(bool selectAll = false, bool focus = true)
     {
         if (_selectBox is { } open)
         {
@@ -92,7 +128,7 @@ internal sealed class MarkdownView : StackPanel
         }
         var box = new TextBox
         {
-            Text = _text ?? "", IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            Text = CopyText, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
             Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0),
             FontSize = _size, MinHeight = 0, CaretBrush = Brushes.Transparent,
             // Set here so the Theme setting for typed text does not restyle a message.
@@ -112,6 +148,7 @@ internal sealed class MarkdownView : StackPanel
         _selectBox = box;
         Children.Add(box);
         SelectingChanged?.Invoke();
+        if (!focus) return;
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
             box.Focus();
@@ -121,10 +158,19 @@ internal sealed class MarkdownView : StackPanel
 
     public void Show(string text)
     {
-        if (_selectBox is { } selecting && text != _text) selecting.Text = text;
         if (text == _text) return;
         _text = text;
+        _plain = null;
         var document = Markdown.Parse(text, Pipeline);
+        if (_selectBox is { } selecting)
+        {
+            var start = selecting.SelectionStart;
+            var end = selecting.SelectionEnd;
+            var plain = _plain = ReadableText(document);
+            selecting.Text = plain;
+            selecting.SelectionStart = Math.Min(start, plain.Length);
+            selecting.SelectionEnd = Math.Min(end, plain.Length);
+        }
         var index = 0;
         foreach (var block in document)
         {
