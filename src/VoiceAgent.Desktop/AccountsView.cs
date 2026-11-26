@@ -28,7 +28,7 @@ internal sealed class CliSession : IDisposable
     private readonly Process _process;
     public event Action<string>? Line;
 
-    public CliSession(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string>? environment = null)
+    public CliSession(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string>? environment = null, string? workspace = null)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -36,6 +36,7 @@ internal sealed class CliSession : IDisposable
             RedirectStandardOutput = true, RedirectStandardError = true, RedirectStandardInput = true,
             StandardOutputEncoding = System.Text.Encoding.UTF8, StandardErrorEncoding = System.Text.Encoding.UTF8,
         };
+        if (workspace is not null) start.WorkingDirectory = workspace;
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
         if (environment is not null) foreach (var (name, value) in environment) start.Environment[name] = value;
         _process = new Process { StartInfo = start, EnableRaisingEvents = true };
@@ -66,9 +67,9 @@ internal sealed class CliSession : IDisposable
 
     /// <summary>Runs a short command to completion and returns its exit code and output.</summary>
     public static async Task<(int Code, string Output)> RunAsync(string executable, IEnumerable<string> arguments,
-        IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken)
+        IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken, string? workspace = null)
     {
-        using var session = new CliSession(executable, arguments, environment);
+        using var session = new CliSession(executable, arguments, environment, workspace);
         var output = new System.Text.StringBuilder();
         session.Line += line => { lock (output) output.AppendLine(line); };
         session.Start();

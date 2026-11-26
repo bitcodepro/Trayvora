@@ -243,7 +243,8 @@ internal static class ClaudeChats
     /// <paramref name="stream"/> receives the text as it is written and the tool in use.
     /// </summary>
     public static async Task<string> SendAsync(string executable, string profile, ClaudeChat chat, string prompt, CancellationToken ct, ReplyStream? stream = null,
-        ClaudePermissions permissions = ClaudePermissions.Ask, string? readableFolder = null, ClaudeToolPrompts.Confirm? confirm = null)
+        ClaudePermissions permissions = ClaudePermissions.Ask, string? readableFolder = null, ClaudeToolPrompts.Confirm? confirm = null,
+        string? effort = null, string? model = null)
     {
         executable = FindExecutable(executable);
 
@@ -259,6 +260,7 @@ internal static class ClaudeChats
         // stream-json prints one event per line; --verbose is required for it in print mode.
         foreach (var arg in new[] { "--print", "--output-format", "stream-json", "--verbose", "--include-partial-messages", "--permission-mode", Mode(permissions) })
             start.ArgumentList.Add(arg);
+        ClaudeCommands.AddTurnOptions(start.ArgumentList, effort, model);
         // Resume the selected session with its own tools, MCP servers and permission settings.
         // A chat created in Trayvora has no file until its first message; that message starts it under the same ID.
         var mode = new[] { Exists(profile, chat.Id) ? "--resume" : "--session-id", chat.Id.ToString() };
