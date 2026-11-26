@@ -54,8 +54,14 @@ internal sealed class MarkdownView : StackPanel
     private double ThemedSize() => Math.Clamp(_baseSize + Appearance.ChatSize - Appearance.DefaultChatSize, Appearance.MinSize, Appearance.MaxSize);
 
     /// <summary>Redraws with the new chat text size.</summary>
+    private bool _plainByDefault;
     private void Restyle()
     {
+        if (_plainByDefault != Appearance.Current.PlainReplies)
+        {
+            _plainByDefault = Appearance.Current.PlainReplies;
+            if (Selecting != _plainByDefault) ToggleSelecting(focus: false);
+        }
         var size = ThemedSize();
         if (size == _size) return;
         _size = size;
@@ -69,9 +75,57 @@ internal sealed class MarkdownView : StackPanel
     internal int Rebuilt { get; private set; }
 
     private TextBox? _selectBox;
+    private string? _plain;
+    private string? _selectionSource;
+    internal string CopyText => _plain ??= ReadableText(_text ?? "");
+
+    internal static string ReadableText(string text) => ReadableText(Markdown.Parse(text, Pipeline));
+
+    private static string ReadableText(MarkdownDocument document)
+    {
+        using var writer = new StringWriter();
+        var renderer = new Markdig.Renderers.HtmlRenderer(writer);
+        Pipeline.Setup(renderer);
+        renderer.ObjectRenderers.ReplaceOrAdd<Markdig.Renderers.Html.Inlines.LinkInlineRenderer>(
+            new PlainLinkRenderer(writer.GetStringBuilder()));
+        renderer.EnableHtmlForBlock = renderer.EnableHtmlForInline = renderer.EnableHtmlEscape = false;
+        string Render(Block block)
+        {
+            writer.GetStringBuilder().Clear();
+            renderer.Render(block);
+            return writer.ToString().ReplaceLineEndings("\n").TrimEnd('\n');
+        }
+        var paragraphs = new List<string>();
+        foreach (var block in document)
+        {
+            if (block is LinkReferenceDefinitionGroup) continue;
+            var plain = block is Table table
+                ? string.Join("\n", table.OfType<TableRow>().Select(row =>
+                    string.Join("\t", row.OfType<TableCell>().Select(cell => string.Join(" ", cell.Select(Render))))))
+                : Render(block);
+            if (plain.Length > 0) paragraphs.Add(plain);
+        }
+        return string.Join("\n\n", paragraphs);
+    }
+
+    private sealed class PlainLinkRenderer(System.Text.StringBuilder output) : Markdig.Renderers.Html.HtmlObjectRenderer<LinkInline>
+    {
+        protected override void Write(Markdig.Renderers.HtmlRenderer renderer, LinkInline link)
+        {
+            var start = output.Length;
+            renderer.WriteChildren(link);
+            var address = link.GetDynamicUrl?.Invoke() ?? link.Url;
+            if (string.IsNullOrEmpty(address)) return;
+            var length = output.Length - start;
+            if (length == 0) renderer.Write(address);
+            else if (length != address.Length || output.ToString(start, length) != address)
+                renderer.Write($" ({address})");
+        }
+    }
 
     /// <summary>True while the message is shown as one plain text box where any part can be selected.</summary>
     public bool Selecting => _selectBox is not null;
+    public bool HasSelection => _selectBox is { } box && box.SelectionStart != box.SelectionEnd;
 
     /// <summary>Raised when select mode starts or ends, so the toolbar can update its button.</summary>
     public event Action? SelectingChanged;
@@ -80,24 +134,37 @@ internal sealed class MarkdownView : StackPanel
     /// Switches between the formatted view and one read-only text box with the whole message. Formatted text is split
     /// into blocks (paragraphs, lists, code), and a selection cannot cross from one block to the next; the box can.
     /// </summary>
-    public void ToggleSelecting(bool selectAll = false)
+    public void ToggleSelecting(bool selectAll = false, bool focus = true)
     {
         if (_selectBox is { } open)
         {
             Children.Remove(open);
             _selectBox = null;
+            _selectionSource = null;
             foreach (var (_, control) in _blocks) control.IsVisible = true;
             SelectingChanged?.Invoke();
             return;
         }
         var box = new TextBox
         {
-            Text = _text ?? "", IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
+            Text = CopyText, IsReadOnly = true, AcceptsReturn = true, TextWrapping = TextWrapping.Wrap,
             Background = Brushes.Transparent, BorderThickness = new Thickness(0), Padding = new Thickness(0),
             FontSize = _size, MinHeight = 0, CaretBrush = Brushes.Transparent,
             // Set here so the Theme setting for typed text does not restyle a message.
             FontFamily = Appearance.Font(Appearance.Current.ChatLook), Foreground = Appearance.Brush(Appearance.Current.ChatLook),
             LineHeight = LineHeight(_size),
+        };
+        _selectionSource = _text;
+        box.PropertyChanged += (_, change) =>
+        {
+            if (change.Property != TextBox.SelectionStartProperty && change.Property != TextBox.SelectionEndProperty) return;
+            if (box.SelectionStart != box.SelectionEnd || box.Text == _plain) return;
+            // A drag may change the two endpoints separately. Wait for the final selection.
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                if (_selectBox == box && !HasSelection && _plain is { } latest && box.Text != latest)
+                    UpdateSelection(box, latest);
+            });
         };
         box.Classes.Add("bare");
         box.Classes.Add("message-select");
@@ -112,6 +179,7 @@ internal sealed class MarkdownView : StackPanel
         _selectBox = box;
         Children.Add(box);
         SelectingChanged?.Invoke();
+        if (!focus) return;
         Avalonia.Threading.Dispatcher.UIThread.Post(() =>
         {
             box.Focus();
@@ -121,10 +189,12 @@ internal sealed class MarkdownView : StackPanel
 
     public void Show(string text)
     {
-        if (_selectBox is { } selecting && text != _text) selecting.Text = text;
         if (text == _text) return;
         _text = text;
+        _plain = null;
         var document = Markdown.Parse(text, Pipeline);
+        if (_selectBox is { } selecting)
+            UpdateSelection(selecting, _plain = ReadableText(document));
         var index = 0;
         foreach (var block in document)
         {
@@ -144,6 +214,39 @@ internal sealed class MarkdownView : StackPanel
             index++;
         }
         Truncate(index);
+    }
+
+    private void UpdateSelection(TextBox box, string plain)
+    {
+        var previous = box.Text ?? "";
+        var start = box.SelectionStart;
+        var end = box.SelectionEnd;
+        var low = Math.Min(start, end);
+        var high = Math.Max(start, end);
+        if (start != end && !plain.AsSpan().StartsWith(previous.AsSpan(0, high), StringComparison.Ordinal))
+        {
+            var selected = previous[low..high];
+            // A unique literal in the growing source identifies the same words across a Markdown reparse.
+            // For ambiguous or disappearing text keep the selectable snapshot until the user clears it.
+            if (_selectionSource is null || _text is null || !_text.StartsWith(_selectionSource, StringComparison.Ordinal)
+                || !_selectionSource.Contains(selected, StringComparison.Ordinal) || UniqueIndex(_text, selected) < 0
+                || UniqueIndex(previous, selected) < 0) return;
+            var position = UniqueIndex(plain, selected);
+            if (position < 0) return;
+            start += position - low;
+            end += position - low;
+        }
+        _selectionSource = _text;
+        if (previous == plain) return;
+        box.Text = plain;
+        box.SelectionStart = Math.Min(start, plain.Length);
+        box.SelectionEnd = Math.Min(end, plain.Length);
+    }
+
+    private static int UniqueIndex(string text, string value)
+    {
+        var index = text.IndexOf(value, StringComparison.Ordinal);
+        return index >= 0 && text.IndexOf(value, index + 1, StringComparison.Ordinal) < 0 ? index : -1;
     }
 
     private void Truncate(int count)

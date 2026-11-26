@@ -37,6 +37,9 @@ For a portable copy, download `trayvora-win-x64.zip`, extract it to a writable f
 
 ## Interactive controls
 
+- Trayvora checks the Claude Code account at startup and opens sign-in if the CLI reports that the session needs it. Claude uses the selected chat's workspace and CLI profile. When Claude asks permission to call an MCP tool, review its name, arguments and workspace, then choose **Allow once** or **Deny**.
+- Enable **Settings → Theme → Plain text replies (continuous mouse selection)** to drag across paragraphs in an answer. The reply's **Copy** action includes link addresses and file paths in plain text. If streamed formatting makes a selection ambiguous, clearing the selection shows the latest text.
+
 - Choose **Check for updates** in the tray or **Get started**. In the update window choose **Update** to download, verify and restart. **Cancel** closes the window during checking or downloading. A failed checksum leaves the installed copy running.
 - Click a source link in either conversation feed to open **File preview**. Paths are resolved in the author's workspace. Select lines and choose **Ask Claude** or **Ask Codex** to prepare a draft. **Changes** shows this file's working-tree diff against Git HEAD. For older messages without a known workspace, choose the file manually.
 - The Sessions microphone keeps the original room's draft when you switch rooms before transcription finishes. For a Desktop delivery that is still pending, use **Check reply** or **Open chat** on its message. Checking never resubmits it.

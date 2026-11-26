@@ -11,7 +11,7 @@ namespace VoiceAgent.Desktop;
 internal sealed record TextLook(string? Font = null, double? Size = null, string? Color = null);
 
 /// <summary>Text looks the user chose: chat replies, the text you type, and the interface (menus, buttons, labels).</summary>
-internal sealed record AppearanceOptions(TextLook? Chat = null, TextLook? Input = null, TextLook? Interface = null)
+internal sealed record AppearanceOptions(TextLook? Chat = null, TextLook? Input = null, TextLook? Interface = null, bool PlainReplies = false)
 {
     public TextLook ChatLook => Chat ?? new();
     public TextLook InputLook => Input ?? new();
@@ -77,7 +77,7 @@ internal static class Appearance
             string.IsNullOrWhiteSpace(look.Font) || look.Font.Length > 100 ? null : look.Font.Trim(),
             look.Size is >= MinSize and <= MaxSize ? Math.Round(look.Size.Value * 2) / 2 : null,
             ParseColor(look.Color) is null ? null : look.Color!.Trim().ToUpperInvariant());
-        return new(One(options.Chat), One(options.Input), One(options.Interface));
+        return new(One(options.Chat), One(options.Input), One(options.Interface), options.PlainReplies);
     }
 
     internal static Color? ParseColor(string? hex) =>
@@ -146,6 +146,7 @@ internal static class Appearance
         var fonts = new[] { "Default" }.Concat(FontManager.Current.SystemFonts.Select(font => font.Name).Distinct().Order()).ToArray();
         var feedback = TrayvoraTheme.Hint("");
         var rows = new StackPanel { Spacing = 14 };
+        var plain = new CheckBox { Content = "Plain text replies (continuous mouse selection)", IsChecked = Current.PlainReplies };
         var editors = new List<Func<TextLook>>();
         var loading = true;
 
@@ -154,7 +155,7 @@ internal static class Appearance
             if (loading) return;
             try
             {
-                Save(new AppearanceOptions(editors[0](), editors[1](), editors[2]()));
+                Save(new AppearanceOptions(editors[0](), editors[1](), editors[2](), plain.IsChecked == true));
                 feedback.Text = "Saved and applied.";
             }
             catch (Exception error) when (error is IOException or UnauthorizedAccessException) { feedback.Text = "Could not save the theme."; }
@@ -225,6 +226,8 @@ internal static class Appearance
         editors.Add(Editor("Chat text", "Replies and messages in the main window and in Sessions.", Current.ChatLook, DefaultChatSize));
         editors.Add(Editor("Text you type", "Message boxes and other fields where you type.", Current.InputLook, DefaultInputSize));
         editors.Add(Editor("Interface and menus", "Labels, buttons, lists and right-click menus.", Current.InterfaceLook, DefaultInterfaceSize));
+        plain.IsCheckedChanged += (_, _) => Changed();
+        rows.Children.Add(plain);
         loading = false;
         return TrayvoraTheme.Card(
             new TextBlock { Text = "Theme", FontSize = 22, FontWeight = FontWeight.SemiBold },

@@ -5,7 +5,7 @@ using Xunit;
 
 namespace VoiceAgent.UnitTests;
 
-[Collection("ErrorLog")]
+[Collection(ProcessEnvironmentCollection.Name)]
 public sealed class ErrorLogTests
 {
     [Fact]

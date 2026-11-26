@@ -18,7 +18,9 @@ public sealed class AccountsTests
     [Fact]
     public void ClaudeStatusRecognizesSignedOutExpiredAndUnreadableOutput()
     {
-        Assert.False(AccountProviders.ParseClaudeStatus(1, """{"loggedIn":false}""").SignedIn);
+        Assert.True(AccountProviders.ParseClaudeStatus(0, """{"loggedIn":true,"loginExpiresAt":null}""").SignedIn);
+        Assert.True(AccountProviders.ParseClaudeStatus(1, """{"loggedIn":false}""").NeedsLogin);
+        Assert.False(AccountProviders.ParseClaudeStatus(1, "CLI unavailable").NeedsLogin);
         var expired = AccountProviders.ParseClaudeStatus(0,
             $$"""{"loggedIn":true,"email":"me@example.com","loginExpiresAt":"{{DateTimeOffset.Now.AddDays(-1):O}}"}""");
         Assert.False(expired.SignedIn);
