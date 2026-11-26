@@ -76,6 +76,7 @@ internal sealed class MarkdownView : StackPanel
 
     private TextBox? _selectBox;
     private string? _plain;
+    private string? _selectionSource;
     internal string CopyText => _plain ??= ReadableText(_text ?? "");
 
     internal static string ReadableText(string text) => ReadableText(Markdown.Parse(text, Pipeline));
@@ -85,6 +86,8 @@ internal sealed class MarkdownView : StackPanel
         using var writer = new StringWriter();
         var renderer = new Markdig.Renderers.HtmlRenderer(writer);
         Pipeline.Setup(renderer);
+        renderer.ObjectRenderers.ReplaceOrAdd<Markdig.Renderers.Html.Inlines.LinkInlineRenderer>(
+            new PlainLinkRenderer(writer.GetStringBuilder()));
         renderer.EnableHtmlForBlock = renderer.EnableHtmlForInline = renderer.EnableHtmlEscape = false;
         string Render(Block block)
         {
@@ -105,6 +108,21 @@ internal sealed class MarkdownView : StackPanel
         return string.Join("\n\n", paragraphs);
     }
 
+    private sealed class PlainLinkRenderer(System.Text.StringBuilder output) : Markdig.Renderers.Html.HtmlObjectRenderer<LinkInline>
+    {
+        protected override void Write(Markdig.Renderers.HtmlRenderer renderer, LinkInline link)
+        {
+            var start = output.Length;
+            renderer.WriteChildren(link);
+            var address = link.GetDynamicUrl?.Invoke() ?? link.Url;
+            if (string.IsNullOrEmpty(address)) return;
+            var length = output.Length - start;
+            if (length == 0) renderer.Write(address);
+            else if (length != address.Length || output.ToString(start, length) != address)
+                renderer.Write($" ({address})");
+        }
+    }
+
     /// <summary>True while the message is shown as one plain text box where any part can be selected.</summary>
     public bool Selecting => _selectBox is not null;
     public bool HasSelection => _selectBox is { } box && box.SelectionStart != box.SelectionEnd;
@@ -122,6 +140,7 @@ internal sealed class MarkdownView : StackPanel
         {
             Children.Remove(open);
             _selectBox = null;
+            _selectionSource = null;
             foreach (var (_, control) in _blocks) control.IsVisible = true;
             SelectingChanged?.Invoke();
             return;
@@ -134,6 +153,18 @@ internal sealed class MarkdownView : StackPanel
             // Set here so the Theme setting for typed text does not restyle a message.
             FontFamily = Appearance.Font(Appearance.Current.ChatLook), Foreground = Appearance.Brush(Appearance.Current.ChatLook),
             LineHeight = LineHeight(_size),
+        };
+        _selectionSource = _text;
+        box.PropertyChanged += (_, change) =>
+        {
+            if (change.Property != TextBox.SelectionStartProperty && change.Property != TextBox.SelectionEndProperty) return;
+            if (box.SelectionStart != box.SelectionEnd || box.Text == _plain) return;
+            // A drag may change the two endpoints separately. Wait for the final selection.
+            Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+            {
+                if (_selectBox == box && !HasSelection && _plain is { } latest && box.Text != latest)
+                    UpdateSelection(box, latest);
+            });
         };
         box.Classes.Add("bare");
         box.Classes.Add("message-select");
@@ -163,14 +194,7 @@ internal sealed class MarkdownView : StackPanel
         _plain = null;
         var document = Markdown.Parse(text, Pipeline);
         if (_selectBox is { } selecting)
-        {
-            var start = selecting.SelectionStart;
-            var end = selecting.SelectionEnd;
-            var plain = _plain = ReadableText(document);
-            selecting.Text = plain;
-            selecting.SelectionStart = Math.Min(start, plain.Length);
-            selecting.SelectionEnd = Math.Min(end, plain.Length);
-        }
+            UpdateSelection(selecting, _plain = ReadableText(document));
         var index = 0;
         foreach (var block in document)
         {
@@ -190,6 +214,39 @@ internal sealed class MarkdownView : StackPanel
             index++;
         }
         Truncate(index);
+    }
+
+    private void UpdateSelection(TextBox box, string plain)
+    {
+        var previous = box.Text ?? "";
+        var start = box.SelectionStart;
+        var end = box.SelectionEnd;
+        var low = Math.Min(start, end);
+        var high = Math.Max(start, end);
+        if (start != end && !plain.AsSpan().StartsWith(previous.AsSpan(0, high), StringComparison.Ordinal))
+        {
+            var selected = previous[low..high];
+            // A unique literal in the growing source identifies the same words across a Markdown reparse.
+            // For ambiguous or disappearing text keep the selectable snapshot until the user clears it.
+            if (_selectionSource is null || _text is null || !_text.StartsWith(_selectionSource, StringComparison.Ordinal)
+                || !_selectionSource.Contains(selected, StringComparison.Ordinal) || UniqueIndex(_text, selected) < 0
+                || UniqueIndex(previous, selected) < 0) return;
+            var position = UniqueIndex(plain, selected);
+            if (position < 0) return;
+            start += position - low;
+            end += position - low;
+        }
+        _selectionSource = _text;
+        if (previous == plain) return;
+        box.Text = plain;
+        box.SelectionStart = Math.Min(start, plain.Length);
+        box.SelectionEnd = Math.Min(end, plain.Length);
+    }
+
+    private static int UniqueIndex(string text, string value)
+    {
+        var index = text.IndexOf(value, StringComparison.Ordinal);
+        return index >= 0 && text.IndexOf(value, index + 1, StringComparison.Ordinal) < 0 ? index : -1;
     }
 
     private void Truncate(int count)

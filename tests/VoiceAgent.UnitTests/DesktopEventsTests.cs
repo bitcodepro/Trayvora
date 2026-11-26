@@ -630,6 +630,9 @@ public sealed class DesktopEventsTests
         var view = new MarkdownView();
         view.Show("# Plan\n\nUse **bold** and `code` and [docs](https://example.com) and [file](file:///c:/x).\n\n- one\n- two\n\n```cs\nvar x = 1;\n```\n\n| A | B |\n|---|---|\n| 1 | 2 |\n\n<script>alert(1)</script>");
         Assert.Contains("A\tB\n1\t2", view.CopyText);
+        Assert.Contains("docs (https://example.com) and file (file:///c:/x)", view.CopyText);
+        Assert.Equal("source (src/File.cs#L27) and https://example.com",
+            MarkdownView.ReadableText("[**source**][file] and <https://example.com>\n\n[file]: src/File.cs#L27"));
         var blocks = view.GetLogicalDescendants().OfType<SelectableTextBlock>().ToArray();
         Assert.Contains(blocks, block => block.Text == "Plan" && block.FontWeight == Avalonia.Media.FontWeight.SemiBold);
         Assert.Contains(blocks, block => block.Text == "var x = 1;");
@@ -654,13 +657,32 @@ public sealed class DesktopEventsTests
         Assert.True(live.Selecting);
         var box = Assert.Single(live.GetLogicalDescendants().OfType<TextBox>());
         Assert.True(box.IsReadOnly);
-        Assert.Equal("First paragraph.\n\nSecond paragraph", box.Text);
+        Assert.Equal("First paragraph.\n\nSecond (https://example.com) paragraph", box.Text);
         Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
         box.SelectionStart = 2;
         box.SelectionEnd = 9;
         live.Show("**First** paragraph.\n\nSecond paragraph\n\n`Third`");
         Assert.Equal("rst par", box.SelectedText);
         Assert.Equal("First paragraph.\n\nSecond paragraph\n\nThird", box.Text);
+        var openMarkup = "Before **chosen words";
+        box.ClearSelection();
+        live.Show(openMarkup);
+        box.SelectionStart = box.Text!.IndexOf("words", StringComparison.Ordinal);
+        box.SelectionEnd = box.Text.IndexOf("chosen", StringComparison.Ordinal);
+        live.Show(openMarkup + "** after");
+        Assert.Equal("chosen ", box.SelectedText);
+        Assert.Equal("Before chosen words after", box.Text);
+        Assert.True(box.SelectionStart > box.SelectionEnd);
+
+        box.ClearSelection();
+        live.Show("**echo echo");
+        box.SelectionStart = 7;
+        box.SelectionEnd = 11;
+        live.Show("**echo echo** again");
+        Assert.Equal("echo", box.SelectedText);
+        Assert.Equal("**echo echo", box.Text);
+        box.ClearSelection();
+        PumpUntil(() => box.Text == "echo echo again");
         Assert.Same(box, live.Children[^1]);
         Assert.All(live.Children.Where(child => child != box), child => Assert.False(child.IsVisible));
         live.ToggleSelecting();
