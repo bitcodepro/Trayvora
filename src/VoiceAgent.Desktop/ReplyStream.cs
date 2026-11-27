@@ -10,6 +10,11 @@ internal sealed class ReplyStream
 {
     private readonly object _gate = new();
     private readonly StringBuilder _text = new();
+    private readonly TaskCompletionSource _received = new(TaskCreationOptions.RunContinuationsAsynchronously);
+
+    public Task Receipt => _received.Task;
+
+    public void ConfirmReceipt() => _received.TrySetResult();
     private readonly List<string> _notes = [];
     private string? _activity;
     private readonly List<string> _steps = [];
@@ -18,9 +23,12 @@ internal sealed class ReplyStream
     private int _version;
 
     /// <summary>Adds text the agent has just produced.</summary>
-    public void Append(string? delta)
+    public void Append(string? delta) => Append(delta, confirmReceipt: true);
+
+    public void Append(string? delta, bool confirmReceipt)
     {
         if (string.IsNullOrEmpty(delta)) return;
+        if (confirmReceipt) ConfirmReceipt();
         lock (_gate)
         {
             _text.Append(delta);
@@ -42,6 +50,7 @@ internal sealed class ReplyStream
     /// <summary>The whole reply so far, for sources that report full text rather than deltas.</summary>
     public void Replace(string text)
     {
+        if (text.Length > 0) ConfirmReceipt();
         lock (_gate)
         {
             if (_text.Length == text.Length && _text.ToString() == text) return;

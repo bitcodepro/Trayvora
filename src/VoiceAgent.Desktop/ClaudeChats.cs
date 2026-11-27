@@ -361,7 +361,9 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
                 Event(item, main);
                 break;
             case "assistant" when root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object:
-                Message(message, main);
+                var agentReply = main && (!root.TryGetProperty("error", out var error) || error.ValueKind == JsonValueKind.Null);
+                if (agentReply) stream?.ConfirmReceipt();
+                Message(message, main, agentReply);
                 break;
             case "user" when root.TryGetProperty("message", out var user) && user.ValueKind == JsonValueKind.Object:
                 if (user.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
@@ -388,6 +390,7 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
         switch (Text(item, "type"))
         {
             case "message_start" when main:
+                stream?.ConfirmReceipt();
                 stream?.Restart();
                 stream?.Activity(null, record: false);
                 break;
@@ -402,7 +405,7 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
         }
     }
 
-    private void Message(JsonElement message, bool main)
+    private void Message(JsonElement message, bool main, bool agentReply)
     {
         if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array) return;
         if (main && !_partial && Text(message, "id") is var id && id != _messageId)
@@ -413,7 +416,7 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
         foreach (var block in content.EnumerateArray())
         {
             if (block.ValueKind != JsonValueKind.Object) continue;
-            if (main && !_partial && Text(block, "type") == "text") stream?.Append(Text(block, "text"));
+            if (main && !_partial && Text(block, "type") == "text") stream?.Append(Text(block, "text"), confirmReceipt: agentReply);
             else ObserveBlock(block, main);
         }
     }

@@ -44,8 +44,15 @@ public sealed class CodexSessionTests : IDisposable
         initial.Finish("completed");
         var output = new CollectedOutput();
         IReadOnlyList<ToolActivity>? tools = null;
+        var accepted = false;
         Assert.Equal(CodexTurnStatus.Completed, await CodexSession.RunTurnAsync(initial, _folder.FullName,
-            Path.Combine(_folder.FullName, "thread.txt"), "Hello", output, default, activity => tools = activity));
+            Path.Combine(_folder.FullName, "thread.txt"), "Hello", output, default, activity => tools = activity,
+            onAccepted: () =>
+            {
+                Assert.Empty(output.Deltas);
+                accepted = true;
+            }));
+        Assert.True(accepted);
         Assert.Equal(new ToolActivity("MCP · read_document", "Completed"), Assert.Single(tools!));
         Assert.Equal(new[] { "Hello ", "world" }, output.Deltas);
         Assert.Contains("thread/start", initial.Methods);

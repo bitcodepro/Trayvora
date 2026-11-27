@@ -677,7 +677,7 @@ internal sealed class VoiceOverlay : Window
                 {
                     result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
                         steps: new ReplyStream.Reporter(stream.Activity),
-                        attachments: files);
+                        attachments: files, onAccepted: stream.ConfirmReceipt);
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
                 {

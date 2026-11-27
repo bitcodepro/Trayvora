@@ -1709,8 +1709,16 @@ internal sealed partial class DiscussionWindow(
                 if (CurrentAgentProfile?.Invoke(room, agent) != profile)
                     throw new IOException("The agent profile changed while the request was queued. Send the message again to use the selected profile.");
                 dispatched = true;
-                answer = await send(agent, prompt, room, stream, files, token);
-                await SetPostDelivery(room, delivery, DeliveryStage.Confirmed);
+                var turn = send(agent, prompt, room, stream, files, token);
+                var confirmed = false;
+                if (delivery.Post is not null)
+                {
+                    await Task.WhenAny(turn, stream.Receipt);
+                    if (stream.Receipt.IsCompletedSuccessfully)
+                        confirmed = await SetPostDelivery(room, delivery, DeliveryStage.Confirmed);
+                }
+                answer = await turn;
+                if (!confirmed) await SetPostDelivery(room, delivery, DeliveryStage.Confirmed);
             }
             catch (Exception error)
             {
@@ -1741,7 +1749,6 @@ internal sealed partial class DiscussionWindow(
                 run.Live.Remove(agent);
                 Changed(room);
             }
-            if (token.IsCancellationRequested) return;
             if (answer is null)
             {
                 // Codex Desktop has not finished in time: say so in the session, not only in the status line.
@@ -1761,6 +1768,11 @@ internal sealed partial class DiscussionWindow(
             var agent = delivery.To;
             var next = Recipient(answer);
             var body = next is null ? answer : StripAddress(answer);
+            if (token.IsCancellationRequested)
+            {
+                _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
+                return;
+            }
             if (delivery.Discuss is { } plan)
             {
                 if (agent == plan.Partner)

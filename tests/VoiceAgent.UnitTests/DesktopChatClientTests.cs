@@ -11,8 +11,15 @@ public sealed class DesktopChatClientTests
     {
         await using var connection = new TestConnection();
         var chat = Guid.NewGuid();
-        var reply = await DesktopChatClient.SubmitAsync(connection, chat, "Привет!", new Progress<string>(), default);
+        var acknowledgments = 0;
+        var reply = await DesktopChatClient.SubmitAsync(connection, chat, "Привет!", new Progress<string>(), default,
+            onAccepted: () =>
+            {
+                Assert.Equal(["thread/queue/add"], connection.Methods);
+                acknowledgments++;
+            });
 
+        Assert.Equal(1, acknowledgments);
         Assert.NotNull(reply);
         Assert.Equal("Связь работает.", reply.Answer);
         Assert.Equal("Привет!", reply.Question);

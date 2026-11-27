@@ -85,7 +85,10 @@ public sealed class ReplyStreamingTests
         var stream = new ReplyStream();
         var parser = new ClaudeStreamParser(stream);
         parser.Accept(Line(new { type = "system", subtype = "init" }));
+        parser.Accept("""{"type":"assistant","error":"authentication_failed","message":{"content":[{"type":"text","text":"Sign in again."}]}}""");
+        Assert.False(stream.Receipt.IsCompleted);
         parser.Accept(Line(new { type = "stream_event", @event = new { type = "message_start" } }));
+        Assert.True(stream.Receipt.IsCompletedSuccessfully);
         parser.Accept(Line(Delta("**OK")));
         Assert.Equal("**OK", stream.Text);
         parser.Accept(Line(Delta("** done")));
