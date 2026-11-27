@@ -59,6 +59,7 @@ internal sealed partial class DiscussionWindow
             else if (e.Key == Key.Enter)
             {
                 e.Handled = true;
+                SuggestCommands();
                 if (_commandChoices.Items.Count == 1 && _commandChoices.Items[0] is CommandChoice single)
                     InsertCommand(single);
                 else

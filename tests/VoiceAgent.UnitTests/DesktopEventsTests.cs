@@ -316,7 +316,7 @@ public sealed class DesktopEventsTests
             Run("/model sonnet");
 
             line.Text = "/mc";
-            PumpUntil(() => list.Items.OfType<CommandChoice>().SingleOrDefault()?.Command == "/mcp");
+            PumpUntil(() => list.Items.Count == 1 && list.Items.OfType<CommandChoice>().First().Command == "/mcp");
             EnterInCommandField();
             Assert.Equal("/mcp", line.Text);
             Assert.Empty(calls);
