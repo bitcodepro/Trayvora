@@ -255,7 +255,8 @@ public sealed class DesktopEventsTests
             var calls = new List<string>();
             var sent = new List<string>();
             var view = new DiscussionWindow(store, (_, text, _, _, _, _) => { sent.Add(text); return Task.FromResult<string?>("OK"); },
-                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([chat]), () => null);
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([chat]), () => null,
+                (_, _, _) => Task.FromResult<string?>(null));
             view.RunClaudeCommand = (args, workspace, ct) =>
             {
                 Assert.Equal(folder.FullName, workspace);
@@ -275,8 +276,20 @@ public sealed class DesktopEventsTests
             var run = controls.OfType<Button>().Single(b => Equals(b.Content, "Run command"));
             var list = controls.OfType<ListBox>().Single(b => AutomationProperties.GetName(b) == "Claude command suggestions");
             var send = controls.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "Send");
+            var voice = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>()
+                .Single(b => Equals(b.Content, "Voice mode"));
+            var switches = Assert.IsType<StackPanel>(mode.Parent);
+            Assert.Equal<Control>([voice, mode], switches.Children);
+            Assert.True(mode.IsEffectivelyVisible);
+            Assert.True(voice.IsEffectivelyVisible);
+
             editor.Text = "/version";
             mode.IsChecked = true;
+            Assert.True(mode.IsEffectivelyVisible);
+            Assert.True(voice.IsEffectivelyVisible);
+            Assert.False(voice.IsEnabled);
+            Assert.True(line.IsEffectivelyVisible);
+            Assert.False(editor.IsEffectivelyVisible);
             line.Text = "/res";
             PumpUntil(() => list.Items.OfType<CommandChoice>().SingleOrDefault()?.Command == "/resume");
             void Run(string command)
@@ -311,6 +324,9 @@ public sealed class DesktopEventsTests
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert.Empty(sent);
             mode.IsChecked = false;
+            Assert.True(voice.IsEnabled);
+            Assert.False(line.IsEffectivelyVisible);
+            Assert.True(editor.IsEffectivelyVisible);
             Assert.Equal("/version", editor.Text);
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             PumpUntil(() => sent.Count == 1 && !view.IsRunning);

@@ -18,7 +18,7 @@ internal sealed partial class DiscussionWindow
     private CancellationTokenSource? _commandCancel;
     internal Func<string[], string, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
 
-    private Control CommandComposer(Control messages)
+    private Control BuildCommandInput(Control messages)
     {
         TrayvoraTheme.StyleControls(_commandMode, _commandInput);
         TrayvoraTheme.Primary(_runCommand);
@@ -43,6 +43,7 @@ internal sealed partial class DiscussionWindow
             _resumeChoices = [];
             _commandInput.Clear();
             _status.Text = "";
+            UpdateComposer();
             if (enabled) _commandInput.Focus(); else _editor.Focus();
         };
         _commandInput.TextChanged += (_, _) => SuggestCommands();
@@ -72,7 +73,7 @@ internal sealed partial class DiscussionWindow
                 await ExecuteCommandAsync(choice.Command);
         };
         _runCommand.Click += async (_, _) => await ExecuteCommandAsync(_commandInput.Text);
-        return new StackPanel { Spacing = 6, Children = { _status, _commandMode, panel, messages } };
+        return panel;
     }
 
     private void SuggestCommands()
