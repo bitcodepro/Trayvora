@@ -140,11 +140,19 @@ public sealed class AppServerProcessTests
         var workspace = Path.Combine(home, "workspace");
         Directory.CreateDirectory(workspace);
         var executable = Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE")!;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var session = new CodexSession(home);
+        Assert.False(await session.VerifySessionMcpAsync(false, timeout.Token));
+        Assert.True(await session.VerifySessionMcpAsync(true, timeout.Token));
+        var invalidHome = Path.Combine(home, "unexpected-mcp");
+        Directory.CreateDirectory(invalidHome);
+        await File.WriteAllTextAsync(Path.Combine(invalidHome, "config.toml"),
+            "[mcp_servers.other]\ncommand = \"should-not-run.exe\"\n", timeout.Token);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new CodexSession(invalidHome).VerifySessionMcpAsync(false, timeout.Token));
+        Assert.Contains("Unexpected MCP configuration", error.Message);
         await using var connection = AppServerConnection.Start(executable, workspace, home, CodexSession.DisabledFeatures, revqora);
         await connection.InitializeAsync(timeout.Token);
-        var config = await connection.RequestAsync("config/read", new { cwd = workspace, includeLayers = false }, timeout.Token);
-        CodexSession.VerifyConfig(config.GetProperty("config"), revqora);
         await CodexSession.VerifyRevqoraCatalogAsync(connection, null, timeout.Token);
     }
 }

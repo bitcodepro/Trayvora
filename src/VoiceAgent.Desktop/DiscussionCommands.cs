@@ -25,6 +25,7 @@ internal sealed partial class DiscussionWindow
     internal Func<string[], TerminalContext, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
 
     internal Func<string[], TerminalContext, CancellationToken, Task<(int Code, string Output)>>? RunCodexCommand { get; set; }
+    internal Func<DiscussionRoom, CancellationToken, Task<bool>>? VerifyLocalCodexMcp { get; set; }
 
     private static string ClaudeCommandWorkspace(DiscussionRoom? room) =>
         room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace ?? AppContext.BaseDirectory;
@@ -269,6 +270,15 @@ internal sealed partial class DiscussionWindow
                 result = string.Join("\n", menu.AsEnumerable());
                 if (agent == DiscussionMember.Codex)
                     result += "\n\nOpen Codex console for interactive commands such as /model, /resume and /mcp.";
+            }
+            else if (agent == DiscussionMember.Codex && name == "/mcp" && !room.CodexDesktop)
+            {
+                var verify = VerifyLocalCodexMcp ?? throw new IOException("Trayvora Codex is unavailable.");
+                var revqora = await verify(room, operation.Token);
+                operation.Token.ThrowIfCancellationRequested();
+                result = UiLanguage.T(revqora
+                    ? "revqora · Allowed in this Trayvora session (read-only). Connection is checked when sending a message."
+                    : "No MCP servers available in this Trayvora session.");
             }
             else if (agent == DiscussionMember.Codex)
             {

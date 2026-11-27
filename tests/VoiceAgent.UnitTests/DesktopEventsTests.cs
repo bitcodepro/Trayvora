@@ -439,6 +439,13 @@ public sealed class DesktopEventsTests
             view.CurrentAgentProfile = (_, agent) => agent == DiscussionMember.Codex ? profile : claudeProfile;
             view.CurrentClaudeProfile = () => claudeProfile;
             view.RunClaudeCommand = (_, _, _) => throw new InvalidOperationException("Codex command routed to Claude.");
+            var verifiedRoutes = new List<bool>();
+            view.VerifyLocalCodexMcp = (current, _) =>
+            {
+                Assert.False(current.CodexDesktop);
+                verifiedRoutes.Add(current.UsesRevqora);
+                return Task.FromResult(current.UsesRevqora);
+            };
             view.RunCodexCommand = (args, context, _) =>
             {
                 calls.Add((args, context));
@@ -495,7 +502,8 @@ public sealed class DesktopEventsTests
             Assert.Equal(DiscussionMember.Boss, outcome.To);
             Assert.Equal("test · Enabled\nother · Disabled", outcome.Text);
             Assert.Equal(firstProfile, outcome.McpProfile);
-            Assert.Contains("Codex CLI → You · /mcp", DiscussionWindow.ToMarkdown(saved));
+            Assert.Contains("Codex CLI → You · /mcp · Profile configuration", DiscussionWindow.ToMarkdown(saved));
+            Assert.Empty(verifiedRoutes);
             var console = controls.OfType<Button>().Single(b => Equals(b.Content, "Codex console"));
             console.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert.Equal((TerminalKind.Codex, new TerminalContext(workspace, claudeProfile, firstProfile, true)), Assert.Single(consoles));
@@ -509,6 +517,23 @@ public sealed class DesktopEventsTests
             room.CodexWorkspace = folder.FullName;
             manage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert.Equal(consoles[0], consoles[1]);
+
+            room.CodexDesktop = false;
+            void RunLocalMcp()
+            {
+                line.Text = "/mcp";
+                run.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => !view.IsRunning);
+                Pump(view.PendingSaves);
+                Assert.Null(room.Messages[^1].McpProfile);
+            }
+            RunLocalMcp();
+            Assert.Equal("No MCP servers available in this Trayvora session.", room.Messages[^1].Text);
+            room.CodexChatId = CodexSession.PreviousRevqoraChatId;
+            RunLocalMcp();
+            Assert.StartsWith("revqora · Allowed in this Trayvora session (read-only).", room.Messages[^1].Text);
+            Assert.Equal([false, true], verifiedRoutes);
+            Assert.Single(calls);
 
             claude.IsChecked = true;
             Assert.True(claude.IsChecked == true && codex.IsChecked != true);

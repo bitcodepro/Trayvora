@@ -10,7 +10,7 @@ internal static class CodexCommands
 
     internal static readonly CommandChoice[] Menu =
     [
-        new("/mcp", "Configured Codex MCP servers"),
+        new("/mcp", "MCP configuration for the selected Codex route"),
         new("/status", "Codex account status"),
         new("/version", "Installed Codex CLI version"),
         new("/help", "Commands available in Trayvora"),

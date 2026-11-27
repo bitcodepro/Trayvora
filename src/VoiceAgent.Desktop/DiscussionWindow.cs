@@ -910,9 +910,9 @@ internal sealed partial class DiscussionWindow(
         if (room.Claude is { } claude) text.AppendLine($"- Claude session: {claude.Title}");
         foreach (var message in room.Messages)
         {
-            if (message.Command is { } command)
+            if (message.Command is not null)
             {
-                text.AppendLine().AppendLine($"## {message.Sender} CLI → You · {command}").AppendLine().AppendLine(message.Text);
+                text.AppendLine().AppendLine($"## {CommandTitle(message)}").AppendLine().AppendLine(message.Text);
                 continue;
             }
             var to = message.To is { } target ? $" → {target}" : message.Sender == DiscussionMember.Boss ? " → Both" : "";
@@ -2000,13 +2000,20 @@ internal sealed partial class DiscussionWindow(
         FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, Text = log,
     });
 
+    private static string CommandTitle(DiscussionMessage message)
+    {
+        var profile = message.Sender == DiscussionMember.Codex && message.Command == "/mcp" && message.McpProfile is not null
+            ? " · " + UiLanguage.T("Profile configuration") : "";
+        return $"{message.Sender} CLI → You · {message.Command}{profile}";
+    }
+
     private void Render(DiscussionMessage message, bool scroll = true, int insertAt = -1)
     {
         if (message.Command is { } command)
         {
             var result = new StackPanel { Spacing = 4, Margin = new Thickness(8), Children =
             {
-                TrayvoraTheme.Hint($"{message.Sender} CLI → You   ·   {command}"),
+                TrayvoraTheme.Hint(CommandTitle(message)),
                 new SelectableTextBlock { Text = message.Text, TextWrapping = TextWrapping.Wrap }
             } };
             if (command == "/mcp" && openTerminal is not null && (message.Sender == DiscussionMember.Claude || message.McpProfile is not null))

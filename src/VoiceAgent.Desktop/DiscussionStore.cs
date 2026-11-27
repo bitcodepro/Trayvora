@@ -1,5 +1,6 @@
 using System.Text.Json;
 using System.Text.Json.Serialization;
+using VoiceAgent.Codex;
 
 namespace VoiceAgent.Desktop;
 
@@ -51,6 +52,7 @@ internal sealed class DiscussionRoom
     public List<DiscussionMessage> Messages { get; set; } = [];
 
     public bool OwnCodexThread => !CodexDesktop && CodexChatId == Id;
+    internal bool UsesRevqora => !CodexDesktop && CodexChatId == CodexSession.PreviousRevqoraChatId;
     internal string? IndexedPreview { get; set; }
     [System.Text.Json.Serialization.JsonIgnore]
     public string Preview => IndexedPreview ?? (Messages.Count == 0 ? "No messages yet"
