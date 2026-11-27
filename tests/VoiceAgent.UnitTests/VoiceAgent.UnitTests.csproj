@@ -5,6 +5,7 @@
   </PropertyGroup>
   <ItemGroup>
     <ProjectReference Include="../../src/VoiceAgent.Codex/VoiceAgent.Codex.csproj" />
+    <ProjectReference Include="../VoiceAgent.AppServerFixture/VoiceAgent.AppServerFixture.csproj" />
     <ProjectReference Include="../../src/VoiceAgent.Desktop/VoiceAgent.Desktop.csproj" />
     <PackageReference Include="Microsoft.NET.Test.Sdk" />
     <PackageReference Include="xunit" />
