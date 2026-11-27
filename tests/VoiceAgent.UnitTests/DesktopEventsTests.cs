@@ -421,13 +421,15 @@ public sealed class DesktopEventsTests
             var second = new TerminalContext(Directory.CreateDirectory(Path.Combine(directory.FullName, "two")).FullName, "profile");
             var starts = new List<TerminalContext>();
             var currentProfile = first.Profile;
+            var failLaunch = false;
             // Use a hidden process with a fixed lifetime to exercise replacement without an agent session.
             var terminal = new TerminalPanel((_, context) =>
             {
                 if (context.Profile != currentProfile) throw new IOException(ClaudeCommands.RefreshMcp);
                 starts.Add(context);
                 var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
-                var start = new System.Diagnostics.ProcessStartInfo(shell) { WorkingDirectory = context.Workspace, CreateNoWindow = true };
+                var executable = failLaunch ? Path.Combine(context.Workspace, "missing-terminal.exe") : shell;
+                var start = new System.Diagnostics.ProcessStartInfo(executable) { WorkingDirectory = context.Workspace, CreateNoWindow = true };
                 foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30" }) start.ArgumentList.Add(arg);
                 return start;
             });
@@ -453,10 +455,24 @@ public sealed class DesktopEventsTests
                 Assert.Equal([first], starts);
 
                 currentProfile = second.Profile;
+                failLaunch = true;
+                replace.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.True(terminal.Running);
+                Assert.True(replace.IsEffectivelyVisible);
+                Assert.Contains(terminal.GetLogicalDescendants().OfType<TextBlock>(), text =>
+                    text.Text?.StartsWith("Could not start the terminal:", StringComparison.Ordinal) == true);
+                Assert.Equal([first, second], starts);
+
+                // Returning to the original context reuses the live process after the failed launch.
+                terminal.Start(TerminalKind.Claude, first);
+                Assert.False(replace.IsEffectivelyVisible);
+                Assert.Equal([first, second], starts);
+                failLaunch = false;
+                terminal.Start(TerminalKind.Claude, second);
                 replace.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Assert.False(replace.IsEffectivelyVisible);
                 Assert.True(terminal.Running);
-                Assert.Equal([first, second], starts);
+                Assert.Equal([first, second, second], starts);
             }
             finally { terminal.Stop(); }
         }

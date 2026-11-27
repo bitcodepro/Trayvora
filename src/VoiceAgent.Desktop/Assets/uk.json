@@ -509,6 +509,7 @@
   "Claude console": "Консоль Claude",
   "Keep current console": "Залишити поточну консоль",
   "Replace console": "Замінити консоль",
+  "Windows could not open the new console window.": "Windows не вдалося відкрити нове вікно консолі.",
   "Replacing the console will stop its running processes.": "Заміна консолі зупинить запущені в ній процеси.",
   "Manage MCP in console": "Керувати MCP у консолі",
   "This MCP result belongs to a different or unknown Claude profile. Run /mcp again to manage its servers.": "Цей результат MCP належить іншому або невідомому профілю Claude. Запустіть /mcp ще раз, щоб керувати серверами.",

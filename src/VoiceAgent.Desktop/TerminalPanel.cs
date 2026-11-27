@@ -26,6 +26,7 @@ internal sealed class TerminalPanel : UserControl
     private (TerminalKind Kind, TerminalContext Context)? _pending;
     private TerminalContext? _context;
     private readonly Border _host = new() { Background = Brush.Parse("#0C0C0C"), CornerRadius = new CornerRadius(10), ClipToBounds = true };
+    private readonly Grid _surface = new();
     private readonly TextBlock _status = new() { Foreground = TrayvoraTheme.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(14) };
     private readonly Dictionary<TerminalKind, Button> _chips = [];
     private ConsoleHost? _console;
@@ -83,7 +84,8 @@ internal sealed class TerminalPanel : UserControl
         DockPanel.SetDock(_replacePrompt, Dock.Top);
         DockPanel.SetDock(hint, Dock.Bottom);
         dock.Children.AddRange([header, _replacePrompt, hint, _host]);
-        _host.Child = _status;
+        _surface.Children.Add(_status);
+        _host.Child = _surface;
         Content = new Border
         {
             Background = TrayvoraTheme.Sidebar, BorderBrush = TrayvoraTheme.Border, BorderThickness = new Thickness(1, 0, 0, 0),
@@ -124,28 +126,19 @@ internal sealed class TerminalPanel : UserControl
 
     private void StartCore(TerminalKind kind, TerminalContext context)
     {
+        ConsoleHost? candidate = null;
         try
         {
-            var start = _start(kind, context);
-            Stop();
-            _context = context;
-            _kind = kind;
-            foreach (var (key, chip) in _chips) TrayvoraTheme.SetSelected(chip, key == kind);
-            _console = new ConsoleHost(start);
-            _console.Exited += () => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                if (_host.Child is ConsoleHost host && !host.Running)
-                {
-                    _status.Text = "The terminal was closed. Choose Claude Code, Codex or PowerShell above to start it again.";
-                    _host.Child = _status;
-                }
-            });
-            _host.Child = _console;
-            var console = _console;
-            Avalonia.Threading.Dispatcher.UIThread.Post(console.FocusConsole, Avalonia.Threading.DispatcherPriority.Background);
+            candidate = new ConsoleHost(_start(kind, context)) { IsVisible = false };
+            candidate.Exited += ConsoleExited;
+            _surface.Children.Add(candidate);
+            // Avalonia attaches the native window when the control enters the live visual tree.
+            if (!candidate.Running || (TopLevel.GetTopLevel(this) is not null && !candidate.Embedded))
+                throw new IOException(UiLanguage.T("Windows could not open the new console window."));
         }
         catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
+            if (candidate is not null) RemoveConsole(candidate);
             var message = "Could not start the terminal: " + error.Message;
             if (Running)
             {
@@ -157,17 +150,46 @@ internal sealed class TerminalPanel : UserControl
                 _context = context;
                 _kind = kind;
                 _status.Text = message;
-                _host.Child = _status;
+                _status.IsVisible = true;
             }
+            return;
         }
+
+        var previous = _console;
+        _console = candidate;
+        _context = context;
+        _kind = kind;
+        foreach (var (key, chip) in _chips) TrayvoraTheme.SetSelected(chip, key == kind);
+        _status.IsVisible = false;
+        candidate.IsVisible = true;
+        ClearReplacement();
+        if (previous is not null) RemoveConsole(previous);
+        Avalonia.Threading.Dispatcher.UIThread.Post(candidate.FocusConsole, Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    private void ConsoleExited(ConsoleHost console) => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+    {
+        if (_console != console) return;
+        _console = null;
+        RemoveConsole(console);
+        _status.Text = "The terminal was closed. Choose Claude Code, Codex or PowerShell above to start it again.";
+        _status.IsVisible = true;
+    });
+
+    private void RemoveConsole(ConsoleHost console)
+    {
+        console.Exited -= ConsoleExited;
+        _surface.Children.Remove(console);
+        console.Kill();
     }
 
     public void Stop()
     {
         ClearReplacement();
-        _console?.Kill();
+        if (_console is not { } console) return;
         _console = null;
-        _host.Child = _status;
+        RemoveConsole(console);
+        _status.IsVisible = true;
     }
 }
 
@@ -179,12 +201,10 @@ internal sealed partial class ConsoleHost : NativeControlHost
     private IntPtr _window;
     private uint _consoleThread, _uiThread;
     private bool _attached;
-    private bool _wasDown;
+    private bool _killed;
     private readonly Avalonia.Threading.DispatcherTimer _clicks = new() { Interval = TimeSpan.FromMilliseconds(30) };
     private readonly HashSet<IntPtr> _existing;
-    private readonly DateTime _started;
-
-    public event Action? Exited;
+    public event Action<ConsoleHost>? Exited;
 
     public ConsoleHost(ProcessStartInfo start)
     {
@@ -193,10 +213,17 @@ internal sealed partial class ConsoleHost : NativeControlHost
         if (Path.GetFileName(start.FileName).Equals("conhost.exe", StringComparison.OrdinalIgnoreCase))
             DisableQuickEdit();
         _existing = Consoles().Select(item => item.Window).ToHashSet();
-        _started = DateTime.Now.AddSeconds(-1);
         _process = Process.Start(start) ?? throw new InvalidOperationException("The console did not start.");
-        _process.EnableRaisingEvents = true;
-        _process.Exited += (_, _) => Exited?.Invoke();
+        try
+        {
+            _process.Exited += (_, _) => Exited?.Invoke(this);
+            _process.EnableRaisingEvents = true;
+        }
+        catch
+        {
+            Kill();
+            throw;
+        }
     }
 
     public bool Running
@@ -207,6 +234,8 @@ internal sealed partial class ConsoleHost : NativeControlHost
             catch (InvalidOperationException) { return false; }
         }
     }
+
+    public bool Embedded => _window != IntPtr.Zero;
 
     protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
     {
@@ -219,13 +248,17 @@ internal sealed partial class ConsoleHost : NativeControlHost
         var extended = (long)GetWindowLongPtr(_window, GwlExStyle);
         SetWindowLongPtr(_window, GwlExStyle, (IntPtr)(extended & ~WsExAppWindow));
         SetParent(_window, parent.Handle);
-        ShowWindow(_window, 5);
+        if (GetParent(_window) != parent.Handle)
+        {
+            _window = IntPtr.Zero;
+            return base.CreateNativeControlCore(parent);
+        }
+        ShowWindow(_window, 4);
         // The console window belongs to another process. Sharing its keyboard input with ours lets a click
         // inside it take the keyboard focus, so typing, Enter and the arrow keys reach Claude Code.
         _consoleThread = GetWindowThreadProcessId(_window, out _);
         _uiThread = GetCurrentThreadId();
         if (_consoleThread != 0 && _consoleThread != _uiThread) _attached = AttachThreadInput(_uiThread, _consoleThread, true);
-        FocusConsole();
         // A click inside the console does not move the keyboard back from Trayvora's own controls by itself:
         // watch for a mouse press over the console and give it the keyboard.
         _clicks.Tick += (_, _) =>
@@ -233,7 +266,6 @@ internal sealed partial class ConsoleHost : NativeControlHost
             // 0x8000: held now; 0x0001: pressed since the last check (a short click between two ticks).
             var down = (GetAsyncKeyState(0x01) & 0x8001) != 0 | (GetAsyncKeyState(0x02) & 0x8001) != 0;
             if (down && GetCursorPos(out var point) && WindowFromPoint(point) == _window && GetFocus() != _window) FocusConsole();
-            _wasDown = down;
         };
         _clicks.Start();
         return new PlatformHandle(_window, "HWND");
@@ -253,6 +285,8 @@ internal sealed partial class ConsoleHost : NativeControlHost
 
     public void Kill()
     {
+        if (_killed) return;
+        _killed = true;
         _clicks.Stop();
         if (_attached)
         {
@@ -261,6 +295,7 @@ internal sealed partial class ConsoleHost : NativeControlHost
         }
         try { if (!_process.HasExited) _process.Kill(entireProcessTree: true); }
         catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+        finally { _process.Dispose(); }
     }
 
     /// <summary>
@@ -301,26 +336,57 @@ internal sealed partial class ConsoleHost : NativeControlHost
         return found;
     }
 
-    /// <summary>The new console window opened by our conhost: one that did not exist before and belongs to a shell started after it.</summary>
+    /// <summary>Find the new window owned by our conhost or the shell it started.</summary>
     private IntPtr FindConsole(TimeSpan wait)
     {
         var deadline = DateTime.UtcNow + wait;
-        while (DateTime.UtcNow < deadline)
+        while (Running && DateTime.UtcNow < deadline)
         {
             foreach (var (window, owner) in Consoles())
             {
                 if (_existing.Contains(window)) continue;
-                try
-                {
-                    using var shell = Process.GetProcessById(owner);
-                    if (owner == _process.Id || shell.StartTime >= _started) return window;
-                }
-                catch (Exception error) when (error is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                if (owner == _process.Id || IsChildProcess(owner, _process.Id)) return window;
             }
             Thread.Sleep(50);
         }
         return IntPtr.Zero;
     }
+
+    private static unsafe bool IsChildProcess(int childId, int parentId)
+    {
+        using var snapshot = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+        if (snapshot.IsInvalid) return false;
+        var entry = new ProcessEntry { Size = (uint)sizeof(ProcessEntry) };
+        if (!Process32First(snapshot, ref entry)) return false;
+        do
+        {
+            if (entry.ProcessId == childId) return entry.ParentProcessId == parentId;
+        } while (Process32Next(snapshot, ref entry));
+        return false;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct ProcessEntry
+    {
+        public uint Size, Usage;
+        public int ProcessId;
+        public IntPtr DefaultHeapId;
+        public uint ModuleId, Threads;
+        public int ParentProcessId, BasePriority;
+        public uint Flags;
+        public fixed char ExeFile[260];
+    }
+
+    [LibraryImport("kernel32.dll")]
+    private static partial Microsoft.Win32.SafeHandles.SafeFileHandle CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "Process32FirstW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool Process32First(Microsoft.Win32.SafeHandles.SafeFileHandle snapshot, ref ProcessEntry entry);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "Process32NextW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool Process32Next(Microsoft.Win32.SafeHandles.SafeFileHandle snapshot, ref ProcessEntry entry);
 
     private const int GwlStyle = -16, GwlExStyle = -20;
     private const long WsChild = 0x40000000, WsVisible = 0x10000000, WsCaption = 0x00C00000, WsThickFrame = 0x00040000,
@@ -346,6 +412,9 @@ internal sealed partial class ConsoleHost : NativeControlHost
 
     [LibraryImport("user32.dll")]
     private static partial IntPtr SetParent(IntPtr child, IntPtr parent);
+
+    [LibraryImport("user32.dll")]
+    private static partial IntPtr GetParent(IntPtr child);
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]
