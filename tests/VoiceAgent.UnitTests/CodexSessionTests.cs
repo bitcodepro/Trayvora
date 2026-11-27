@@ -131,6 +131,14 @@ public sealed class CodexSessionTests : IDisposable
         Assert.DoesNotContain("turn/start", server.Methods);
     }
 
+    [Fact]
+    public void IncompleteSessionConfigIsReportedAsInvalidData()
+    {
+        using var config = JsonDocument.Parse("{}");
+        var error = Assert.Throws<InvalidDataException>(() => CodexSession.VerifyConfig(config.RootElement, null));
+        Assert.Equal("Codex App Server returned an incomplete configuration.", error.Message);
+    }
+
     [Theory]
     [InlineData("request_action")]
     [InlineData("open_view")]

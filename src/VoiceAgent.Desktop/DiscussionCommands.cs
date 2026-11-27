@@ -355,7 +355,8 @@ internal sealed partial class DiscussionWindow
                 await Append(room, new(agent, DiscussionMember.Boss, $"{agent} CLI timed out.", DateTimeOffset.Now, Command: name));
             }
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception)
+        catch (Exception error) when (error is IOException or InvalidDataException or UnauthorizedAccessException
+            or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception)
         {
             if (!operation.IsCancellationRequested)
             {

@@ -115,7 +115,9 @@ public sealed partial class CodexSession(string dataDirectory)
     {
         var response = await connection.RequestAsync("config/read", new { cwd = workspace, includeLayers = false }, ct)
             .ConfigureAwait(false);
-        return response.GetProperty("config");
+        if (response.ValueKind != JsonValueKind.Object || !response.TryGetProperty("config", out var config) || config.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("Codex App Server did not return a configuration object.");
+        return config;
     }
 
     private (AppServerConnection Connection, string Home, string Workspace) OpenConnection(string? revqora = null)
@@ -401,9 +403,15 @@ public sealed partial class CodexSession(string dataDirectory)
 
     internal static void VerifyConfig(JsonElement config, string? revqora)
     {
-        var features = config.GetProperty("features");
-        if (config.GetProperty("model_provider").GetString() != "openai" ||
-            config.GetProperty("web_search").GetString() != "disabled" ||
+        if (config.ValueKind != JsonValueKind.Object ||
+            !config.TryGetProperty("features", out var features) || features.ValueKind != JsonValueKind.Object ||
+            !config.TryGetProperty("model_provider", out var provider) || provider.ValueKind != JsonValueKind.String ||
+            !config.TryGetProperty("web_search", out var webSearch) || webSearch.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException("Codex App Server returned an incomplete configuration.");
+        }
+
+        if (provider.GetString() != "openai" || webSearch.GetString() != "disabled" ||
             DisabledFeatures.Any(name => !features.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.False))
         {
             throw new InvalidOperationException("The VoiceAgent Codex profile must have shell and external integrations disabled.");

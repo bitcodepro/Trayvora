@@ -527,6 +527,26 @@ public sealed class DesktopEventsTests
                 Pump(view.PendingSaves);
                 Assert.Null(room.Messages[^1].McpProfile);
             }
+            var verifyLocalMcp = view.VerifyLocalCodexMcp;
+            const string protocolError = "Invalid JSON from Codex App Server.";
+            var brokenReply = new TaskCompletionSource<bool>(TaskCreationOptions.RunContinuationsAsynchronously);
+            view.VerifyLocalCodexMcp = (_, _) => brokenReply.Task;
+            line.Text = "/mcp";
+            run.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.True(view.IsRunning);
+            brokenReply.SetException(new InvalidDataException(protocolError));
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
+            var failure = store.ReadRoom(room.Id).Messages[^1];
+            Assert.Equal(DiscussionMember.Codex, failure.Sender);
+            Assert.Equal(DiscussionMember.Boss, failure.To);
+            Assert.Equal("/mcp", failure.Command);
+            Assert.Equal(protocolError, failure.Text);
+            Assert.Null(failure.McpProfile);
+            Assert.True(run.IsEnabled);
+            Assert.True(line.IsEnabled);
+
+            view.VerifyLocalCodexMcp = verifyLocalMcp;
             RunLocalMcp();
             Assert.Equal("No MCP servers available in this Trayvora session.", room.Messages[^1].Text);
             room.CodexChatId = CodexSession.PreviousRevqoraChatId;

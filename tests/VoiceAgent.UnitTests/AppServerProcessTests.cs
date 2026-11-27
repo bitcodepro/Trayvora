@@ -116,6 +116,26 @@ public sealed class AppServerProcessTests
     }
 
     [Fact]
+    public async Task MalformedJsonIsReportedAsInvalidDataToTheWaitingRequest()
+    {
+        var start = new ProcessStartInfo("powershell.exe")
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+        };
+        const string script = "$null = [Console]::ReadLine(); [Console]::WriteLine('{broken')";
+        foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script })
+            start.ArgumentList.Add(argument);
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var connection = AppServerConnection.Start(start);
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            connection.RequestAsync("config/read", new { }, deadline.Token));
+        Assert.Equal("Invalid JSON from Codex App Server.", error.Message);
+    }
+
+    [Fact]
     public async Task InstalledServerRejectsUnsignedProfileWhenSmokeTestIsEnabled()
     {
         var directory = Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_UNSIGNED_SMOKE_DIR");
