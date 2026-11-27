@@ -46,6 +46,7 @@ public sealed class DesktopEventsTests
                 VerifyOverlay();
                 VerifySessions();
                 VerifyCommandMode();
+                VerifyTerminalReplacement();
                 VerifyLongSession();
                 VerifyDiscussWith();
                 VerifyStreamingSession();
@@ -305,28 +306,51 @@ public sealed class DesktopEventsTests
                 PumpUntil(() => !view.IsRunning);
                 Pump(view.PendingSaves);
             }
-            line.RaiseEvent(new KeyEventArgs { Key = Key.Down, RoutedEvent = InputElement.KeyDownEvent });
+            void Press(Key key) => line.RaiseEvent(new KeyEventArgs { Key = key, RoutedEvent = InputElement.KeyDownEvent });
+            void ReleaseEnter() => window.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyUpEvent });
+            void Enter() { Press(Key.Enter); ReleaseEnter(); }
+            Press(Key.Down);
             Assert.Equal(0, list.SelectedIndex);
-            list.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyDownEvent });
+            Press(Key.Enter);
             Assert.Equal("/resume", line.Text);
             Assert.Equal(line.Text.Length, line.CaretIndex);
             Assert.Empty(store.ReadRoom(view.CurrentRoom!.Id).Messages);
 
-            void EnterInCommandField() => line.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyDownEvent });
-            EnterInCommandField();
+            Press(Key.Enter);
+            Assert.Empty(store.ReadRoom(view.CurrentRoom!.Id).Messages);
+            ReleaseEnter();
+            Enter();
             PumpUntil(() => !view.IsRunning);
             Pump(view.PendingSaves);
             Assert.Contains(list.Items.OfType<CommandChoice>(), item => item.Description == chat.Title);
             Run($"/resume {chat.Id}");
-            Run("/effort high");
+            Run("/effort");
+            Assert.Equal("/effort ", line.Text);
+            Press(Key.Down);
+            Press(Key.Down);
+            Press(Key.Down);
+            Press(Key.Down);
+            Press(Key.Down);
+            Press(Key.Up);
+            Assert.Equal("/effort high", Assert.IsType<CommandChoice>(list.SelectedItem).Command);
+            Press(Key.Enter);
+            Assert.Equal("/effort high", line.Text);
+            Press(Key.Enter);
+            Assert.Null(view.CurrentRoom!.ClaudeEffort);
+            ReleaseEnter();
+            Enter();
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
             Run("/model sonnet");
 
             line.Text = "/mc";
             PumpUntil(() => list.Items.Count == 1 && list.Items.OfType<CommandChoice>().First().Command == "/mcp");
-            EnterInCommandField();
+            Press(Key.Enter);
             Assert.Equal("/mcp", line.Text);
+            Press(Key.Enter);
             Assert.Empty(calls);
-            EnterInCommandField();
+            ReleaseEnter();
+            Enter();
             PumpUntil(() => !view.IsRunning);
             Pump(view.PendingSaves);
             Run("/mcp ; echo unsafe");
@@ -339,7 +363,7 @@ public sealed class DesktopEventsTests
             ClaudeCommands.AddTurnOptions(arguments, saved.ClaudeEffort, saved.ClaudeModel);
             Assert.Equal(["--effort", "high", "--model", "sonnet"], arguments);
             Assert.Equal(["mcp list"], calls);
-            Assert.Equal(5, saved.Messages.Count);
+            Assert.Equal(6, saved.Messages.Count);
             Assert.All(saved.Messages, msg => { Assert.NotNull(msg.Command); Assert.Equal(DiscussionMember.Boss, msg.To); });
             Assert.Equal("sample · ✓ Connected", saved.Messages[^1].Text);
             Assert.Equal(folder.FullName, saved.Messages[^1].Workspace);
@@ -361,6 +385,50 @@ public sealed class DesktopEventsTests
             Pump(view.PendingSaves);
         }
         finally { window.Close(); folder.Delete(recursive: true); }
+    }
+
+    private static void VerifyTerminalReplacement()
+    {
+        if (!OperatingSystem.IsWindows()) return;
+        var directory = Directory.CreateTempSubdirectory("trayvora-console-");
+        try
+        {
+            var first = new TerminalContext(Directory.CreateDirectory(Path.Combine(directory.FullName, "one")).FullName, "profile");
+            var second = new TerminalContext(Directory.CreateDirectory(Path.Combine(directory.FullName, "two")).FullName, "profile");
+            var starts = new List<TerminalContext>();
+            // Use a hidden process with a fixed lifetime to exercise replacement without an agent session.
+            var terminal = new TerminalPanel((_, context) =>
+            {
+                starts.Add(context);
+                var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
+                var start = new System.Diagnostics.ProcessStartInfo(shell) { WorkingDirectory = context.Workspace, CreateNoWindow = true };
+                foreach (var arg in new[] { "-NoProfile", "-NonInteractive", "-Command", "Start-Sleep -Seconds 30" }) start.ArgumentList.Add(arg);
+                return start;
+            });
+            try
+            {
+                terminal.Start(TerminalKind.Claude, first);
+                Assert.True(terminal.Running);
+                var buttons = terminal.GetLogicalDescendants().OfType<Button>().ToArray();
+                var keep = buttons.Single(b => Equals(b.Content, "Keep current console"));
+                var replace = buttons.Single(b => Equals(b.Content, "Replace console"));
+                terminal.Start(TerminalKind.Claude, second);
+                Assert.True(keep.IsEffectivelyVisible);
+                Assert.True(terminal.Running);
+                Assert.Equal([first], starts);
+                keep.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.False(keep.IsEffectivelyVisible);
+                Assert.True(terminal.Running);
+                Assert.Equal([first], starts);
+                terminal.Start(TerminalKind.Claude, second);
+                replace.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.False(replace.IsEffectivelyVisible);
+                Assert.True(terminal.Running);
+                Assert.Equal([first, second], starts);
+            }
+            finally { terminal.Stop(); }
+        }
+        finally { directory.Delete(recursive: true); }
     }
 
     private static void VerifySessions()

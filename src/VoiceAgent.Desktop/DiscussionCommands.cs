@@ -16,6 +16,8 @@ internal sealed partial class DiscussionWindow
     private readonly Button _runCommand = new() { Content = "Run command" };
     private IReadOnlyList<ClaudeChat> _resumeChoices = [];
     private CancellationTokenSource? _commandCancel;
+    private string? _suggestionsFor;
+    private bool _commandEnterDown;
     internal Func<string[], string, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
 
     private static string CommandWorkspace(DiscussionRoom? room) =>
@@ -65,31 +67,24 @@ internal sealed partial class DiscussionWindow
             UpdateComposer();
             if (enabled) _commandInput.Focus(); else _editor.Focus();
         };
-        _commandInput.TextChanged += (_, _) => SuggestCommands();
-        _commandInput.AddHandler(KeyDownEvent, async (_, e) =>
+        _commandInput.TextChanged += (_, _) => RefreshCommandSuggestions();
+        _commandInput.AddHandler(KeyDownEvent, CommandKeyDown, RoutingStrategies.Tunnel);
+        _commandChoices.AddHandler(KeyDownEvent, CommandKeyDown, RoutingStrategies.Tunnel);
+        AttachedToVisualTree += (_, _) =>
         {
-            if (e.Key == Key.Down && _commandChoices.IsVisible)
-            {
-                e.Handled = true;
-                _commandChoices.SelectedIndex = 0;
-                _commandChoices.Focus();
-            }
-            else if (e.Key == Key.Enter)
-            {
-                e.Handled = true;
-                SuggestCommands();
-                if (_commandChoices.Items.Count == 1 && _commandChoices.Items[0] is CommandChoice single)
-                    InsertCommand(single);
-                else
-                    await ExecuteCommandAsync(_commandInput.Text);
-            }
-        }, RoutingStrategies.Tunnel);
-        _commandChoices.AddHandler(KeyDownEvent, (_, e) =>
+            if (TopLevel.GetTopLevel(this) is not Window owner) return;
+            owner.AddHandler(KeyUpEvent, CommandKeyUp, RoutingStrategies.Tunnel, handledEventsToo: true);
+            owner.Deactivated += ResetCommandEnter;
+        };
+        DetachedFromVisualTree += (_, e) =>
         {
-            if (e.Key != Key.Enter || _commandChoices.SelectedItem is not CommandChoice choice) return;
-            e.Handled = true;
-            InsertCommand(choice);
-        }, RoutingStrategies.Tunnel);
+            if (e.RootVisual is Window owner)
+            {
+                owner.RemoveHandler(KeyUpEvent, CommandKeyUp);
+                owner.Deactivated -= ResetCommandEnter;
+            }
+            _commandEnterDown = false;
+        };
         _commandChoices.Tapped += (_, e) =>
         {
             if (e.Source is Control source && source.FindAncestorOfType<ListBoxItem>(includeSelf: true)?.Content is CommandChoice choice)
@@ -97,6 +92,43 @@ internal sealed partial class DiscussionWindow
         };
         _runCommand.Click += async (_, _) => await ExecuteCommandAsync(_commandInput.Text);
         return panel;
+    }
+
+    private void ResetCommandEnter(object? sender, EventArgs args) => _commandEnterDown = false;
+
+    private void CommandKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) _commandEnterDown = false;
+    }
+
+    private async void CommandKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key is not (Key.Up or Key.Down or Key.Enter)) return;
+        RefreshCommandSuggestions();
+        var count = _commandChoices.Items.Count;
+        if (e.Key is Key.Up or Key.Down)
+        {
+            if (count == 0) return;
+            e.Handled = true;
+            var current = _commandChoices.SelectedIndex;
+            var next = e.Key == Key.Down ? current + 1 : current < 0 ? count - 1 : current - 1;
+            _commandChoices.SelectedIndex = Math.Clamp(next, 0, count - 1);
+            _commandChoices.ScrollIntoView(_commandChoices.SelectedIndex);
+            return;
+        }
+
+        e.Handled = true;
+        if (_commandEnterDown) return;
+        _commandEnterDown = true;
+        var choice = _commandChoices.SelectedItem as CommandChoice
+            ?? (count == 1 ? _commandChoices.Items[0] as CommandChoice : null);
+        if (choice is not null) InsertCommand(choice);
+        else await ExecuteCommandAsync(_commandInput.Text);
+    }
+
+    private void RefreshCommandSuggestions()
+    {
+        if (_suggestionsFor != _commandInput.Text) SuggestCommands();
     }
 
     private void InsertCommand(CommandChoice choice)
@@ -111,7 +143,8 @@ internal sealed partial class DiscussionWindow
 
     private void SuggestCommands()
     {
-        var input = (_commandInput.Text ?? "").TrimStart();
+        _suggestionsFor = _commandInput.Text;
+        var input = (_suggestionsFor ?? "").TrimStart();
         IEnumerable<CommandChoice> choices = [];
         if (input.StartsWith('/'))
         {
@@ -132,6 +165,7 @@ internal sealed partial class DiscussionWindow
         }
         var rows = choices.Where(choice => !choice.Command.Equals(input.TrimEnd(), StringComparison.OrdinalIgnoreCase)).ToArray();
         _commandChoices.ItemsSource = rows;
+        _commandChoices.SelectedIndex = -1;
         _commandChoices.IsVisible = rows.Length > 0;
     }
 

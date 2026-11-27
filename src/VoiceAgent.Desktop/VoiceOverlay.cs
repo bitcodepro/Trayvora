@@ -728,7 +728,6 @@ internal sealed class VoiceOverlay : Window
         if (OperatingSystem.IsWindows()) ShowTerminal(TerminalKind.Claude, workspace);
     }
 
-    private (string Workspace, string Profile) _terminalContext;
     private Button? _terminalButton;
     private TerminalPanel? _terminal;
     private readonly Grid _shell = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,0,Auto") };
@@ -743,14 +742,12 @@ internal sealed class VoiceOverlay : Window
         if (workspace is not null && !Directory.Exists(workspace))
             throw new DirectoryNotFoundException($"The console workspace is unavailable: {workspace}");
         if (!Directory.Exists(folder)) folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var context = (Workspace: folder!, Profile: ClaudeProfile());
-        var contextChanged = _terminalContext != context;
-        _terminalContext = context;
+        var context = new TerminalContext(folder!, ClaudeProfile());
         Show();
         Activate();
         if (_terminal is null)
         {
-            _terminal = new TerminalPanel(which => TerminalStart(_terminalContext.Workspace, _terminalContext.Profile, which));
+            _terminal = new TerminalPanel((which, target) => TerminalStart(target.Workspace, target.Profile, which));
             _terminal.CloseRequested += HideTerminal;
             Grid.SetColumn(_terminal, 2);
             _shell.Children.Add(_terminal);
@@ -758,8 +755,7 @@ internal sealed class VoiceOverlay : Window
         _shell.ColumnDefinitions[2].Width = new GridLength(Math.Max(420, Bounds.Width * 0.45));
         _shell.ColumnDefinitions[2].MinWidth = 320;
         _terminal.IsVisible = _terminalSplitter.IsVisible = true;
-        if (contextChanged || !_terminal.IsRunning(kind)) _terminal.Start(kind);
-        else _terminal.FocusConsole();
+        _terminal.Start(kind, context);
     }
 
     private FilePreview? _fileView;

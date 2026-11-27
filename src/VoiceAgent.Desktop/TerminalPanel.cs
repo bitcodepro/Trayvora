@@ -11,6 +11,7 @@ namespace VoiceAgent.Desktop;
 
 /// <summary>What the built-in terminal starts.</summary>
 internal enum TerminalKind { Claude, Codex, PowerShell }
+internal sealed record TerminalContext(string Workspace, string Profile);
 
 /// <summary>
 /// A real Windows console (conhost with PowerShell) shown inside the Trayvora window, with Claude Code or Codex
@@ -19,7 +20,11 @@ internal enum TerminalKind { Claude, Codex, PowerShell }
 [SupportedOSPlatform("windows")]
 internal sealed class TerminalPanel : UserControl
 {
-    private readonly Func<TerminalKind, ProcessStartInfo> _start;
+    private readonly Func<TerminalKind, TerminalContext, ProcessStartInfo> _start;
+    private readonly TextBlock _replaceMessage = TrayvoraTheme.Hint("");
+    private readonly StackPanel _replacePrompt;
+    private (TerminalKind Kind, TerminalContext Context)? _pending;
+    private TerminalContext? _context;
     private readonly Border _host = new() { Background = Brush.Parse("#0C0C0C"), CornerRadius = new CornerRadius(10), ClipToBounds = true };
     private readonly TextBlock _status = new() { Foreground = TrayvoraTheme.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(14) };
     private readonly Dictionary<TerminalKind, Button> _chips = [];
@@ -28,7 +33,7 @@ internal sealed class TerminalPanel : UserControl
 
     public event Action? CloseRequested;
 
-    public TerminalPanel(Func<TerminalKind, ProcessStartInfo> start)
+    public TerminalPanel(Func<TerminalKind, TerminalContext, ProcessStartInfo> start)
     {
         _start = start;
         var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -41,7 +46,7 @@ internal sealed class TerminalPanel : UserControl
         {
             var chip = TrayvoraTheme.Chip(label);
             ToolTip.SetTip(chip, tip);
-            chip.Click += (_, _) => Start(kind);
+            chip.Click += (_, _) => { if (_context is { } context) Start(kind, context); };
             chips.Children.Add(chip);
             _chips[kind] = chip;
         }
@@ -51,7 +56,7 @@ internal sealed class TerminalPanel : UserControl
         TrayvoraTheme.Ghost(close);
         ToolTip.SetTip(restart, "Restart the terminal");
         ToolTip.SetTip(close, "Close the terminal");
-        restart.Click += (_, _) => Start(_kind);
+        restart.Click += (_, _) => { if (_context is { } context) Start(_kind, context, restart: true); };
         close.Click += (_, _) => CloseRequested?.Invoke();
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), ColumnSpacing = 6, Margin = new Thickness(0, 0, 0, 8) };
         var title = new TextBlock { Text = "Terminal", FontWeight = FontWeight.SemiBold, FontSize = 15, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 8, 0) };
@@ -61,10 +66,23 @@ internal sealed class TerminalPanel : UserControl
         header.Children.AddRange([title, chips, restart, close]);
         var hint = TrayvoraTheme.Hint("Click inside to type. In Claude Code, enter /mcp to select a server and reconnect. Press Esc to leave the menu.");
         hint.Margin = new Thickness(2, 6, 0, 0);
+        var keep = new Button { Content = "Keep current console" };
+        var replace = new Button { Content = "Replace console" };
+        TrayvoraTheme.StyleControls(keep);
+        TrayvoraTheme.DangerButton(replace);
+        keep.Click += (_, _) => { ClearReplacement(); FocusConsole(); };
+        replace.Click += (_, _) => { if (_pending is { } next) StartCore(next.Kind, next.Context); };
+        _replaceMessage.TextWrapping = TextWrapping.Wrap;
+        _replacePrompt = new StackPanel
+        {
+            IsVisible = false, Spacing = 6, Margin = new Thickness(0, 0, 0, 8),
+            Children = { _replaceMessage, new WrapPanel { ItemSpacing = 6, LineSpacing = 6, Children = { keep, replace } } },
+        };
         var dock = new DockPanel();
         DockPanel.SetDock(header, Dock.Top);
+        DockPanel.SetDock(_replacePrompt, Dock.Top);
         DockPanel.SetDock(hint, Dock.Bottom);
-        dock.Children.AddRange([header, hint, _host]);
+        dock.Children.AddRange([header, _replacePrompt, hint, _host]);
         _host.Child = _status;
         Content = new Border
         {
@@ -73,20 +91,47 @@ internal sealed class TerminalPanel : UserControl
         };
     }
 
-    public bool IsRunning(TerminalKind kind) => _kind == kind && _console?.Running == true;
+    public bool Running => _console?.Running == true;
 
     /// <summary>Gives the keyboard to the console (after the panel is shown or clicked).</summary>
     public void FocusConsole() => _console?.FocusConsole();
 
-    /// <summary>Starts (or restarts) the terminal with <paramref name="kind"/>.</summary>
-    public void Start(TerminalKind kind)
+    public void Start(TerminalKind kind, TerminalContext context, bool restart = false)
     {
-        _kind = kind;
-        foreach (var (key, chip) in _chips) TrayvoraTheme.SetSelected(chip, key == kind);
-        Stop();
+        if (!Running)
+        {
+            StartCore(kind, context);
+            return;
+        }
+
+        if (!restart && _kind == kind && _context == context)
+        {
+            ClearReplacement();
+            FocusConsole();
+            return;
+        }
+
+        _pending = (kind, context);
+        _replaceMessage.Text = $"{UiLanguage.T("Replacing the console will stop its running processes.")}\n{context.Workspace}";
+        _replacePrompt.IsVisible = true;
+    }
+
+    private void ClearReplacement()
+    {
+        _pending = null;
+        _replacePrompt.IsVisible = false;
+    }
+
+    private void StartCore(TerminalKind kind, TerminalContext context)
+    {
         try
         {
-            _console = new ConsoleHost(_start(kind));
+            var start = _start(kind, context);
+            Stop();
+            _context = context;
+            _kind = kind;
+            foreach (var (key, chip) in _chips) TrayvoraTheme.SetSelected(chip, key == kind);
+            _console = new ConsoleHost(start);
             _console.Exited += () => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
             {
                 if (_host.Child is ConsoleHost host && !host.Running)
@@ -101,13 +146,25 @@ internal sealed class TerminalPanel : UserControl
         }
         catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            _status.Text = "Could not start the terminal: " + error.Message;
-            _host.Child = _status;
+            var message = "Could not start the terminal: " + error.Message;
+            if (Running)
+            {
+                _replaceMessage.Text = message;
+                _replacePrompt.IsVisible = true;
+            }
+            else
+            {
+                _context = context;
+                _kind = kind;
+                _status.Text = message;
+                _host.Child = _status;
+            }
         }
     }
 
     public void Stop()
     {
+        ClearReplacement();
         _console?.Kill();
         _console = null;
         _host.Child = _status;
@@ -133,7 +190,8 @@ internal sealed partial class ConsoleHost : NativeControlHost
     {
         start.UseShellExecute = false;
         start.WindowStyle = ProcessWindowStyle.Hidden;
-        DisableQuickEdit();
+        if (Path.GetFileName(start.FileName).Equals("conhost.exe", StringComparison.OrdinalIgnoreCase))
+            DisableQuickEdit();
         _existing = Consoles().Select(item => item.Window).ToHashSet();
         _started = DateTime.Now.AddSeconds(-1);
         _process = Process.Start(start) ?? throw new InvalidOperationException("The console did not start.");
