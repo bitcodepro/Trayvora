@@ -454,7 +454,7 @@ public sealed partial class CodexSession(string dataDirectory)
         }
     }
 
-    internal static string FindExecutable()
+    public static string FindExecutable()
     {
         var configured = Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE");
         if (!string.IsNullOrWhiteSpace(configured) && Path.IsPathFullyQualified(configured) && File.Exists(configured)) return configured;

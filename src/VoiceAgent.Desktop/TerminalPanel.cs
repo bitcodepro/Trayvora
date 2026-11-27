@@ -11,7 +11,7 @@ namespace VoiceAgent.Desktop;
 
 /// <summary>What the built-in terminal starts.</summary>
 internal enum TerminalKind { Claude, Codex, PowerShell }
-internal sealed record TerminalContext(string Workspace, string Profile);
+internal sealed record TerminalContext(string Workspace, string Profile, string? CodexHome = null, bool CodexDesktop = false);
 
 /// <summary>
 /// A real Windows console (conhost with PowerShell) shown inside the Trayvora window, with Claude Code or Codex
@@ -65,7 +65,7 @@ internal sealed class TerminalPanel : UserControl
         Grid.SetColumn(restart, 2);
         Grid.SetColumn(close, 3);
         header.Children.AddRange([title, chips, restart, close]);
-        var hint = TrayvoraTheme.Hint("Click inside to type. In Claude Code, enter /mcp to select a server and reconnect. Press Esc to leave the menu.");
+        var hint = TrayvoraTheme.Hint("Click inside to type. Enter /mcp to inspect MCP servers, or press Esc to leave a menu.");
         hint.Margin = new Thickness(2, 6, 0, 0);
         var keep = new Button { Content = "Keep current console" };
         var replace = new Button { Content = "Replace console" };

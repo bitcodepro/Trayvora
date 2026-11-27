@@ -46,6 +46,7 @@ public sealed class DesktopEventsTests
                 VerifyOverlay();
                 VerifySessions();
                 VerifyCommandMode();
+                VerifyCodexCommandMode();
                 VerifyTerminalReplacement();
                 VerifyLongSession();
                 VerifyDiscussWith();
@@ -267,7 +268,11 @@ public sealed class DesktopEventsTests
             store.Save(legacy);
             var view = new DiscussionWindow(store, (_, text, _, _, _, _) => { sent.Add(text); return Task.FromResult<string?>("OK"); },
                 () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([chat]), () => null,
-                (_, _, _) => Task.FromResult<string?>(null), openTerminal: consoles.Add);
+                (_, _, _) => Task.FromResult<string?>(null), openTerminal: (kind, context) =>
+                {
+                    Assert.Equal(TerminalKind.Claude, kind);
+                    consoles.Add(context);
+                });
             view.CurrentClaudeProfile = () => activeProfile;
             view.RunClaudeCommand = (args, context, ct) =>
             {
@@ -291,7 +296,9 @@ public sealed class DesktopEventsTests
             var voice = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>()
                 .Single(b => Equals(b.Content, "Voice mode"));
             var switches = Assert.IsType<StackPanel>(mode.Parent);
-            Assert.Equal<Control>([voice, mode], switches.Children);
+            var codexMode = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(b => Equals(b.Content, "Command Codex"));
+            Assert.Equal("Command Claude", mode.Content);
+            Assert.Equal<Control>([voice, mode, codexMode], switches.Children);
             Assert.True(mode.IsEffectivelyVisible);
             Assert.True(voice.IsEffectivelyVisible);
 
@@ -408,6 +415,107 @@ public sealed class DesktopEventsTests
             PumpUntil(() => sent.Count == 1 && !view.IsRunning);
             Assert.Contains("/version", sent[0]);
             Pump(view.PendingSaves);
+        }
+        finally { window.Close(); folder.Delete(recursive: true); }
+    }
+
+    private static void VerifyCodexCommandMode()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-codex-commands-");
+        var window = new Window { Width = 900, Height = 650 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var workspace = Directory.CreateDirectory(Path.Combine(folder.FullName, "project")).FullName;
+            var firstProfile = Path.Combine(folder.FullName, "first");
+            var secondProfile = Path.Combine(folder.FullName, "second");
+            var profile = firstProfile;
+            var claudeProfile = Path.Combine(folder.FullName, "claude");
+            var calls = new List<(string[] Args, TerminalContext Context)>();
+            var consoles = new List<(TerminalKind Kind, TerminalContext Context)>();
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new InvalidOperationException("Command submitted as a chat message."),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null,
+                openTerminal: (kind, context) => consoles.Add((kind, context)));
+            view.CurrentAgentProfile = (_, agent) => agent == DiscussionMember.Codex ? profile : claudeProfile;
+            view.CurrentClaudeProfile = () => claudeProfile;
+            view.RunClaudeCommand = (_, _, _) => throw new InvalidOperationException("Codex command routed to Claude.");
+            view.RunCodexCommand = (args, context, _) =>
+            {
+                calls.Add((args, context));
+                return Task.FromResult((0, """[{"name":"test","enabled":true,"transport":{"args":["private-value"]}},{"name":"other","enabled":false}]"""));
+            };
+
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.IsEnabled);
+            var controls = view.GetLogicalDescendants().ToArray();
+            var codex = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(b => Equals(b.Content, "Command Codex"));
+            var claude = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(b => Equals(b.Content, "Command Claude"));
+            var editor = controls.OfType<TextBox>().Single(b => b.PlaceholderText?.StartsWith("Message Codex") == true);
+            var line = controls.OfType<TextBox>().Single(b => b.PlaceholderText == "Type / for Claude CLI commands");
+            var list = controls.OfType<ListBox>().Single(b => AutomationProperties.GetName(b) == "Claude command suggestions");
+            var run = controls.OfType<Button>().Single(b => Equals(b.Content, "Run command"));
+
+            editor.Text = "Keep this draft";
+            codex.IsChecked = true;
+            var room = Assert.IsType<DiscussionRoom>(view.CurrentRoom);
+            room.CodexDesktop = true;
+            room.CodexWorkspace = workspace;
+            Assert.True(codex.IsChecked == true && claude.IsChecked != true);
+            Assert.True(line.IsEffectivelyVisible);
+            Assert.False(editor.IsEffectivelyVisible);
+            Assert.Equal("Type / for Codex CLI commands", line.PlaceholderText);
+            line.Text = "/";
+            PumpUntil(() => list.Items.Count > 0);
+            Assert.Equal(CodexCommands.Menu.Select(item => item.Command), list.Items.OfType<CommandChoice>().Select(item => item.Command));
+            line.Text = "/mcp unexpected argument";
+            run.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Empty(calls);
+            line.Text = "/mc";
+            void Press(Key key) => line.RaiseEvent(new KeyEventArgs { Key = key, RoutedEvent = InputElement.KeyDownEvent });
+            void ReleaseEnter() => window.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyUpEvent });
+            Press(Key.Down);
+            Press(Key.Enter);
+            Assert.Equal("/mcp", line.Text);
+            Press(Key.Enter);
+            Assert.Empty(calls);
+            ReleaseEnter();
+            Press(Key.Enter);
+            ReleaseEnter();
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
+            var invocation = Assert.Single(calls);
+            Assert.Equal(["mcp", "list", "--json"], invocation.Args);
+            Assert.Equal(new TerminalContext(workspace, "", firstProfile, true), invocation.Context);
+
+            var saved = store.ReadRoom(room.Id);
+            var outcome = Assert.Single(saved.Messages);
+            Assert.Equal(DiscussionMember.Codex, outcome.Sender);
+            Assert.Equal(DiscussionMember.Boss, outcome.To);
+            Assert.Equal("test · Enabled\nother · Disabled", outcome.Text);
+            Assert.Equal(firstProfile, outcome.McpProfile);
+            Assert.Contains("Codex CLI → You · /mcp", DiscussionWindow.ToMarkdown(saved));
+            var console = controls.OfType<Button>().Single(b => Equals(b.Content, "Codex console"));
+            console.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal((TerminalKind.Codex, new TerminalContext(workspace, claudeProfile, firstProfile, true)), Assert.Single(consoles));
+
+            var manage = view.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "Manage MCP in console"));
+            profile = secondProfile;
+            manage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Single(consoles);
+            Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text == CodexCommands.RefreshMcp);
+            profile = firstProfile;
+            room.CodexWorkspace = folder.FullName;
+            manage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal(consoles[0], consoles[1]);
+
+            claude.IsChecked = true;
+            Assert.True(claude.IsChecked == true && codex.IsChecked != true);
+            Assert.Equal("Type / for Claude CLI commands", line.PlaceholderText);
+            claude.IsChecked = false;
+            Assert.True(editor.IsEffectivelyVisible);
+            Assert.Equal("Keep this draft", editor.Text);
         }
         finally { window.Close(); folder.Delete(recursive: true); }
     }
