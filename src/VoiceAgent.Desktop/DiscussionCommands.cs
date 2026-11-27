@@ -18,6 +18,16 @@ internal sealed partial class DiscussionWindow
     private CancellationTokenSource? _commandCancel;
     internal Func<string[], string, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
 
+    private static string CommandWorkspace(DiscussionRoom? room) =>
+        room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace ?? AppContext.BaseDirectory;
+
+    private void OpenCommandConsole(string? workspace = null)
+    {
+        try { openTerminal?.Invoke(workspace ?? CommandWorkspace(_room)); }
+        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
+        { _status.Text = "Could not open the terminal: " + error.Message; }
+    }
+
     private Control BuildCommandInput(Control messages)
     {
         TrayvoraTheme.StyleControls(_commandMode, _commandInput);
@@ -29,6 +39,14 @@ internal sealed partial class DiscussionWindow
         Grid.SetColumn(_runCommand, 1);
         line.Children.AddRange([_commandInput, _runCommand]);
         var panel = new StackPanel { IsVisible = false, Spacing = 6, Children = { _commandChoices, line } };
+        if (openTerminal is not null)
+        {
+            var console = new Button { Content = "Claude console", HorizontalAlignment = HorizontalAlignment.Left };
+            TrayvoraTheme.Ghost(console);
+            ToolTip.SetTip(console, "Open interactive Claude Code in this session’s workspace.");
+            console.Click += (_, _) => OpenCommandConsole();
+            panel.Children.Add(console);
+        }
         _commandMode.IsCheckedChanged += (_, _) =>
         {
             var enabled = _commandMode.IsChecked == true;
@@ -140,6 +158,7 @@ internal sealed partial class DiscussionWindow
         UpdateComposer();
         _status.Text = $"Running {name}…";
         string nextInput = "/";
+        var workspace = CommandWorkspace(room);
         try
         {
             string result;
@@ -181,7 +200,6 @@ internal sealed partial class DiscussionWindow
             else
             {
                 var args = ClaudeCommands.Arguments(name) ?? throw new InvalidOperationException("Unknown command.");
-                var workspace = room.Claude?.Workspace ?? room.NewCodexFolder ?? room.CodexWorkspace ?? AppContext.BaseDirectory;
                 var runner = RunClaudeCommand ?? throw new IOException("Claude CLI is unavailable.");
                 var (code, output) = await runner(args, workspace, operation.Token);
                 operation.Token.ThrowIfCancellationRequested();
@@ -189,7 +207,7 @@ internal sealed partial class DiscussionWindow
             }
             var label = arg.Length == 0 || name == "/resume" && !Guid.TryParse(arg, out _) ? name : $"{name} {arg}";
             _status.Text = "";
-            await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, result, DateTimeOffset.Now, Command: label));
+            await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, result, DateTimeOffset.Now, Workspace: name == "/mcp" ? workspace : null, Command: label));
             if (!operation.IsCancellationRequested)
             {
                 _commandInput.Text = nextInput;

@@ -33,7 +33,7 @@ internal sealed partial class DiscussionWindow(
     Func<ClaudeChat?> defaultClaude,
     Func<CancellationToken, CancellationToken, IProgress<double>, Task<string?>>? dictate = null,
     Func<int>? discussRounds = null,
-    Action<DiscussionRoom?>? openTerminal = null) : UserControl
+    Action<string>? openTerminal = null) : UserControl
 {
     private readonly Button _newCodex = new() { Content = "New…" };
     private readonly Button _newClaude = new() { Content = "New…" };
@@ -216,7 +216,7 @@ internal sealed partial class DiscussionWindow(
         TrayvoraTheme.StyleControls(_claudeRights, _newCodex, _newClaude, _terminal);
         ToolTip.SetTip(_newCodex, "Create a new Codex Desktop chat in the same place Codex puts its own new chats, so it shows up in Codex Desktop after your first message. Right-click to choose a project folder instead.");
         ToolTip.SetTip(_newClaude, "Create a new Claude chat. It uses the folder of this session's new Codex chat (or a new one) and is saved by Claude Code with your first message. Right-click to choose a project folder instead.");
-        ToolTip.SetTip(_terminal, "Open PowerShell in this session's folder with claude and codex ready, to sign in, add MCP servers or change settings.");
+        ToolTip.SetTip(_terminal, "Open interactive Claude Code in this session’s workspace.");
         Avalonia.Automation.AutomationProperties.SetName(_newCodex, "New Codex Desktop chat");
         Avalonia.Automation.AutomationProperties.SetName(_newClaude, "New Claude chat");
         Avalonia.Automation.AutomationProperties.SetName(_terminal, "Open terminal");
@@ -342,12 +342,7 @@ internal sealed partial class DiscussionWindow(
         _newClaude.Click += async (_, _) => await NewClaudeAsync(false);
         _newCodex.ContextFlyout = ChooseMenu(NewCodexAsync);
         _newClaude.ContextFlyout = ChooseMenu(NewClaudeAsync);
-        _terminal.Click += (_, _) =>
-        {
-            try { openTerminal?.Invoke(_room); }
-            catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
-            { _status.Text = "Could not open the terminal: " + error.Message; }
-        };
+        _terminal.Click += (_, _) => OpenCommandConsole();
         _loadClaude.Click += async (_, _) => await LoadClaudeAsync();
         _editor.TextChanged += (_, _) => UpdateComposer();
         _editor.AddHandler(KeyDownEvent, async (_, args) =>
@@ -1885,6 +1880,14 @@ internal sealed partial class DiscussionWindow(
                 TrayvoraTheme.Hint($"Claude CLI → You   ·   {command}"),
                 new SelectableTextBlock { Text = message.Text, TextWrapping = TextWrapping.Wrap }
             } };
+            if (command == "/mcp" && openTerminal is not null)
+            {
+                var manage = new Button { Content = "Manage MCP in console" };
+                TrayvoraTheme.Ghost(manage);
+                ToolTip.SetTip(manage, "In Claude Code, type /mcp, choose a server and select Reconnect.");
+                manage.Click += (_, _) => OpenCommandConsole(message.Workspace);
+                result.Children.Add(manage);
+            }
             Place(message, result, scroll, insertAt);
             return;
         }

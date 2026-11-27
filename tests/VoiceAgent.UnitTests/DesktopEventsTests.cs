@@ -254,9 +254,10 @@ public sealed class DesktopEventsTests
             var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Review project");
             var calls = new List<string>();
             var sent = new List<string>();
+            var consoles = new List<string>();
             var view = new DiscussionWindow(store, (_, text, _, _, _, _) => { sent.Add(text); return Task.FromResult<string?>("OK"); },
                 () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([chat]), () => null,
-                (_, _, _) => Task.FromResult<string?>(null));
+                (_, _, _) => Task.FromResult<string?>(null), openTerminal: consoles.Add);
             view.RunClaudeCommand = (args, workspace, ct) =>
             {
                 Assert.Equal(folder.FullName, workspace);
@@ -290,6 +291,11 @@ public sealed class DesktopEventsTests
             Assert.False(voice.IsEnabled);
             Assert.True(line.IsEffectivelyVisible);
             Assert.False(editor.IsEffectivelyVisible);
+            var console = controls.OfType<Button>().Single(b => Equals(b.Content, "Claude console"));
+            Assert.True(console.IsEffectivelyVisible);
+            console.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal([AppContext.BaseDirectory], consoles);
+            Assert.Empty(sent);
             line.Text = "/res";
             PumpUntil(() => list.Items.OfType<CommandChoice>().SingleOrDefault()?.Command == "/resume");
             void Run(string command)
@@ -336,6 +342,12 @@ public sealed class DesktopEventsTests
             Assert.Equal(5, saved.Messages.Count);
             Assert.All(saved.Messages, msg => { Assert.NotNull(msg.Command); Assert.Equal(DiscussionMember.Boss, msg.To); });
             Assert.Equal("sample · ✓ Connected", saved.Messages[^1].Text);
+            Assert.Equal(folder.FullName, saved.Messages[^1].Workspace);
+            var manage = view.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "Manage MCP in console"));
+            view.CurrentRoom!.Claude = new ClaudeChat(Guid.NewGuid(), Path.Combine(folder.FullName, "other"), "Other project");
+            manage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Equal([AppContext.BaseDirectory, folder.FullName], consoles);
+            Assert.Equal(["mcp list"], calls);
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert.Empty(sent);
             mode.IsChecked = false;

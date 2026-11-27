@@ -59,7 +59,7 @@ internal sealed class TerminalPanel : UserControl
         Grid.SetColumn(restart, 2);
         Grid.SetColumn(close, 3);
         header.Children.AddRange([title, chips, restart, close]);
-        var hint = TrayvoraTheme.Hint("Click inside to type. Claude: /login, /model, /mcp, /config · Codex: /model, /mcp · type exit to close.");
+        var hint = TrayvoraTheme.Hint("Click inside to type. In Claude Code, enter /mcp to select a server and reconnect. Press Esc to leave the menu.");
         hint.Margin = new Thickness(2, 6, 0, 0);
         var dock = new DockPanel();
         DockPanel.SetDock(header, Dock.Top);
@@ -73,7 +73,7 @@ internal sealed class TerminalPanel : UserControl
         };
     }
 
-    public bool Running => _console?.Running == true;
+    public bool IsRunning(TerminalKind kind) => _kind == kind && _console?.Running == true;
 
     /// <summary>Gives the keyboard to the console (after the panel is shown or clicked).</summary>
     public void FocusConsole() => _console?.FocusConsole();
