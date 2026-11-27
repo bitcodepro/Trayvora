@@ -1,12 +1,20 @@
 using System.Text.Json;
+using System.Text.Json.Serialization;
 
 namespace VoiceAgent.Desktop;
+
+[Flags]
+internal enum DeliveryRecipients { None = 0, Codex = 1, Claude = 2 }
 
 /// <param name="Note">Something the reader should know about the reply, such as tools the agent was not allowed to use.</param>
 /// <param name="Interrupted">The agent was stopped or failed before it finished; Text is what it had written.</param>
 internal sealed record DiscussionMessage(DiscussionMember Sender, DiscussionMember? To, string Text, DateTimeOffset Time, DiscussionMember? ForwardedFrom = null, bool Failed = false, DiscussionMember? RelayTo = null,
     DiscussionMember? DiscussWith = null, bool Final = false, string? Note = null, bool Interrupted = false, string? Workspace = null, Guid? ThreadId = null, bool DesktopThread = false, Guid? DeliveryId = null, string? DeliveryProfile = null, string? Command = null,
-    [property: System.Text.Json.Serialization.JsonIgnore(Condition = System.Text.Json.Serialization.JsonIgnoreCondition.WhenWritingNull)] string? McpProfile = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? McpProfile = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients PendingFor = DeliveryRecipients.None,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients NotSentTo = DeliveryRecipients.None,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients UnconfirmedFor = DeliveryRecipients.None,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkLog = null);
 
 /// <summary>A "discuss with …" exchange: the lead works with the partner and reports the decision to Boss.</summary>
 internal sealed record DiscussionPlan(DiscussionMember Lead, DiscussionMember Partner, int ExchangesLeft);

@@ -79,18 +79,18 @@ public sealed class DesktopChatClient(string scratchDirectory)
     /// <param name="answer">Receives the reply written so far while the turn runs.</param>
     /// <param name="wait">How long to wait for the reply before returning null (the turn stays queued in Codex Desktop).</param>
     public async Task<DesktopTurn?> SubmitAsync(string profile, Guid chat, string text,
-        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null, Guid? delivery = null)
+        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null, Guid? delivery = null, Action? onAccepted = null)
     {
         if (chat == Guid.Empty || string.IsNullOrWhiteSpace(text) || text.Length > 16000)
             throw new ArgumentException("Select a chat and enter up to 16,000 characters.");
         using var slot = await AgentTurnQueue.EnterAsync(profile, chat, ct).ConfigureAwait(false);
         await using var server = Connect(profile);
         await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
-        return await SubmitAsync(server, chat, text, progress, ct, answer, wait, delivery).ConfigureAwait(false);
+        return await SubmitAsync(server, chat, text, progress, ct, answer, wait, delivery, onAccepted).ConfigureAwait(false);
     }
 
     internal static async Task<DesktopTurn?> SubmitAsync(ICodexConnection server, Guid chat, string text,
-        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null, Guid? delivery = null)
+        IProgress<string> progress, CancellationToken ct, IProgress<string>? answer = null, TimeSpan? wait = null, Guid? delivery = null, Action? onAccepted = null)
     {
         var messageId = (delivery ?? Guid.NewGuid()).ToString();
         ct.ThrowIfCancellationRequested();
@@ -102,6 +102,7 @@ public sealed class DesktopChatClient(string scratchDirectory)
         }, ct).ConfigureAwait(false);
         if (ReadString(queued.GetProperty("queuedSubmission"), "clientUserMessageId") != messageId)
             throw new InvalidDataException("Codex did not acknowledge the same message ID.");
+        onAccepted?.Invoke();
 
         progress.Report("Queued in Codex. Waiting for this message's reply…");
         var deadline = Stopwatch.StartNew();
@@ -160,7 +161,7 @@ public sealed class DesktopChatClient(string scratchDirectory)
     /// </summary>
     /// <returns>The new chat, the turn status and the reply.</returns>
     public async Task<(DesktopChat Chat, string Status, string Answer)> StartChatAsync(string profile, string workspace, string title, string text,
-        IProgress<string> progress, IProgress<string> delta, CancellationToken ct)
+        IProgress<string> progress, IProgress<string> delta, CancellationToken ct, Action? onAccepted = null)
     {
         if (!Directory.Exists(workspace)) throw new IOException("The folder for the new Codex chat does not exist.");
         if (string.IsNullOrWhiteSpace(text) || text.Length > 16000) throw new ArgumentException("Enter up to 16,000 characters.");
@@ -178,7 +179,9 @@ public sealed class DesktopChatClient(string scratchDirectory)
         {
             threadId, input = new[] { new { type = "text", text, text_elements = Array.Empty<object>() } },
         }, ct).ConfigureAwait(false);
-        var turnId = turn.GetProperty("turn").GetProperty("id").GetString();
+        var turnId = turn.GetProperty("turn").GetProperty("id").GetString()
+            ?? throw new InvalidDataException("Codex Desktop did not report the turn ID.");
+        onAccepted?.Invoke();
         progress.Report("Codex is working on it…");
         var answer = new System.Text.StringBuilder();
         var chat = new DesktopChat(id, title, workspace);

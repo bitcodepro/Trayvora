@@ -31,7 +31,7 @@ public sealed partial class CodexSession(string dataDirectory)
     private readonly SemaphoreSlim _turn = new(1);
     private int _queued;
 
-    public async Task<CodexTurnStatus> RunAsync(string text, IProgress<string> output, CancellationToken cancel, Action<IReadOnlyList<ToolActivity>>? reportTools = null, CancellationToken emergencyStop = default, bool useRevqora = false, Guid chatId = default, string? localResults = null, IProgress<string>? steps = null, IReadOnlyList<string>? attachments = null)
+    public async Task<CodexTurnStatus> RunAsync(string text, IProgress<string> output, CancellationToken cancel, Action<IReadOnlyList<ToolActivity>>? reportTools = null, CancellationToken emergencyStop = default, bool useRevqora = false, Guid chatId = default, string? localResults = null, IProgress<string>? steps = null, IReadOnlyList<string>? attachments = null, Action? onAccepted = null)
     {
         if (string.IsNullOrWhiteSpace(text) || text.Length > 16000)
         {
@@ -55,7 +55,7 @@ public sealed partial class CodexSession(string dataDirectory)
                 var file = Path.Combine(home, ThreadFileName(chatId));
 
                 using var emergency = emergencyStop.Register(connection.Abort);
-                return await RunTurnAsync(connection, workspace, file, text, output, cancel, reportTools, revqora, localResults, steps, attachments).ConfigureAwait(false);
+                return await RunTurnAsync(connection, workspace, file, text, output, cancel, reportTools, revqora, localResults, steps, attachments, onAccepted).ConfigureAwait(false);
             }
             finally
             {
@@ -154,7 +154,7 @@ public sealed partial class CodexSession(string dataDirectory)
     }
 
     internal static async Task<CodexTurnStatus> RunTurnAsync(ICodexConnection connection, string workspace,
-        string threadFile, string text, IProgress<string> output, CancellationToken cancel, Action<IReadOnlyList<ToolActivity>>? reportTools = null, string? revqora = null, string? localResults = null, IProgress<string>? steps = null, IReadOnlyList<string>? attachments = null)
+        string threadFile, string text, IProgress<string> output, CancellationToken cancel, Action<IReadOnlyList<ToolActivity>>? reportTools = null, string? revqora = null, string? localResults = null, IProgress<string>? steps = null, IReadOnlyList<string>? attachments = null, Action? onAccepted = null)
     {
         // Limits only starting the session and the turn. A running turn has no time limit: it ends when Codex
         // finishes or when the user cancels (Pause, Cancel, Stop everything).
@@ -240,6 +240,7 @@ public sealed partial class CodexSession(string dataDirectory)
             }, sessionDeadline.Token).ConfigureAwait(false);
             var turnId = started.GetProperty("turn").GetProperty("id").GetString()
                 ?? throw new InvalidDataException("Codex did not report the turn ID.");
+            onAccepted?.Invoke();
 
             using var stopReader = new CancellationTokenSource();
             using var signal = new CancellationTokenRegistrationScope(cancel);

@@ -677,7 +677,7 @@ internal sealed class VoiceOverlay : Window
                 {
                     result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
                         steps: new ReplyStream.Reporter(stream.Activity),
-                        attachments: files);
+                        attachments: files, onAccepted: stream.ConfirmReceipt);
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
                 {
@@ -700,6 +700,8 @@ internal sealed class VoiceOverlay : Window
             DictateAsync,
             () => new DiscussionSettings(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings")).Rounds,
             OpenTerminal);
+            _discussion.CurrentAgentProfile = (room, agent) => agent == DiscussionMember.Claude
+                ? ClaudeProfile() : room.CodexDesktop ? _sharedChat?.Profile : null;
             _discussion.CurrentClaudeProfile = ClaudeProfile;
             _discussion.RunClaudeCommand = (args, context, ct) => CliSession.RunAsync(
                 ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(context.Profile), ct, context.Workspace);

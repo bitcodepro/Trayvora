@@ -279,6 +279,7 @@ internal static class ClaudeChats
             start.ArgumentList.Add("--permission-prompt-tool");
             start.ArgumentList.Add("stdio");
         }
+        stream?.Activity("Starting Claude Code", record: false);
         using var process = Process.Start(start) ?? throw new IOException("Could not start Claude Code.");
         var parser = new ClaudeStreamParser(stream);
         var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
@@ -319,6 +320,7 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
     private readonly System.Text.StringBuilder _other = new();
     private bool _partial;
     private string? _messageId;
+    private readonly Dictionary<string, string> _tools = new(StringComparer.Ordinal);
 
     /// <summary>The final answer, once the result event has arrived.</summary>
     public string? Result { get; private set; }
@@ -354,21 +356,25 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
         var main = !root.TryGetProperty("parent_tool_use_id", out var parent) || parent.ValueKind == JsonValueKind.Null;
         switch (Text(root, "type"))
         {
-            case "stream_event" when main && root.TryGetProperty("event", out var item) && item.ValueKind == JsonValueKind.Object:
-                _partial = true;
-                Event(item);
+            case "stream_event" when root.TryGetProperty("event", out var item) && item.ValueKind == JsonValueKind.Object:
+                if (main) _partial = true;
+                Event(item, main);
                 break;
-            case "assistant" when main && root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object:
-                Message(message);
+            case "assistant" when root.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.Object:
+                var agentReply = main && (!root.TryGetProperty("error", out var error) || error.ValueKind == JsonValueKind.Null);
+                if (agentReply) stream?.ConfirmReceipt();
+                Message(message, main, agentReply);
                 break;
-            case "system" when Text(root, "subtype") == "init" && root.TryGetProperty("mcp_servers", out var servers) && servers.ValueKind == JsonValueKind.Array:
-                foreach (var server in servers.EnumerateArray())
-                {
-                    if (server.ValueKind != JsonValueKind.Object || Text(server, "name") is not { } name) continue;
-                    var status = Text(server, "status");
-                    stream?.Activity($"MCP · {name} · {status}");
-                    if (status is "failed" or "needs-auth") stream?.Note($"MCP · {name} · {status}");
-                }
+            case "user" when root.TryGetProperty("message", out var user) && user.ValueKind == JsonValueKind.Object:
+                if (user.TryGetProperty("content", out var content) && content.ValueKind == JsonValueKind.Array)
+                    foreach (var block in content.EnumerateArray())
+                        if (block.ValueKind == JsonValueKind.Object && Text(block, "type") == "tool_result") CompleteTool(block);
+                break;
+            case "tool_progress":
+                ToolProgress(root);
+                break;
+            case "system":
+                SystemEvent(root);
                 break;
             case "result":
                 Result = Text(root, "result");
@@ -379,34 +385,30 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
         }
     }
 
-    private void Event(JsonElement item)
+    private void Event(JsonElement item, bool main)
     {
         switch (Text(item, "type"))
         {
-            case "message_start":
+            case "message_start" when main:
+                stream?.ConfirmReceipt();
                 stream?.Restart();
-                stream?.Activity(null);
+                stream?.Activity(null, record: false);
                 break;
             case "content_block_start" when item.TryGetProperty("content_block", out var block) && block.ValueKind == JsonValueKind.Object:
-                stream?.Activity(Text(block, "type") switch
-                {
-                    "tool_use" or "server_tool_use" => ToolLabel(Text(block, "name"), default),
-                    "thinking" or "redacted_thinking" => "Thinking",
-                    _ => null,
-                });
+                ObserveBlock(block, main);
                 break;
-            case "content_block_delta" when item.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object
+            case "content_block_delta" when main && item.TryGetProperty("delta", out var delta) && delta.ValueKind == JsonValueKind.Object
                 && Text(delta, "type") == "text_delta":
+                stream?.Activity(null, record: false);
                 stream?.Append(Text(delta, "text"));
                 break;
         }
     }
 
-    private void Message(JsonElement message)
+    private void Message(JsonElement message, bool main, bool agentReply)
     {
         if (!message.TryGetProperty("content", out var content) || content.ValueKind != JsonValueKind.Array) return;
-        // Without partial events (older Claude Code) the text arrives here, one finished block at a time.
-        if (!_partial && Text(message, "id") is var id && id != _messageId)
+        if (main && !_partial && Text(message, "id") is var id && id != _messageId)
         {
             _messageId = id;
             stream?.Restart();
@@ -414,17 +416,101 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
         foreach (var block in content.EnumerateArray())
         {
             if (block.ValueKind != JsonValueKind.Object) continue;
-            switch (Text(block, "type"))
-            {
-                case "text" when !_partial:
-                    stream?.Append(Text(block, "text"));
-                    break;
-                case "tool_use" or "server_tool_use":
-                    stream?.Activity(ToolLabel(Text(block, "name"), block.TryGetProperty("input", out var input) ? input : default));
-                    break;
-            }
+            if (main && !_partial && Text(block, "type") == "text") stream?.Append(Text(block, "text"), confirmReceipt: agentReply);
+            else ObserveBlock(block, main);
         }
     }
+
+    private void ObserveBlock(JsonElement block, bool main)
+    {
+        var type = Text(block, "type");
+        if (type is "tool_use" or "server_tool_use")
+        {
+            var label = ToolLabel(Text(block, "name"), block.TryGetProperty("input", out var input) ? input : default);
+            if (Identifier(Text(block, "id")) is { } id)
+            {
+                if (_tools.TryGetValue(id, out var previous) && (previous == label || previous.StartsWith(label + " ·", StringComparison.Ordinal))) return;
+                if (_tools.Count >= 512) _tools.Remove(_tools.Keys.First());
+                _tools[id] = label;
+            }
+            stream?.Activity(label);
+        }
+        else if (type is "thinking" or "redacted_thinking")
+        {
+            if (main) stream?.Activity("Thinking", record: false);
+        }
+        else if (type?.EndsWith("_tool_result", StringComparison.Ordinal) == true) CompleteTool(block);
+        else if (main && type == "text") stream?.Activity(null, record: false);
+    }
+
+    private void ToolProgress(JsonElement item)
+    {
+        if (Identifier(Text(item, "tool_name")) is not { } name) return;
+        var label = name;
+        if (Identifier(Text(item, "tool_use_id")) is { } id)
+        {
+            if (!_tools.TryGetValue(id, out var saved))
+            {
+                if (_tools.Count >= 512) _tools.Remove(_tools.Keys.First());
+                _tools[id] = label;
+                stream?.RecordStep(label);
+            }
+            else label = saved;
+        }
+        var elapsed = item.TryGetProperty("elapsed_time_seconds", out var time) && time.ValueKind == JsonValueKind.Number
+            && time.TryGetDouble(out var seconds) && seconds is >= 0 and < 31536000 ? $" · {(int)seconds} s" : "";
+        stream?.Activity($"Running · {label}{elapsed}", record: false);
+    }
+
+    private void CompleteTool(JsonElement result)
+    {
+        if (Identifier(Text(result, "tool_use_id")) is not { } id || !_tools.Remove(id, out var label)) return;
+        var failed = result.TryGetProperty("is_error", out var flag) && flag.ValueKind == JsonValueKind.True;
+        stream?.RecordStep($"{(failed ? "Failed" : "Completed")} · {label}");
+        stream?.Activity(_tools.Count == 0 ? "Waiting for Claude" : _tools.Values.Last(), record: false);
+    }
+
+    private void SystemEvent(JsonElement item)
+    {
+        switch (Text(item, "subtype"))
+        {
+            case "init":
+                if (item.TryGetProperty("mcp_servers", out var servers) && servers.ValueKind == JsonValueKind.Array)
+                    foreach (var server in servers.EnumerateArray())
+                    {
+                        if (server.ValueKind != JsonValueKind.Object || Identifier(Text(server, "name")) is not { } name) continue;
+                        var status = Identifier(Text(server, "status")) ?? "unknown";
+                        stream?.RecordStep($"MCP · {name} · {status}");
+                        if (status is "failed" or "needs-auth") stream?.Note($"MCP · {name} · {status}");
+                    }
+                stream?.Activity("Waiting for Claude", record: false);
+                break;
+            case "status" when Text(item, "status") == "compacting":
+                stream?.Activity("Compacting the chat context");
+                break;
+            case "compact_boundary":
+                stream?.RecordStep("Chat context compacted");
+                stream?.Activity("Waiting for Claude", record: false);
+                break;
+            case "api_retry":
+                stream?.Activity("Retrying the Claude API");
+                break;
+            case "task_started":
+                stream?.Activity("Background task started");
+                break;
+            case "task_progress":
+                var last = Identifier(Text(item, "last_tool_name"));
+                stream?.Activity(last is null ? "Background task running" : $"Background task running · {last}", record: false);
+                break;
+            case "task_notification" when Text(item, "status") is "completed" or "failed" or "stopped":
+                stream?.RecordStep($"Background task · {Text(item, "status")}");
+                stream?.Activity("Waiting for Claude", record: false);
+                break;
+        }
+    }
+
+    internal void PermissionStatus(string name, string status) =>
+        stream?.Activity($"{status} · {Identifier(name) ?? "MCP tool"}");
 
     private void Denials(JsonElement result)
     {
@@ -436,18 +522,17 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
             stream.Note($"Claude Code was not allowed to use: {string.Join(", ", tools)}. Allow it in Claude Code for that chat if the task needs it.");
     }
 
-    /// <summary>"Read · Client.cs": the tool and, when it is safe to show, the file or search it works on.</summary>
+    /// <summary>Names structured file tools use in the log. Free-text arguments and tool output are excluded.</summary>
     internal static string ToolLabel(string? name, JsonElement input)
     {
         var tool = Identifier(name) ?? "Tool";
-        if (input.ValueKind != JsonValueKind.Object) return tool;
-        string? detail = null;
-        foreach (var key in new[] { "file_path", "notebook_path", "path" })
-            if (detail is null && Text(input, key) is { Length: > 0 } file) detail = Path.GetFileName(file.TrimEnd('/', '\\'));
-        foreach (var key in new[] { "pattern", "description", "query" })
-            if (detail is null && Text(input, key) is { Length: > 0 } value) detail = value;
-        if (string.IsNullOrWhiteSpace(detail)) return tool;
-        detail = detail.ReplaceLineEndings(" ").Trim();
+        if (input.ValueKind != JsonValueKind.Object || tool is not ("Read" or "Edit" or "Write" or "NotebookEdit" or "Glob" or "Grep"))
+            return tool;
+        var path = Text(input, "file_path") ?? Text(input, "notebook_path") ?? Text(input, "path");
+        if (string.IsNullOrWhiteSpace(path)) return tool;
+        var file = Path.GetFileName(path.Replace('\\', '/').TrimEnd('/'));
+        var detail = ErrorLog.Redact(new string(file.Where(ch => !char.IsControl(ch)).ToArray())).Trim();
+        if (detail.Length == 0) return tool;
         return $"{tool} · {(detail.Length <= 60 ? detail : detail[..60] + "…")}";
     }
 
