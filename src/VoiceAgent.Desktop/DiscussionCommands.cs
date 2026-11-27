@@ -22,6 +22,7 @@ internal sealed partial class DiscussionWindow
     {
         TrayvoraTheme.StyleControls(_commandMode, _commandInput);
         TrayvoraTheme.Primary(_runCommand);
+        ToolTip.SetTip(_commandInput, "Enter inserts a suggestion. Enter again runs the command.");
         Avalonia.Automation.AutomationProperties.SetName(_commandMode, "Claude command mode");
         Avalonia.Automation.AutomationProperties.SetName(_commandChoices, "Claude command suggestions");
         var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
@@ -58,22 +59,35 @@ internal sealed partial class DiscussionWindow
             else if (e.Key == Key.Enter)
             {
                 e.Handled = true;
-                await ExecuteCommandAsync(_commandInput.Text);
+                if (_commandChoices.Items.Count == 1 && _commandChoices.Items[0] is CommandChoice single)
+                    InsertCommand(single);
+                else
+                    await ExecuteCommandAsync(_commandInput.Text);
             }
         }, RoutingStrategies.Tunnel);
-        _commandChoices.AddHandler(KeyDownEvent, async (_, e) =>
+        _commandChoices.AddHandler(KeyDownEvent, (_, e) =>
         {
             if (e.Key != Key.Enter || _commandChoices.SelectedItem is not CommandChoice choice) return;
             e.Handled = true;
-            await ExecuteCommandAsync(choice.Command);
+            InsertCommand(choice);
         }, RoutingStrategies.Tunnel);
-        _commandChoices.Tapped += async (_, e) =>
+        _commandChoices.Tapped += (_, e) =>
         {
             if (e.Source is Control source && source.FindAncestorOfType<ListBoxItem>(includeSelf: true)?.Content is CommandChoice choice)
-                await ExecuteCommandAsync(choice.Command);
+                InsertCommand(choice);
         };
         _runCommand.Click += async (_, _) => await ExecuteCommandAsync(_commandInput.Text);
         return panel;
+    }
+
+    private void InsertCommand(CommandChoice choice)
+    {
+        _commandInput.Text = choice.Command;
+        _commandInput.Focus();
+        _commandInput.ClearSelection();
+        _commandInput.CaretIndex = choice.Command.Length;
+        _status.Text = "";
+        SuggestCommands();
     }
 
     private void SuggestCommands()
@@ -97,7 +111,7 @@ internal sealed partial class DiscussionWindow
                     _ => []
                 };
         }
-        var rows = choices.ToArray();
+        var rows = choices.Where(choice => !choice.Command.Equals(input.TrimEnd(), StringComparison.OrdinalIgnoreCase)).ToArray();
         _commandChoices.ItemsSource = rows;
         _commandChoices.IsVisible = rows.Length > 0;
     }

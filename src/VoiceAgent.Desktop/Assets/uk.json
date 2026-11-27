@@ -1,6 +1,7 @@
 {
   "/  Command mode": "/  Режим команд",
   "Run command": "Виконати команду",
+  "Enter inserts a suggestion. Enter again runs the command.": "Enter підставляє підказку. Повторне натискання Enter виконує команду.",
   "Type / for Claude CLI commands": "Введіть / для команд Claude CLI",
   "Choose a command from the / menu.": "Виберіть команду з меню /.",
   "Exit command mode to send a message.": "Вимкніть режим команд, щоб надіслати повідомлення.",

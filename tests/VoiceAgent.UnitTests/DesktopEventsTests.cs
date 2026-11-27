@@ -299,15 +299,30 @@ public sealed class DesktopEventsTests
                 PumpUntil(() => !view.IsRunning);
                 Pump(view.PendingSaves);
             }
-            list.SelectedIndex = 0;
+            line.RaiseEvent(new KeyEventArgs { Key = Key.Down, RoutedEvent = InputElement.KeyDownEvent });
+            Assert.Equal(0, list.SelectedIndex);
             list.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyDownEvent });
+            Assert.Equal("/resume", line.Text);
+            Assert.Equal(line.Text.Length, line.CaretIndex);
+            Assert.Empty(store.ReadRoom(view.CurrentRoom!.Id).Messages);
+
+            void EnterInCommandField() => line.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyDownEvent });
+            EnterInCommandField();
             PumpUntil(() => !view.IsRunning);
             Pump(view.PendingSaves);
             Assert.Contains(list.Items.OfType<CommandChoice>(), item => item.Description == chat.Title);
             Run($"/resume {chat.Id}");
             Run("/effort high");
             Run("/model sonnet");
-            Run("/mcp");
+
+            line.Text = "/mc";
+            PumpUntil(() => list.Items.OfType<CommandChoice>().SingleOrDefault()?.Command == "/mcp");
+            EnterInCommandField();
+            Assert.Equal("/mcp", line.Text);
+            Assert.Empty(calls);
+            EnterInCommandField();
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
             Run("/mcp ; echo unsafe");
             Run("/unknown");
             var saved = Assert.Single(store.Load());
