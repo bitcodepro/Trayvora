@@ -37,6 +37,8 @@ For a portable copy, download `trayvora-win-x64.zip`, extract it to a writable f
 
 ## Interactive controls
 
+- In **Sessions**, keep sending while the agents work. Messages to a busy agent wait in order, and a free agent can start immediately. **Pause** cancels waiting messages and marks their recipients as **Not sent to**. After a restart, waiting messages remain in the history with that status.
+
 - In **Sessions**, turn on **/ Command mode** next to **Voice mode**, type `/`, then click a suggestion or choose it with ↑ and ↓ and press Enter to insert it. Release Enter and press it again or click **Run command** to run it. Use `/mcp` to check servers in the selected Claude workspace, `/resume` to pick a saved chat by title, and `/effort` or `/model` to set the next Claude turns in this Trayvora session. `/help` lists the supported commands. Results are saved in the conversation as **Claude CLI → You**. Turn the mode off to return to your message draft, where slash-prefixed text follows the usual recipient and relay settings.
 
 - Open **Claude console** in Command mode, or **Manage MCP in console** below an MCP result. The terminal runs interactive Claude Code with the configured profile and workspace. Type `/mcp` in the terminal, select the server and choose **Reconnect** or **Authenticate** when offered. Run the original room’s `/mcp` again to refresh its status or after switching Claude profiles. Switching a running console to another workspace asks for confirmation. Its processes stay active until the replacement window is ready.

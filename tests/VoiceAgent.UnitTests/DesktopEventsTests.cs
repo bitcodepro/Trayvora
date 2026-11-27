@@ -50,6 +50,7 @@ public sealed class DesktopEventsTests
                 VerifyLongSession();
                 VerifyDiscussWith();
                 VerifyStreamingSession();
+                VerifySessionQueues();
                 VerifyMarkdown();
                 VerifyAttachments();
                 VerifyDesktopDelivery();
@@ -544,13 +545,15 @@ public sealed class DesktopEventsTests
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             PumpUntil(() => sent.Count >= 3 && Stored().Single(item => item.Title == "First question").Messages.Count(message => message.Failed) >= 2);
             Pump(Task.Delay(50));
-            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude, DiscussionMember.Claude], sent.Select(item => item.Agent));
+            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], sent.Take(2).Select(item => item.Agent).Order());
+            Assert.Equal(DiscussionMember.Claude, sent[2].Agent);
             Assert.Contains("hello from Codex", sent[2].Text);
             Assert.StartsWith("Codex wrote:", sent[2].Text);
             var saved = Stored().Single(item => item.Title == "First question").Messages.TakeLast(4).ToArray();
             Assert.Equal("Say hello to Claude", saved[0].Text);
-            Assert.Equal((DiscussionMember.Codex, (DiscussionMember?)DiscussionMember.Claude, "hello from Codex"), (saved[1].Sender, saved[1].To, saved[1].Text));
-            Assert.All(saved[2..], message => Assert.True(message.Failed && message.Sender == DiscussionMember.Claude));
+            var handoff = Assert.Single(saved[1..], message => message.Sender == DiscussionMember.Codex);
+            Assert.Equal(((DiscussionMember?)DiscussionMember.Claude, "hello from Codex"), (handoff.To, handoff.Text));
+            Assert.Equal(2, saved[1..].Count(message => message.Failed && message.Sender == DiscussionMember.Claude));
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Claude Code was not found.");
 
             // Relay toggle on the Claude chip: Claude's plain reply is passed on to Codex automatically.
@@ -729,8 +732,8 @@ public sealed class DesktopEventsTests
 
             editor.Text = "Compare the plans";
             Named("Send").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Pump(Task.Delay(100));
-            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], started);
+            PumpUntil(() => started.Count == 2);
+            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], started.Order());
 
             // Text written so far appears before the agent finishes.
             streams[DiscussionMember.Claude].Append("Partial **answer**");
@@ -750,6 +753,82 @@ public sealed class DesktopEventsTests
             Assert.DoesNotContain(messages, message => message.Failed);
             Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text == "⏸ interrupted");
             Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text?.StartsWith("Paused", StringComparison.Ordinal) == true);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifySessionQueues()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-queues-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Claude test chat");
+            var room = store.Create(chat);
+            room.Messages.Add(new(DiscussionMember.Boss, DiscussionMember.Codex, "Before restart", DateTimeOffset.Now,
+                PendingFor: DeliveryRecipients.Codex));
+            store.Save(room);
+
+            var opened = new List<(DiscussionMember Agent, string Prompt, TaskCompletionSource<string?> Reply)>();
+            var view = new DiscussionWindow(store, async (agent, prompt, _, _, _, token) =>
+            {
+                var reply = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+                opened.Add((agent, prompt, reply));
+                return await reply.Task.WaitAsync(token);
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => chat);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            Pump(view.PendingSaves);
+            Assert.Equal(DeliveryRecipients.Codex, store.ReadRoom(room.Id).Messages[0].NotSentTo);
+            Assert.Empty(opened);
+
+            var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+            Button Named(string name) => view.GetLogicalDescendants().OfType<Button>().First(b => AutomationProperties.GetName(b) == name);
+            void Post(string text)
+            {
+                editor.Text = text;
+                PumpUntil(() => Named("Send").IsEnabled);
+                Assert.True(Named("Send").IsEnabled);
+                Named("Send").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+
+            Post("Codex first");
+            PumpUntil(() => opened.Count == 1);
+            Post("Codex second");
+            Post("Codex third");
+            var claude = view.GetLogicalDescendants().OfType<Button>().First(b => Equals(b.Content, "Claude"));
+            Assert.True(claude.IsEnabled);
+            claude.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Post("Claude independent");
+            PumpUntil(() => opened.Count == 2);
+            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], opened.Select(request => request.Agent));
+            Assert.Contains("Claude independent", opened[1].Prompt);
+            var queued = store.ReadRoom(room.Id).Messages.Where(m => m.PendingFor == DeliveryRecipients.Codex);
+            Assert.Equal(["Codex second", "Codex third"], queued.Select(m => m.Text));
+
+            opened[0].Reply.SetResult("Codex first reply");
+            PumpUntil(() => opened.Count == 3);
+            Assert.Contains("Codex second", opened[2].Prompt);
+            Assert.False(opened[1].Reply.Task.IsCompleted);
+            opened[2].Reply.SetResult("Codex second reply");
+            PumpUntil(() => opened.Count == 4);
+            Assert.Contains("Codex third", opened[3].Prompt);
+
+            Post("Codex: Keep this draft on pause");
+            Named("Pause").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
+            var unsent = store.ReadRoom(room.Id).Messages.Single(m => m.Text == "Keep this draft on pause");
+            Assert.Equal(DeliveryRecipients.None, unsent.PendingFor);
+            Assert.Equal(DeliveryRecipients.Codex, unsent.NotSentTo);
+            Assert.Equal(4, opened.Count);
         }
         finally
         {

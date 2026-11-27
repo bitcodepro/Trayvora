@@ -58,7 +58,13 @@ internal sealed partial class DiscussionWindow(
     private const double BubbleWidth = 860;
     private const string OwnThreadTitle = "Own Trayvora thread for this session";
 
-    private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null, IReadOnlyList<string>? Files = null);
+    private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null, IReadOnlyList<string>? Files = null, UserPost? Post = null);
+
+    private sealed class UserPost(DiscussionMessage message, Task<bool> saved)
+    {
+        public DiscussionMessage Message { get; set; } = message;
+        public Task<bool> Saved { get; } = saved;
+    }
 
     /// <summary>How many times the lead may hand the plan to the partner (Settings → Sessions, default 5).</summary>
     private int DiscussExchanges => Math.Clamp(discussRounds?.Invoke() ?? DiscussionOptions.DefaultRounds, DiscussionOptions.MinRounds, DiscussionOptions.MaxRounds);
@@ -66,6 +72,9 @@ internal sealed partial class DiscussionWindow(
     private sealed class RoomRun(CancellationTokenSource cancel)
     {
         public CancellationTokenSource Cancel { get; } = cancel;
+        public Dictionary<DiscussionMember, Task> Tails { get; } = [];
+        public int Chains { get; set; }
+        public string? Outcome { get; set; }
 
         /// <summary>Agents answering right now and the reply each is writing.</summary>
         public Dictionary<DiscussionMember, ReplyStream> Live { get; } = [];
@@ -403,9 +412,21 @@ internal sealed partial class DiscussionWindow(
     {
         var index = room.Messages.FindIndex(message => message.DeliveryId == id);
         if (index < 0) return;
-        room.Messages[index] = room.Messages[index] with { Text = status, DeliveryId = null };
-        _ = Persist(room);
-        if (ReferenceEquals(room, _room)) RefreshTimeline(room);
+        _ = ReplaceMessage(room, index, room.Messages[index] with { Text = status, DeliveryId = null });
+    }
+
+    private Task<bool> ReplaceMessage(DiscussionRoom room, int index, DiscussionMessage message)
+    {
+        var previous = room.Messages[index];
+        room.Messages[index] = message;
+        if (ReferenceEquals(room, _room) && _rendered.Remove(previous, out var row))
+        {
+            var position = _messages.Children.IndexOf(row);
+            _messages.Children.RemoveAt(position);
+            Render(message, scroll: false, insertAt: position);
+        }
+        RefreshList();
+        return Persist(room);
     }
 
     private void RefreshTimeline(DiscussionRoom room)
@@ -417,6 +438,7 @@ internal sealed partial class DiscussionWindow(
         ShowRunState();
     }
 
+    internal Func<DiscussionRoom, DiscussionMember, string?>? CurrentAgentProfile { get; set; }
     public Action? StopSpeaking { get; set; }
     public bool BusyForUpdate => IsRunning || _dictationStop is not null || _attachments?.Copying == true || !_saves.IsCompleted;
     public bool IsRunning => _runs.Count > 0 || _commandCancel is not null;
@@ -426,7 +448,7 @@ internal sealed partial class DiscussionWindow(
     public void Pause()
     {
         _commandCancel?.Cancel();
-        foreach (var run in _runs.Values) run.Cancel.Cancel();
+        foreach (var run in _runs.Values.ToArray()) run.Cancel.Cancel();
     }
 
     // "Claude:", "**Claude:**", "**Claude**:", "@Claude:" at the very start of a message.
@@ -972,6 +994,7 @@ internal sealed partial class DiscussionWindow(
             var index = _items.IndexOf(row);
             if (opening != _openVersion || index < 0) return;
             _items[index] = full;
+            RecoverUnsent(full);
             Open(full);
         }
         catch (Exception error) { _status.Text = error.Message; }
@@ -1345,13 +1368,14 @@ internal sealed partial class DiscussionWindow(
         var open = _room is not null;
         var files = _attachments?.Files.Count ?? 0;
         if (Attachments.Copying) _counter.Text = "Copying attachment…";
-        _send.IsEnabled = idle && !Attachments.Copying && length <= MaxTypedLength && (files > 0 || (length > 0 && !string.IsNullOrWhiteSpace(_editor.Text)));
+        _send.IsEnabled = _commandMode.IsChecked != true && _commandCancel is null && CurrentRun?.Cancel.IsCancellationRequested != true
+            && !Attachments.Copying && length <= MaxTypedLength && (files > 0 || !string.IsNullOrWhiteSpace(_editor.Text));
         _pause.Content = Attachments.Copying ? "Cancel copy" : "Pause";
         _pause.IsVisible = CurrentRun is not null || Attachments.Copying;
         _delete.IsEnabled = idle && open;
         var messageMode = _commandMode.IsChecked != true;
         _voiceMode.IsEnabled = _recognizer.IsEnabled = messageMode;
-        _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle && messageMode;
+        _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = messageMode && _commandCancel is null;
         _codexChat.IsEnabled = _claudeChat.IsEnabled = _codexSearch.IsEnabled = _claudeSearch.IsEnabled = _claudeRights.IsEnabled = _newCodex.IsEnabled = _newClaude.IsEnabled = idle && open;
         _loadDesktop.IsEnabled = idle && open && !Equals(_loadDesktop.Content, "Loading…");
         _loadClaude.IsEnabled = idle && open && !Equals(_loadClaude.Content, "Loading…");
@@ -1507,7 +1531,8 @@ internal sealed partial class DiscussionWindow(
     {
         if (_commandMode.IsChecked == true || _commandCancel is not null) return;
         var attached = Attachments.Files.ToArray();
-        if (Attachments.Copying || CurrentRun is not null || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
+        if (Attachments.Copying || CurrentRun?.Cancel.IsCancellationRequested == true
+            || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
         var text = (_editor.Text ?? "").Trim();
         if (text.Length == 0) text = attached.All(ComposerAttachments.IsImage) ? "Look at the attached image(s)." : "Look at the attached file(s).";
         if (text.Length > MaxTypedLength)
@@ -1562,23 +1587,21 @@ internal sealed partial class DiscussionWindow(
         text = ComposerAttachments.WithFiles(text, attached);
         sent = ComposerAttachments.WithFiles(sent, attached);
         Attachments.Clear();
-        _ = Append(room, new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
-            RelayTo: relayTo, DiscussWith: discuss?.Partner));
-        await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss, attached)));
+        var pending = targets.Count == 2 ? DeliveryRecipients.Codex | DeliveryRecipients.Claude : RecipientFlag(targets[0]);
+        var message = new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
+            RelayTo: relayTo, DiscussWith: discuss?.Partner, PendingFor: pending);
+        var post = new UserPost(message, Append(room, message));
+        await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss, attached, post)));
     }
 
     private async Task ForwardAsync(DiscussionMessage message, DiscussionMember target)
     {
-        if (_room is not { } room) return;
-        if (CurrentRun is not null)
-        {
-            _status.Text = "Wait for this session to finish, or pause it, before forwarding.";
-            return;
-        }
-        if (!Ready(room, [target])) return;
-        _ = Append(room, new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender));
+        if (_room is not { } room || CurrentRun?.Cancel.IsCancellationRequested == true || !Ready(room, [target])) return;
+        var forwarded = new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender,
+            PendingFor: RecipientFlag(target));
+        var post = new UserPost(forwarded, Append(room, forwarded));
         await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender,
-            Files: ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room)))]);
+            Files: ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room)), Post: post)]);
     }
 
     private bool Ready(DiscussionRoom room, IEnumerable<DiscussionMember> targets)
@@ -1596,9 +1619,12 @@ internal sealed partial class DiscussionWindow(
     private async Task RunAsync(DiscussionRoom room, IEnumerable<Delivery> deliveries)
     {
         var queue = new Queue<Delivery>(deliveries);
-        using var cancel = new CancellationTokenSource();
-        var run = new RoomRun(cancel);
-        _runs[room.Id] = run;
+        if (!_runs.TryGetValue(room.Id, out var run))
+            _runs.Add(room.Id, run = new RoomRun(new CancellationTokenSource()));
+        run.Chains++;
+        var token = run.Cancel.Token;
+        var claudeProfile = CurrentAgentProfile?.Invoke(room, DiscussionMember.Claude);
+        var codexProfile = CurrentAgentProfile?.Invoke(room, DiscussionMember.Codex);
         if (ReferenceEquals(room, _room)) _status.Text = "";
         Changed(room);
         var replies = 0;
@@ -1610,7 +1636,7 @@ internal sealed partial class DiscussionWindow(
         var stop = false;
         try
         {
-            while (queue.Count > 0 && replies < limit && !stop && !cancel.IsCancellationRequested)
+            while (queue.Count > 0 && replies < limit && !stop && !token.IsCancellationRequested)
             {
                 // One wave: the next messages for different agents are delivered at the same time.
                 var wave = new List<Delivery>();
@@ -1619,21 +1645,41 @@ internal sealed partial class DiscussionWindow(
                     wave.Add(queue.Dequeue());
                     replies++;
                 }
-                await Task.WhenAll(wave.Select(Deliver).ToArray());
+                await Task.WhenAll(wave.Select(EnqueueDelivery));
             }
-            if (cancel.IsCancellationRequested) outcome = "Paused. Send a message to continue.";
+            if (token.IsCancellationRequested) outcome = "Paused. Unsent messages are marked in the chat.";
             else if (queue.Count > 0 && outcome is null) outcome = "Automatic round ended. Reply or forward to continue.";
         }
         finally
         {
-            _runs.Remove(room.Id);
-            Changed(room);
-            RunFinished?.Invoke(room, outcome);
-            if (ReferenceEquals(room, _room))
+            if (outcome is not null) run.Outcome = outcome;
+            if (--run.Chains == 0)
             {
-                _status.Text = outcome ?? "";
-                _editor.Focus();
+                _runs.Remove(room.Id);
+                run.Cancel.Dispose();
+                Changed(room);
+                RunFinished?.Invoke(room, run.Outcome);
+                if (ReferenceEquals(room, _room) && run.Outcome is not null) _status.Text = run.Outcome;
             }
+        }
+
+        Task EnqueueDelivery(Delivery delivery)
+        {
+            var previous = run.Tails.GetValueOrDefault(delivery.To, Task.CompletedTask);
+            var next = DeliverInOrderAsync(previous, delivery);
+            run.Tails[delivery.To] = next;
+            return next;
+        }
+
+        async Task DeliverInOrderAsync(Task previous, Delivery delivery)
+        {
+            try { await previous.WaitAsync(token); }
+            catch (OperationCanceledException) when (token.IsCancellationRequested)
+            {
+                await SetPostDelivery(room, delivery, notSent: true);
+                return;
+            }
+            await Deliver(delivery);
         }
 
         async Task Deliver(Delivery delivery)
@@ -1643,13 +1689,24 @@ internal sealed partial class DiscussionWindow(
             run.Live[agent] = stream;
             Changed(room);
             string? answer;
+            var dispatched = false;
             try
             {
+                token.ThrowIfCancellationRequested();
+                if (delivery.Post is { } post && !await post.Saved)
+                    throw new IOException("Could not save the queued message. The request was not sent.");
                 var (body, file) = await Task.Run(() => ForAgentWithFile(delivery.Text, AttachmentsFolder(room), $"{delivery.From}-to-{agent}"));
                 // The agent gets the files themselves, not paths parsed back out of the text.
                 IReadOnlyList<string> files = file is null ? delivery.Files ?? [] : [file, .. delivery.Files ?? []];
-                answer = await send(agent, Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss),
-                    room, stream, files, cancel.Token);
+                var prompt = Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss);
+                if (!await SetPostDelivery(room, delivery, notSent: false))
+                    throw new IOException("Could not update the queued message. The request was not sent.");
+                token.ThrowIfCancellationRequested();
+                var profile = agent == DiscussionMember.Claude ? claudeProfile : codexProfile;
+                if (CurrentAgentProfile?.Invoke(room, agent) != profile)
+                    throw new IOException("The agent profile changed while the request was queued. Send the message again to use the selected profile.");
+                dispatched = true;
+                answer = await send(agent, prompt, room, stream, files, token);
             }
             catch (Exception error)
             {
@@ -1659,7 +1716,8 @@ internal sealed partial class DiscussionWindow(
                 var echo = error is IOException && partial.Length > 0 && error.Message.Contains(partial, StringComparison.Ordinal);
                 if (partial.Length > 0 && !echo)
                     _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes, Interrupted: true));
-                if (!cancel.IsCancellationRequested)
+                if (!dispatched) await SetPostDelivery(room, delivery, notSent: true);
+                if (!token.IsCancellationRequested)
                 {
                     var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
                         or InvalidDataException or TimeoutException
@@ -1674,6 +1732,7 @@ internal sealed partial class DiscussionWindow(
                 run.Live.Remove(agent);
                 Changed(room);
             }
+            if (token.IsCancellationRequested) return;
             if (answer is null)
             {
                 // Codex Desktop has not finished in time: say so in the session, not only in the status line.
@@ -1736,6 +1795,38 @@ internal sealed partial class DiscussionWindow(
             }
             queue.Enqueue(new Delivery(handoff, agent, body, null));
         }
+    }
+
+    private static DeliveryRecipients RecipientFlag(DiscussionMember agent) =>
+        agent == DiscussionMember.Claude ? DeliveryRecipients.Claude : DeliveryRecipients.Codex;
+
+    private Task<bool> SetPostDelivery(DiscussionRoom room, Delivery delivery, bool notSent)
+    {
+        if (delivery.Post is not { } post) return Task.FromResult(true);
+        var flag = RecipientFlag(delivery.To);
+        var previous = post.Message;
+        var index = room.Messages.FindIndex(item => ReferenceEquals(item, previous));
+        if (index < 0) return Task.FromResult(false);
+        post.Message = previous with
+        {
+            PendingFor = previous.PendingFor & ~flag,
+            NotSentTo = notSent ? previous.NotSentTo | flag : previous.NotSentTo,
+        };
+        return ReplaceMessage(room, index, post.Message);
+    }
+
+    private void RecoverUnsent(DiscussionRoom room)
+    {
+        if (_runs.ContainsKey(room.Id)) return;
+        var changed = false;
+        for (var index = 0; index < room.Messages.Count; index++)
+        {
+            var message = room.Messages[index];
+            if (message.PendingFor == DeliveryRecipients.None) continue;
+            room.Messages[index] = message with { PendingFor = DeliveryRecipients.None, NotSentTo = message.NotSentTo | message.PendingFor };
+            changed = true;
+        }
+        if (changed) _ = Persist(room);
     }
 
     /// <summary>Refreshes the session list and, for the visible session, presence and live replies.</summary>
@@ -1940,6 +2031,10 @@ internal sealed partial class DiscussionWindow(
                 Background = TrayvoraTheme.Elevated, CornerRadius = new CornerRadius(8), Padding = new Thickness(7, 1),
                 Child = new TextBlock { Text = "→ Codex, Claude", FontSize = 11, Foreground = TrayvoraTheme.Muted },
             });
+        if (message.PendingFor != DeliveryRecipients.None)
+            meta.Children.Add(TrayvoraTheme.Hint($"{UiLanguage.T("Queued for")} {message.PendingFor}"));
+        if (message.NotSentTo != DeliveryRecipients.None)
+            meta.Children.Add(TrayvoraTheme.Hint($"{UiLanguage.T("Not sent to")} {message.NotSentTo}"));
         if (message.DiscussWith is { } partnerBadge)
         {
             var badge = new Border
@@ -2015,7 +2110,7 @@ internal sealed partial class DiscussionWindow(
             TrayvoraTheme.StyleControls(type, voice);
             bool Prepare()
             {
-                if (_room is not { } active || CurrentRun is not null) return false;
+                if (_room is not { } active || _commandMode.IsChecked == true || _commandCancel is not null) return false;
                 var bound = sender == DiscussionMember.Claude ? active.Claude?.Id : active.CodexChatId;
                 if (message.ThreadId is { } expected && expected != bound)
                 { _status.Text = "Select the original chat before replying to this question."; return false; }
@@ -2206,6 +2301,11 @@ internal sealed partial class DiscussionWindow(
     private void DeleteMessage(DiscussionMessage message)
     {
         if (_room is not { } room) return;
+        if (message.PendingFor != DeliveryRecipients.None)
+        {
+            _status.Text = "Pause the session before removing a queued message.";
+            return;
+        }
         var index = room.Messages.FindIndex(item => ReferenceEquals(item, message));
         if (index < 0) return;
         room.Messages.RemoveAt(index);
