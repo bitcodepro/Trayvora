@@ -9,6 +9,7 @@
     <Project Path="src/VoiceAgent.Speech/VoiceAgent.Speech.csproj" />
   </Folder>
   <Folder Name="/tests/">
+    <Project Path="tests/VoiceAgent.AppServerFixture/VoiceAgent.AppServerFixture.csproj" />
     <Project Path="tests/VoiceAgent.UnitTests/VoiceAgent.UnitTests.csproj" />
   </Folder>
 </Solution>
