@@ -201,7 +201,7 @@ internal sealed class VoiceOverlay : Window
         {
             if (!OperatingSystem.IsWindows()) return;
             if (_terminal?.IsVisible == true) HideTerminal();
-            else { _terminalRoom = null; ShowTerminal(TerminalKind.Claude); }
+            else ShowTerminal(TerminalKind.Claude);
         };
         terminalButton.IsVisible = settingsDirectory is not null && OperatingSystem.IsWindows();
         _terminalButton = terminalButton;
@@ -700,8 +700,9 @@ internal sealed class VoiceOverlay : Window
             DictateAsync,
             () => new DiscussionSettings(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings")).Rounds,
             OpenTerminal);
-            _discussion.RunClaudeCommand = (args, workspace, ct) => CliSession.RunAsync(
-                ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(ClaudeProfile()), ct, workspace);
+            _discussion.CurrentClaudeProfile = ClaudeProfile;
+            _discussion.RunClaudeCommand = (args, context, ct) => CliSession.RunAsync(
+                ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(context.Profile), ct, context.Workspace);
             _discussion.StopSpeaking = () => _replyAudio?.Stop();
             if (_sharedChat is not null) _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
             _discussion.Initialize();
@@ -721,21 +722,13 @@ internal sealed class VoiceOverlay : Window
     }
 
     /// <summary>
-    /// Opens PowerShell in the session's folder with the same Claude Code and Codex Desktop profiles Trayvora uses,
-    /// so the user can sign in, add MCP servers or change settings without another app.
+    /// Opens Claude Code interactively in the requested workspace with the configured Claude profile.
     /// </summary>
-    private void OpenTerminal(DiscussionRoom? room)
+    private void OpenTerminal(TerminalContext context)
     {
-        if (OperatingSystem.IsWindows())
-        {
-            _terminalRoom = room;
-            ShowTerminal(TerminalKind.Claude);
-            return;
-        }
-        System.Diagnostics.Process.Start(TerminalStart(room, TerminalKind.PowerShell, embedded: false))?.Dispose();
+        if (OperatingSystem.IsWindows()) ShowTerminal(TerminalKind.Claude, context);
     }
 
-    private DiscussionRoom? _terminalRoom;
     private Button? _terminalButton;
     private TerminalPanel? _terminal;
     private readonly Grid _shell = new() { ColumnDefinitions = new ColumnDefinitions("*,Auto,0,Auto") };
@@ -743,13 +736,28 @@ internal sealed class VoiceOverlay : Window
 
     /// <summary>Opens the built-in terminal beside the chat (or restarts it with another program).</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    public void ShowTerminal(TerminalKind kind)
+    public void ShowTerminal(TerminalKind kind, TerminalContext? context = null)
     {
+        if (context is null)
+        {
+            var room = _discussion?.IsVisible == true ? _discussion.CurrentRoom : null;
+            var folder = room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace;
+            if (!Directory.Exists(folder)) folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            context = new TerminalContext(folder!, ClaudeProfile());
+        }
+        else if (!Directory.Exists(context.Workspace))
+            throw new DirectoryNotFoundException($"The console workspace is unavailable: {context.Workspace}");
         Show();
         Activate();
         if (_terminal is null)
         {
-            _terminal = new TerminalPanel(which => TerminalStart(_terminalRoom ?? _discussionRoom(), which, embedded: true));
+            _terminal = new TerminalPanel((which, target) =>
+            {
+                // A replacement may wait for confirmation while settings change.
+                if (which == TerminalKind.Claude && ClaudeCommands.NormalizeProfile(target.Profile) != ClaudeCommands.NormalizeProfile(ClaudeProfile()))
+                    throw new IOException(UiLanguage.T(ClaudeCommands.RefreshMcp));
+                return TerminalStart(target.Workspace, target.Profile, which);
+            });
             _terminal.CloseRequested += HideTerminal;
             Grid.SetColumn(_terminal, 2);
             _shell.Children.Add(_terminal);
@@ -757,8 +765,7 @@ internal sealed class VoiceOverlay : Window
         _shell.ColumnDefinitions[2].Width = new GridLength(Math.Max(420, Bounds.Width * 0.45));
         _shell.ColumnDefinitions[2].MinWidth = 320;
         _terminal.IsVisible = _terminalSplitter.IsVisible = true;
-        if (!_terminal.Running || kind != TerminalKind.Claude) _terminal.Start(kind);
-        else _terminal.FocusConsole();
+        _terminal.Start(kind, context);
     }
 
     private FilePreview? _fileView;
@@ -782,27 +789,26 @@ internal sealed class VoiceOverlay : Window
         _shell.ColumnDefinitions[2].Width = new GridLength(0);
     }
 
-    private DiscussionRoom? _discussionRoom() => _discussion?.IsVisible == true ? _discussion.CurrentRoom : null;
-
-    private System.Diagnostics.ProcessStartInfo TerminalStart(DiscussionRoom? room, TerminalKind kind, bool embedded)
+    private System.Diagnostics.ProcessStartInfo TerminalStart(string folder, string profile, TerminalKind kind)
     {
-        var folder = room?.Claude?.Workspace ?? room?.NewCodexFolder;
-        if (folder is null || !Directory.Exists(folder)) folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
         var shell = new[] { "pwsh.exe", "powershell.exe" }
             .Select(name => (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
                 .Select(dir => dir.Trim().Trim('"')).Where(Path.IsPathFullyQualified)
                 .Select(dir => Path.Combine(dir, name)).FirstOrDefault(File.Exists))
             .FirstOrDefault(path => path is not null) ?? "powershell.exe";
         var conhost = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "conhost.exe");
-        var start = new System.Diagnostics.ProcessStartInfo(embedded ? conhost : shell) { WorkingDirectory = folder, UseShellExecute = false };
-        if (embedded) start.ArgumentList.Add(shell);
-        // The real user folders, not the ones Trayvora redirects for its own Codex profile.
-        var profile = ClaudeProfile();
+        var start = new System.Diagnostics.ProcessStartInfo(conhost) { WorkingDirectory = folder, UseShellExecute = false };
+        start.ArgumentList.Add(shell);
         foreach (var (name, value) in ClaudeChats.CliEnvironment(profile)) start.Environment[name] = value;
         start.Environment.Remove("CODEX_SQLITE_HOME");
         var paths = new List<string>();
-        try { paths.Add(Path.GetDirectoryName(ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""))!); }
-        catch (FileNotFoundException) { }
+        try
+        {
+            var claude = ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? "");
+            start.Environment["TRAYVORA_TERMINAL_CLAUDE"] = claude;
+            paths.Add(Path.GetDirectoryName(claude)!);
+        }
+        catch (FileNotFoundException) when (kind != TerminalKind.Claude) { }
         if (Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE") is { Length: > 0 } codex && File.Exists(codex))
             paths.Add(Path.GetDirectoryName(codex)!);
         if (_sharedChat?.Profile is { Length: > 0 } codexHome && Directory.Exists(codexHome)) start.Environment["CODEX_HOME"] = codexHome;
@@ -819,7 +825,7 @@ internal sealed class VoiceOverlay : Window
         const string codexFunction =
             "; $codexExe = (Get-Command codex.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source; " +
             "if ($codexExe) { function global:codex { if ($args.Count -eq 0 -or $args[0] -in @('resume','fork') -or \"$($args[0])\".StartsWith('-')) { & $codexExe --no-daemon @args } else { & $codexExe @args } } }";
-        var program = kind switch { TerminalKind.Claude => "; claude", TerminalKind.Codex => "; codex", _ => "" };
+        var program = kind switch { TerminalKind.Claude => "; & $env:TRAYVORA_TERMINAL_CLAUDE", TerminalKind.Codex => "; codex", _ => "" };
         foreach (var arg in new[] { "-NoLogo", "-NoExit", "-Command", hint + codexFunction + program }) start.ArgumentList.Add(arg);
         return start;
     }
@@ -1815,6 +1821,7 @@ internal sealed class VoiceOverlay : Window
         _disposed = true;
         _discussion?.Pause();
         _accounts?.Stop();
+        HideTerminal();
         if (OperatingSystem.IsWindows())
         {
             _audioToText?.Stop();

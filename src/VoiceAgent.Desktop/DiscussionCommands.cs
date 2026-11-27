@@ -16,18 +16,50 @@ internal sealed partial class DiscussionWindow
     private readonly Button _runCommand = new() { Content = "Run command" };
     private IReadOnlyList<ClaudeChat> _resumeChoices = [];
     private CancellationTokenSource? _commandCancel;
-    internal Func<string[], string, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
+    private string? _suggestionsFor;
+    private bool _commandEnterDown;
+    internal Func<string>? CurrentClaudeProfile { get; set; }
+    internal Func<string[], TerminalContext, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
+
+    private static string CommandWorkspace(DiscussionRoom? room) =>
+        room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace ?? AppContext.BaseDirectory;
+
+    private void OpenCommandConsole(DiscussionMessage? mcpResult = null)
+    {
+        if (openTerminal is null) return;
+        try
+        {
+            var profile = ClaudeCommands.NormalizeProfile(CurrentClaudeProfile?.Invoke());
+            if (mcpResult is not null && (mcpResult.McpProfile != profile || mcpResult.Workspace is null))
+            {
+                _status.Text = ClaudeCommands.RefreshMcp;
+                return;
+            }
+            openTerminal(new TerminalContext(mcpResult?.Workspace ?? CommandWorkspace(_room), profile));
+        }
+        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException)
+        { _status.Text = "Could not open the terminal: " + error.Message; }
+    }
 
     private Control BuildCommandInput(Control messages)
     {
         TrayvoraTheme.StyleControls(_commandMode, _commandInput);
         TrayvoraTheme.Primary(_runCommand);
+        ToolTip.SetTip(_commandInput, "Enter inserts a suggestion. Enter again runs the command.");
         Avalonia.Automation.AutomationProperties.SetName(_commandMode, "Claude command mode");
         Avalonia.Automation.AutomationProperties.SetName(_commandChoices, "Claude command suggestions");
         var line = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 8 };
         Grid.SetColumn(_runCommand, 1);
         line.Children.AddRange([_commandInput, _runCommand]);
         var panel = new StackPanel { IsVisible = false, Spacing = 6, Children = { _commandChoices, line } };
+        if (openTerminal is not null)
+        {
+            var console = new Button { Content = "Claude console", HorizontalAlignment = HorizontalAlignment.Left };
+            TrayvoraTheme.Ghost(console);
+            ToolTip.SetTip(console, "Open interactive Claude Code in this session’s workspace.");
+            console.Click += (_, _) => OpenCommandConsole();
+            panel.Children.Add(console);
+        }
         _commandMode.IsCheckedChanged += (_, _) =>
         {
             var enabled = _commandMode.IsChecked == true;
@@ -46,39 +78,84 @@ internal sealed partial class DiscussionWindow
             UpdateComposer();
             if (enabled) _commandInput.Focus(); else _editor.Focus();
         };
-        _commandInput.TextChanged += (_, _) => SuggestCommands();
-        _commandInput.AddHandler(KeyDownEvent, async (_, e) =>
+        _commandInput.TextChanged += (_, _) => RefreshCommandSuggestions();
+        _commandInput.AddHandler(KeyDownEvent, CommandKeyDown, RoutingStrategies.Tunnel);
+        _commandChoices.AddHandler(KeyDownEvent, CommandKeyDown, RoutingStrategies.Tunnel);
+        AttachedToVisualTree += (_, _) =>
         {
-            if (e.Key == Key.Down && _commandChoices.IsVisible)
-            {
-                e.Handled = true;
-                _commandChoices.SelectedIndex = 0;
-                _commandChoices.Focus();
-            }
-            else if (e.Key == Key.Enter)
-            {
-                e.Handled = true;
-                await ExecuteCommandAsync(_commandInput.Text);
-            }
-        }, RoutingStrategies.Tunnel);
-        _commandChoices.AddHandler(KeyDownEvent, async (_, e) =>
+            if (TopLevel.GetTopLevel(this) is not Window owner) return;
+            owner.AddHandler(KeyUpEvent, CommandKeyUp, RoutingStrategies.Tunnel, handledEventsToo: true);
+            owner.Deactivated += ResetCommandEnter;
+        };
+        DetachedFromVisualTree += (_, e) =>
         {
-            if (e.Key != Key.Enter || _commandChoices.SelectedItem is not CommandChoice choice) return;
-            e.Handled = true;
-            await ExecuteCommandAsync(choice.Command);
-        }, RoutingStrategies.Tunnel);
-        _commandChoices.Tapped += async (_, e) =>
+            if (e.RootVisual is Window owner)
+            {
+                owner.RemoveHandler(KeyUpEvent, CommandKeyUp);
+                owner.Deactivated -= ResetCommandEnter;
+            }
+            _commandEnterDown = false;
+        };
+        _commandChoices.Tapped += (_, e) =>
         {
             if (e.Source is Control source && source.FindAncestorOfType<ListBoxItem>(includeSelf: true)?.Content is CommandChoice choice)
-                await ExecuteCommandAsync(choice.Command);
+                InsertCommand(choice);
         };
         _runCommand.Click += async (_, _) => await ExecuteCommandAsync(_commandInput.Text);
         return panel;
     }
 
+    private void ResetCommandEnter(object? sender, EventArgs args) => _commandEnterDown = false;
+
+    private void CommandKeyUp(object? sender, KeyEventArgs e)
+    {
+        if (e.Key == Key.Enter) _commandEnterDown = false;
+    }
+
+    private async void CommandKeyDown(object? sender, KeyEventArgs e)
+    {
+        if (e.Key is not (Key.Up or Key.Down or Key.Enter)) return;
+        RefreshCommandSuggestions();
+        var count = _commandChoices.Items.Count;
+        if (e.Key is Key.Up or Key.Down)
+        {
+            if (count == 0) return;
+            e.Handled = true;
+            var current = _commandChoices.SelectedIndex;
+            var next = e.Key == Key.Down ? current + 1 : current < 0 ? count - 1 : current - 1;
+            _commandChoices.SelectedIndex = Math.Clamp(next, 0, count - 1);
+            _commandChoices.ScrollIntoView(_commandChoices.SelectedIndex);
+            return;
+        }
+
+        e.Handled = true;
+        if (_commandEnterDown) return;
+        _commandEnterDown = true;
+        var choice = _commandChoices.SelectedItem as CommandChoice
+            ?? (count == 1 ? _commandChoices.Items[0] as CommandChoice : null);
+        if (choice is not null) InsertCommand(choice);
+        else await ExecuteCommandAsync(_commandInput.Text);
+    }
+
+    private void RefreshCommandSuggestions()
+    {
+        if (_suggestionsFor != _commandInput.Text) SuggestCommands();
+    }
+
+    private void InsertCommand(CommandChoice choice)
+    {
+        _commandInput.Text = choice.Command;
+        _commandInput.Focus();
+        _commandInput.ClearSelection();
+        _commandInput.CaretIndex = choice.Command.Length;
+        _status.Text = "";
+        SuggestCommands();
+    }
+
     private void SuggestCommands()
     {
-        var input = (_commandInput.Text ?? "").TrimStart();
+        _suggestionsFor = _commandInput.Text;
+        var input = (_suggestionsFor ?? "").TrimStart();
         IEnumerable<CommandChoice> choices = [];
         if (input.StartsWith('/'))
         {
@@ -97,8 +174,9 @@ internal sealed partial class DiscussionWindow
                     _ => []
                 };
         }
-        var rows = choices.ToArray();
+        var rows = choices.Where(choice => !choice.Command.Equals(input.TrimEnd(), StringComparison.OrdinalIgnoreCase)).ToArray();
         _commandChoices.ItemsSource = rows;
+        _commandChoices.SelectedIndex = -1;
         _commandChoices.IsVisible = rows.Length > 0;
     }
 
@@ -125,6 +203,8 @@ internal sealed partial class DiscussionWindow
         UpdateComposer();
         _status.Text = $"Running {name}…";
         string nextInput = "/";
+        var workspace = CommandWorkspace(room);
+        string? mcpProfile = null;
         try
         {
             string result;
@@ -166,15 +246,17 @@ internal sealed partial class DiscussionWindow
             else
             {
                 var args = ClaudeCommands.Arguments(name) ?? throw new InvalidOperationException("Unknown command.");
-                var workspace = room.Claude?.Workspace ?? room.NewCodexFolder ?? room.CodexWorkspace ?? AppContext.BaseDirectory;
                 var runner = RunClaudeCommand ?? throw new IOException("Claude CLI is unavailable.");
-                var (code, output) = await runner(args, workspace, operation.Token);
+                var profile = ClaudeCommands.NormalizeProfile(CurrentClaudeProfile?.Invoke());
+                var (code, output) = await runner(args, new TerminalContext(workspace, profile), operation.Token);
+                if (name == "/mcp") mcpProfile = profile;
                 operation.Token.ThrowIfCancellationRequested();
                 result = ClaudeCommands.Output(name, code, output);
             }
             var label = arg.Length == 0 || name == "/resume" && !Guid.TryParse(arg, out _) ? name : $"{name} {arg}";
             _status.Text = "";
-            await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, result, DateTimeOffset.Now, Command: label));
+            await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, result, DateTimeOffset.Now,
+                Workspace: mcpProfile is null ? null : workspace, Command: label, McpProfile: mcpProfile));
             if (!operation.IsCancellationRequested)
             {
                 _commandInput.Text = nextInput;
@@ -190,7 +272,7 @@ internal sealed partial class DiscussionWindow
                 await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, "Claude CLI timed out.", DateTimeOffset.Now, Command: name));
             }
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception)
         {
             if (!operation.IsCancellationRequested)
             {

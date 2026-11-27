@@ -11,6 +11,7 @@ namespace VoiceAgent.Desktop;
 
 /// <summary>What the built-in terminal starts.</summary>
 internal enum TerminalKind { Claude, Codex, PowerShell }
+internal sealed record TerminalContext(string Workspace, string Profile);
 
 /// <summary>
 /// A real Windows console (conhost with PowerShell) shown inside the Trayvora window, with Claude Code or Codex
@@ -19,8 +20,13 @@ internal enum TerminalKind { Claude, Codex, PowerShell }
 [SupportedOSPlatform("windows")]
 internal sealed class TerminalPanel : UserControl
 {
-    private readonly Func<TerminalKind, ProcessStartInfo> _start;
+    private readonly Func<TerminalKind, TerminalContext, ProcessStartInfo> _start;
+    private readonly TextBlock _replaceMessage = TrayvoraTheme.Hint("");
+    private readonly StackPanel _replacePrompt;
+    private (TerminalKind Kind, TerminalContext Context)? _pending;
+    private TerminalContext? _context;
     private readonly Border _host = new() { Background = Brush.Parse("#0C0C0C"), CornerRadius = new CornerRadius(10), ClipToBounds = true };
+    private readonly Grid _surface = new();
     private readonly TextBlock _status = new() { Foreground = TrayvoraTheme.Muted, FontSize = 12, TextWrapping = TextWrapping.Wrap, Margin = new Thickness(14) };
     private readonly Dictionary<TerminalKind, Button> _chips = [];
     private ConsoleHost? _console;
@@ -28,7 +34,7 @@ internal sealed class TerminalPanel : UserControl
 
     public event Action? CloseRequested;
 
-    public TerminalPanel(Func<TerminalKind, ProcessStartInfo> start)
+    public TerminalPanel(Func<TerminalKind, TerminalContext, ProcessStartInfo> start)
     {
         _start = start;
         var chips = new StackPanel { Orientation = Orientation.Horizontal, Spacing = 6 };
@@ -41,7 +47,7 @@ internal sealed class TerminalPanel : UserControl
         {
             var chip = TrayvoraTheme.Chip(label);
             ToolTip.SetTip(chip, tip);
-            chip.Click += (_, _) => Start(kind);
+            chip.Click += (_, _) => { if (_context is { } context) Start(kind, context); };
             chips.Children.Add(chip);
             _chips[kind] = chip;
         }
@@ -51,7 +57,7 @@ internal sealed class TerminalPanel : UserControl
         TrayvoraTheme.Ghost(close);
         ToolTip.SetTip(restart, "Restart the terminal");
         ToolTip.SetTip(close, "Close the terminal");
-        restart.Click += (_, _) => Start(_kind);
+        restart.Click += (_, _) => { if (_context is { } context) Start(_kind, context, restart: true); };
         close.Click += (_, _) => CloseRequested?.Invoke();
         var header = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*,Auto,Auto"), ColumnSpacing = 6, Margin = new Thickness(0, 0, 0, 8) };
         var title = new TextBlock { Text = "Terminal", FontWeight = FontWeight.SemiBold, FontSize = 15, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 8, 0) };
@@ -59,13 +65,27 @@ internal sealed class TerminalPanel : UserControl
         Grid.SetColumn(restart, 2);
         Grid.SetColumn(close, 3);
         header.Children.AddRange([title, chips, restart, close]);
-        var hint = TrayvoraTheme.Hint("Click inside to type. Claude: /login, /model, /mcp, /config · Codex: /model, /mcp · type exit to close.");
+        var hint = TrayvoraTheme.Hint("Click inside to type. In Claude Code, enter /mcp to select a server and reconnect. Press Esc to leave the menu.");
         hint.Margin = new Thickness(2, 6, 0, 0);
+        var keep = new Button { Content = "Keep current console" };
+        var replace = new Button { Content = "Replace console" };
+        TrayvoraTheme.StyleControls(keep);
+        TrayvoraTheme.DangerButton(replace);
+        keep.Click += (_, _) => { ClearReplacement(); FocusConsole(); };
+        replace.Click += (_, _) => { if (_pending is { } next) StartCore(next.Kind, next.Context); };
+        _replaceMessage.TextWrapping = TextWrapping.Wrap;
+        _replacePrompt = new StackPanel
+        {
+            IsVisible = false, Spacing = 6, Margin = new Thickness(0, 0, 0, 8),
+            Children = { _replaceMessage, new WrapPanel { ItemSpacing = 6, LineSpacing = 6, Children = { keep, replace } } },
+        };
         var dock = new DockPanel();
         DockPanel.SetDock(header, Dock.Top);
+        DockPanel.SetDock(_replacePrompt, Dock.Top);
         DockPanel.SetDock(hint, Dock.Bottom);
-        dock.Children.AddRange([header, hint, _host]);
-        _host.Child = _status;
+        dock.Children.AddRange([header, _replacePrompt, hint, _host]);
+        _surface.Children.Add(_status);
+        _host.Child = _surface;
         Content = new Border
         {
             Background = TrayvoraTheme.Sidebar, BorderBrush = TrayvoraTheme.Border, BorderThickness = new Thickness(1, 0, 0, 0),
@@ -78,39 +98,98 @@ internal sealed class TerminalPanel : UserControl
     /// <summary>Gives the keyboard to the console (after the panel is shown or clicked).</summary>
     public void FocusConsole() => _console?.FocusConsole();
 
-    /// <summary>Starts (or restarts) the terminal with <paramref name="kind"/>.</summary>
-    public void Start(TerminalKind kind)
+    public void Start(TerminalKind kind, TerminalContext context, bool restart = false)
     {
-        _kind = kind;
-        foreach (var (key, chip) in _chips) TrayvoraTheme.SetSelected(chip, key == kind);
-        Stop();
+        if (!Running)
+        {
+            StartCore(kind, context);
+            return;
+        }
+
+        if (!restart && _kind == kind && _context == context)
+        {
+            ClearReplacement();
+            FocusConsole();
+            return;
+        }
+
+        _pending = (kind, context);
+        _replaceMessage.Text = $"{UiLanguage.T("Replacing the console will stop its running processes.")}\n{context.Workspace}";
+        _replacePrompt.IsVisible = true;
+    }
+
+    private void ClearReplacement()
+    {
+        _pending = null;
+        _replacePrompt.IsVisible = false;
+    }
+
+    private void StartCore(TerminalKind kind, TerminalContext context)
+    {
+        ConsoleHost? candidate = null;
         try
         {
-            _console = new ConsoleHost(_start(kind));
-            _console.Exited += () => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
-            {
-                if (_host.Child is ConsoleHost host && !host.Running)
-                {
-                    _status.Text = "The terminal was closed. Choose Claude Code, Codex or PowerShell above to start it again.";
-                    _host.Child = _status;
-                }
-            });
-            _host.Child = _console;
-            var console = _console;
-            Avalonia.Threading.Dispatcher.UIThread.Post(console.FocusConsole, Avalonia.Threading.DispatcherPriority.Background);
+            candidate = new ConsoleHost(_start(kind, context)) { IsVisible = false };
+            candidate.Exited += ConsoleExited;
+            _surface.Children.Add(candidate);
+            // Avalonia attaches the native window when the control enters the live visual tree.
+            if (!candidate.Running || (TopLevel.GetTopLevel(this) is not null && !candidate.Embedded))
+                throw new IOException(UiLanguage.T("Windows could not open the new console window."));
         }
         catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
         {
-            _status.Text = "Could not start the terminal: " + error.Message;
-            _host.Child = _status;
+            if (candidate is not null) RemoveConsole(candidate);
+            var message = "Could not start the terminal: " + error.Message;
+            if (Running)
+            {
+                _replaceMessage.Text = message;
+                _replacePrompt.IsVisible = true;
+            }
+            else
+            {
+                _context = context;
+                _kind = kind;
+                _status.Text = message;
+                _status.IsVisible = true;
+            }
+            return;
         }
+
+        var previous = _console;
+        _console = candidate;
+        _context = context;
+        _kind = kind;
+        foreach (var (key, chip) in _chips) TrayvoraTheme.SetSelected(chip, key == kind);
+        _status.IsVisible = false;
+        candidate.IsVisible = true;
+        ClearReplacement();
+        if (previous is not null) RemoveConsole(previous);
+        Avalonia.Threading.Dispatcher.UIThread.Post(candidate.FocusConsole, Avalonia.Threading.DispatcherPriority.Background);
+    }
+
+    private void ConsoleExited(ConsoleHost console) => Avalonia.Threading.Dispatcher.UIThread.Post(() =>
+    {
+        if (_console != console) return;
+        _console = null;
+        RemoveConsole(console);
+        _status.Text = "The terminal was closed. Choose Claude Code, Codex or PowerShell above to start it again.";
+        _status.IsVisible = true;
+    });
+
+    private void RemoveConsole(ConsoleHost console)
+    {
+        console.Exited -= ConsoleExited;
+        _surface.Children.Remove(console);
+        console.Kill();
     }
 
     public void Stop()
     {
-        _console?.Kill();
+        ClearReplacement();
+        if (_console is not { } console) return;
         _console = null;
-        _host.Child = _status;
+        RemoveConsole(console);
+        _status.IsVisible = true;
     }
 }
 
@@ -122,23 +201,29 @@ internal sealed partial class ConsoleHost : NativeControlHost
     private IntPtr _window;
     private uint _consoleThread, _uiThread;
     private bool _attached;
-    private bool _wasDown;
+    private bool _killed;
     private readonly Avalonia.Threading.DispatcherTimer _clicks = new() { Interval = TimeSpan.FromMilliseconds(30) };
     private readonly HashSet<IntPtr> _existing;
-    private readonly DateTime _started;
-
-    public event Action? Exited;
+    public event Action<ConsoleHost>? Exited;
 
     public ConsoleHost(ProcessStartInfo start)
     {
         start.UseShellExecute = false;
         start.WindowStyle = ProcessWindowStyle.Hidden;
-        DisableQuickEdit();
+        if (Path.GetFileName(start.FileName).Equals("conhost.exe", StringComparison.OrdinalIgnoreCase))
+            DisableQuickEdit();
         _existing = Consoles().Select(item => item.Window).ToHashSet();
-        _started = DateTime.Now.AddSeconds(-1);
         _process = Process.Start(start) ?? throw new InvalidOperationException("The console did not start.");
-        _process.EnableRaisingEvents = true;
-        _process.Exited += (_, _) => Exited?.Invoke();
+        try
+        {
+            _process.Exited += (_, _) => Exited?.Invoke(this);
+            _process.EnableRaisingEvents = true;
+        }
+        catch
+        {
+            Kill();
+            throw;
+        }
     }
 
     public bool Running
@@ -149,6 +234,8 @@ internal sealed partial class ConsoleHost : NativeControlHost
             catch (InvalidOperationException) { return false; }
         }
     }
+
+    public bool Embedded => _window != IntPtr.Zero;
 
     protected override IPlatformHandle CreateNativeControlCore(IPlatformHandle parent)
     {
@@ -161,13 +248,17 @@ internal sealed partial class ConsoleHost : NativeControlHost
         var extended = (long)GetWindowLongPtr(_window, GwlExStyle);
         SetWindowLongPtr(_window, GwlExStyle, (IntPtr)(extended & ~WsExAppWindow));
         SetParent(_window, parent.Handle);
-        ShowWindow(_window, 5);
+        if (GetParent(_window) != parent.Handle)
+        {
+            _window = IntPtr.Zero;
+            return base.CreateNativeControlCore(parent);
+        }
+        ShowWindow(_window, 4);
         // The console window belongs to another process. Sharing its keyboard input with ours lets a click
         // inside it take the keyboard focus, so typing, Enter and the arrow keys reach Claude Code.
         _consoleThread = GetWindowThreadProcessId(_window, out _);
         _uiThread = GetCurrentThreadId();
         if (_consoleThread != 0 && _consoleThread != _uiThread) _attached = AttachThreadInput(_uiThread, _consoleThread, true);
-        FocusConsole();
         // A click inside the console does not move the keyboard back from Trayvora's own controls by itself:
         // watch for a mouse press over the console and give it the keyboard.
         _clicks.Tick += (_, _) =>
@@ -175,7 +266,6 @@ internal sealed partial class ConsoleHost : NativeControlHost
             // 0x8000: held now; 0x0001: pressed since the last check (a short click between two ticks).
             var down = (GetAsyncKeyState(0x01) & 0x8001) != 0 | (GetAsyncKeyState(0x02) & 0x8001) != 0;
             if (down && GetCursorPos(out var point) && WindowFromPoint(point) == _window && GetFocus() != _window) FocusConsole();
-            _wasDown = down;
         };
         _clicks.Start();
         return new PlatformHandle(_window, "HWND");
@@ -195,6 +285,8 @@ internal sealed partial class ConsoleHost : NativeControlHost
 
     public void Kill()
     {
+        if (_killed) return;
+        _killed = true;
         _clicks.Stop();
         if (_attached)
         {
@@ -203,6 +295,7 @@ internal sealed partial class ConsoleHost : NativeControlHost
         }
         try { if (!_process.HasExited) _process.Kill(entireProcessTree: true); }
         catch (Exception error) when (error is InvalidOperationException or System.ComponentModel.Win32Exception) { }
+        finally { _process.Dispose(); }
     }
 
     /// <summary>
@@ -243,26 +336,57 @@ internal sealed partial class ConsoleHost : NativeControlHost
         return found;
     }
 
-    /// <summary>The new console window opened by our conhost: one that did not exist before and belongs to a shell started after it.</summary>
+    /// <summary>Find the new window owned by our conhost or the shell it started.</summary>
     private IntPtr FindConsole(TimeSpan wait)
     {
         var deadline = DateTime.UtcNow + wait;
-        while (DateTime.UtcNow < deadline)
+        while (Running && DateTime.UtcNow < deadline)
         {
             foreach (var (window, owner) in Consoles())
             {
                 if (_existing.Contains(window)) continue;
-                try
-                {
-                    using var shell = Process.GetProcessById(owner);
-                    if (owner == _process.Id || shell.StartTime >= _started) return window;
-                }
-                catch (Exception error) when (error is ArgumentException or InvalidOperationException or System.ComponentModel.Win32Exception) { }
+                if (owner == _process.Id || IsChildProcess(owner, _process.Id)) return window;
             }
             Thread.Sleep(50);
         }
         return IntPtr.Zero;
     }
+
+    private static unsafe bool IsChildProcess(int childId, int parentId)
+    {
+        using var snapshot = CreateToolhelp32Snapshot(2, 0); // TH32CS_SNAPPROCESS
+        if (snapshot.IsInvalid) return false;
+        var entry = new ProcessEntry { Size = (uint)sizeof(ProcessEntry) };
+        if (!Process32First(snapshot, ref entry)) return false;
+        do
+        {
+            if (entry.ProcessId == childId) return entry.ParentProcessId == parentId;
+        } while (Process32Next(snapshot, ref entry));
+        return false;
+    }
+
+    [StructLayout(LayoutKind.Sequential)]
+    private unsafe struct ProcessEntry
+    {
+        public uint Size, Usage;
+        public int ProcessId;
+        public IntPtr DefaultHeapId;
+        public uint ModuleId, Threads;
+        public int ParentProcessId, BasePriority;
+        public uint Flags;
+        public fixed char ExeFile[260];
+    }
+
+    [LibraryImport("kernel32.dll")]
+    private static partial Microsoft.Win32.SafeHandles.SafeFileHandle CreateToolhelp32Snapshot(uint flags, uint processId);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "Process32FirstW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool Process32First(Microsoft.Win32.SafeHandles.SafeFileHandle snapshot, ref ProcessEntry entry);
+
+    [LibraryImport("kernel32.dll", EntryPoint = "Process32NextW")]
+    [return: MarshalAs(UnmanagedType.Bool)]
+    private static partial bool Process32Next(Microsoft.Win32.SafeHandles.SafeFileHandle snapshot, ref ProcessEntry entry);
 
     private const int GwlStyle = -16, GwlExStyle = -20;
     private const long WsChild = 0x40000000, WsVisible = 0x10000000, WsCaption = 0x00C00000, WsThickFrame = 0x00040000,
@@ -288,6 +412,9 @@ internal sealed partial class ConsoleHost : NativeControlHost
 
     [LibraryImport("user32.dll")]
     private static partial IntPtr SetParent(IntPtr child, IntPtr parent);
+
+    [LibraryImport("user32.dll")]
+    private static partial IntPtr GetParent(IntPtr child);
 
     [LibraryImport("user32.dll")]
     [return: MarshalAs(UnmanagedType.Bool)]

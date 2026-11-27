@@ -8,6 +8,15 @@ internal sealed record CommandChoice(string Command, string Description)
 
 internal static class ClaudeCommands
 {
+    internal const string RefreshMcp = "This MCP result belongs to a different or unknown Claude profile. Run /mcp again to manage its servers.";
+
+    internal static string NormalizeProfile(string? path)
+    {
+        if (path is null || !Path.IsPathFullyQualified(path))
+            throw new IOException("Choose an absolute Claude profile folder.");
+        return Path.TrimEndingDirectorySeparator(Path.GetFullPath(path));
+    }
+
     internal static readonly string[] Efforts = ["auto", "low", "medium", "high", "xhigh", "max"];
     internal static readonly string[] Models = ["auto", "haiku", "sonnet", "opus"];
     internal static readonly CommandChoice[] Menu =
