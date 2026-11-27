@@ -14,6 +14,7 @@ internal sealed class ReplyStream
     private string? _activity;
     private readonly List<string> _steps = [];
     public const int StepsShown = 8;
+    private int _stepCount;
     private int _version;
 
     /// <summary>Adds text the agent has just produced.</summary>
@@ -56,15 +57,41 @@ internal sealed class ReplyStream
     }
 
     /// <summary>What the agent is doing besides writing ("Read · Client.cs"), or null when it is only writing.</summary>
-    public void Activity(string? activity)
+    public void Activity(string? activity) => Activity(activity, record: true);
+
+    public void Activity(string? activity, bool record)
     {
         lock (_gate)
         {
             if (_activity == activity) return;
             _activity = activity;
-            if (activity is not null) AddStep(activity);
+            if (record && activity is not null) AddStep(activity);
             _version++;
         }
+    }
+
+    public void RecordStep(string step)
+    {
+        lock (_gate)
+        {
+            AddStep(step);
+            _version++;
+        }
+    }
+
+    public string? WorkLog
+    {
+        get
+        {
+            lock (_gate) return _steps.Count == 0 ? null : FormatWorkLog(_steps, _stepCount);
+        }
+    }
+
+    public static string FormatWorkLog(IReadOnlyList<string> recent, int total)
+    {
+        if (recent.Count == 0) return "";
+        var log = string.Join("\n", recent);
+        return total > recent.Count ? $"… {total - recent.Count} earlier steps\n{log}" : log;
     }
 
     /// <summary>Something the reader should know about the finished reply, such as tools that were not permitted.</summary>
@@ -82,14 +109,17 @@ internal sealed class ReplyStream
         if (_steps.Count > 0 && (_steps[^1] == step || step.StartsWith(_steps[^1] + " ·", StringComparison.Ordinal)))
             _steps[^1] = step;
         else
+        {
             _steps.Add(step);
+            _stepCount++;
+        }
         if (_steps.Count > 200) _steps.RemoveRange(0, _steps.Count - 200);
     }
 
     /// <summary>The last steps (oldest first) and how many there were in total.</summary>
     public (IReadOnlyList<string> Recent, int Total) Steps
     {
-        get { lock (_gate) return (_steps.Skip(Math.Max(0, _steps.Count - StepsShown)).ToArray(), _steps.Count); }
+        get { lock (_gate) return (_steps.Skip(Math.Max(0, _steps.Count - StepsShown)).ToArray(), _stepCount); }
     }
 
     /// <summary>Formats steps for a muted list: done steps get ✓, the current one an arrow.</summary>

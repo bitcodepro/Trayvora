@@ -120,6 +120,28 @@ public sealed class ReplyStreamingTests
     }
 
     [Fact]
+    public void ClaudeWorkLogTracksToolsWithoutBufferingCommandsOrThinkingContent()
+    {
+        var stream = new ReplyStream();
+        var parser = new ClaudeStreamParser(stream);
+        parser.Accept("""{"type":"stream_event","event":{"type":"content_block_start","content_block":{"type":"thinking","thinking":"private thinking"}}}""");
+        Assert.Equal("Thinking", stream.Snapshot().Activity);
+        Assert.Null(stream.WorkLog);
+
+        parser.Accept("""{"type":"assistant","parent_tool_use_id":"outer","message":{"content":[{"type":"text","text":"subagent answer"},{"type":"tool_use","id":"toolu_1","name":"Bash","input":{"command":"some-command with-secret","description":"another-secret"}}]}}""");
+        parser.Accept("""{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash","elapsed_time_seconds":12}""");
+        Assert.Equal("Running · Bash · 12 s", stream.Snapshot().Activity);
+        parser.Accept("""{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash","elapsed_time_seconds":15}""");
+        Assert.Equal("Bash", stream.WorkLog);
+        parser.Accept("""{"type":"user","parent_tool_use_id":"outer","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"secret result"}]}}""");
+        Assert.Equal("Waiting for Claude", stream.Snapshot().Activity);
+        parser.Accept("""{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"E:/working/Example.cs"}}]}}""");
+        parser.Accept("""{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"file contents"}]}}""");
+        Assert.Equal("Bash\nFailed · Bash\nRead · Example.cs\nCompleted · Read · Example.cs", stream.WorkLog);
+        Assert.Equal("", stream.Text);
+    }
+
+    [Fact]
     public void ClaudeWithoutPartialEventsStillStreamsWholeBlocks()
     {
         var stream = new ReplyStream();

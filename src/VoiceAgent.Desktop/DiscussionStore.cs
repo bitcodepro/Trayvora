@@ -12,7 +12,9 @@ internal sealed record DiscussionMessage(DiscussionMember Sender, DiscussionMemb
     DiscussionMember? DiscussWith = null, bool Final = false, string? Note = null, bool Interrupted = false, string? Workspace = null, Guid? ThreadId = null, bool DesktopThread = false, Guid? DeliveryId = null, string? DeliveryProfile = null, string? Command = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? McpProfile = null,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients PendingFor = DeliveryRecipients.None,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients NotSentTo = DeliveryRecipients.None);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients NotSentTo = DeliveryRecipients.None,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients UnconfirmedFor = DeliveryRecipients.None,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkLog = null);
 
 /// <summary>A "discuss with …" exchange: the lead works with the partner and reports the decision to Boss.</summary>
 internal sealed record DiscussionPlan(DiscussionMember Lead, DiscussionMember Partner, int ExchangesLeft);

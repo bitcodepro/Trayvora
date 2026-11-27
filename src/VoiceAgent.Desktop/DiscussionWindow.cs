@@ -60,6 +60,8 @@ internal sealed partial class DiscussionWindow(
 
     private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null, IReadOnlyList<string>? Files = null, UserPost? Post = null);
 
+    private enum DeliveryStage { Unconfirmed, Confirmed, NotSent }
+
     private sealed class UserPost(DiscussionMessage message, Task<bool> saved)
     {
         public DiscussionMessage Message { get; set; } = message;
@@ -81,13 +83,14 @@ internal sealed partial class DiscussionWindow(
     }
 
     /// <summary>The bubble of a reply that is still being written.</summary>
-    private sealed class LiveBubble(ReplyStream stream, Control row, MarkdownView view, TextBlock activity, TextBlock waiting, TextBlock steps)
+    private sealed class LiveBubble(ReplyStream stream, Control row, MarkdownView view, TextBlock activity, TextBlock waiting, TextBlock steps, Expander? log)
     {
         public ReplyStream Stream { get; } = stream;
         public Control Row { get; } = row;
         public MarkdownView View { get; } = view;
         public TextBlock Activity { get; } = activity;
         public TextBlock Steps { get; } = steps;
+        public Expander? Log { get; } = log;
         public TextBlock Waiting { get; } = waiting;
         public DateTime Started { get; } = DateTime.Now;
         public int Version { get; set; } = -1;
@@ -1676,7 +1679,7 @@ internal sealed partial class DiscussionWindow(
             try { await previous.WaitAsync(token); }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
-                await SetPostDelivery(room, delivery, notSent: true);
+                await SetPostDelivery(room, delivery, DeliveryStage.NotSent);
                 return;
             }
             await Deliver(delivery);
@@ -1699,7 +1702,7 @@ internal sealed partial class DiscussionWindow(
                 // The agent gets the files themselves, not paths parsed back out of the text.
                 IReadOnlyList<string> files = file is null ? delivery.Files ?? [] : [file, .. delivery.Files ?? []];
                 var prompt = Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss);
-                if (!await SetPostDelivery(room, delivery, notSent: false))
+                if (!await SetPostDelivery(room, delivery, DeliveryStage.Unconfirmed))
                     throw new IOException("Could not update the queued message. The request was not sent.");
                 token.ThrowIfCancellationRequested();
                 var profile = agent == DiscussionMember.Claude ? claudeProfile : codexProfile;
@@ -1707,22 +1710,28 @@ internal sealed partial class DiscussionWindow(
                     throw new IOException("The agent profile changed while the request was queued. Send the message again to use the selected profile.");
                 dispatched = true;
                 answer = await send(agent, prompt, room, stream, files, token);
+                await SetPostDelivery(room, delivery, DeliveryStage.Confirmed);
             }
             catch (Exception error)
             {
                 // Keep what the agent had already written, then record why it stopped (a pause is not a failure).
                 var partial = stream.Text.Trim();
+                var workLog = agent == DiscussionMember.Claude ? stream.WorkLog : null;
                 // Claude Code prints its own error (for example a sign-in failure) as reply text; show it once, as the failure.
                 var echo = error is IOException && partial.Length > 0 && error.Message.Contains(partial, StringComparison.Ordinal);
                 if (partial.Length > 0 && !echo)
-                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes, Interrupted: true));
-                if (!dispatched) await SetPostDelivery(room, delivery, notSent: true);
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes,
+                        Interrupted: true, WorkLog: token.IsCancellationRequested ? workLog : null));
+                else if (token.IsCancellationRequested && workLog is not null)
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, "Claude turn stopped.", DateTimeOffset.Now,
+                        Interrupted: true, WorkLog: workLog));
+                if (!dispatched) await SetPostDelivery(room, delivery, DeliveryStage.NotSent);
                 if (!token.IsCancellationRequested)
                 {
                     var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
                         or InvalidDataException or TimeoutException
                         ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
-                    _ = Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true));
+                    _ = Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true, WorkLog: workLog));
                     ErrorLog.Write(error, $"Sessions · {agent}", $"room {room.Id}, chat {(agent == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId)}");
                 }
                 return;
@@ -1744,10 +1753,10 @@ internal sealed partial class DiscussionWindow(
                 outcome = $"Codex is still working in Codex Desktop. Its reply will appear in {chatName}.";
                 return;
             }
-            Handle(delivery, answer.Trim(), stream.Notes);
+            Handle(delivery, answer.Trim(), stream.Notes, agent == DiscussionMember.Claude ? stream.WorkLog : null);
         }
 
-        void Handle(Delivery delivery, string answer, string? note)
+        void Handle(Delivery delivery, string answer, string? note, string? workLog)
         {
             var agent = delivery.To;
             var next = Recipient(answer);
@@ -1757,7 +1766,7 @@ internal sealed partial class DiscussionWindow(
                 if (agent == plan.Partner)
                 {
                     // The partner always answers the lead.
-                    _ = Append(room, new DiscussionMessage(agent, plan.Lead, body, DateTimeOffset.Now, Note: note));
+                    _ = Append(room, new DiscussionMessage(agent, plan.Lead, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
                     queue.Enqueue(new Delivery(plan.Lead, agent, body, null, Discuss: plan));
                 }
                 else if (next == plan.Partner && plan.ExchangesLeft > 0)
@@ -1765,18 +1774,18 @@ internal sealed partial class DiscussionWindow(
                     if (plan.Partner == DiscussionMember.Claude && room.Claude is null)
                     {
                         outcome = "Codex wants to discuss with Claude, but this session has no Claude chat selected.";
-                        _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note));
+                        _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
                         stop = true;
                         return;
                     }
-                    _ = Append(room, new DiscussionMessage(agent, plan.Partner, body, DateTimeOffset.Now, Note: note));
+                    _ = Append(room, new DiscussionMessage(agent, plan.Partner, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
                     queue.Enqueue(new Delivery(plan.Partner, agent, body, null, Discuss: plan with { ExchangesLeft = plan.ExchangesLeft - 1 }));
                     partnerAsked = true;
                 }
                 else
                 {
                     // The lead's answer to Boss (or anything after the last exchange) ends the discussion.
-                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Final: true, Note: note));
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Final: true, Note: note, WorkLog: workLog));
                     outcome = partnerAsked
                         ? $"{plan.Lead} and {plan.Partner} finished the discussion. {plan.Lead} sent you the final answer."
                         : $"{plan.Lead} answered without asking {plan.Partner}.";
@@ -1785,7 +1794,7 @@ internal sealed partial class DiscussionWindow(
             }
             if (next == agent || next == DiscussionMember.Boss) next = null;
             if (delivery.Relay) next = agent == DiscussionMember.Codex ? DiscussionMember.Claude : DiscussionMember.Codex;
-            _ = Append(room, new DiscussionMessage(agent, next ?? DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note));
+            _ = Append(room, new DiscussionMessage(agent, next ?? DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
             if (next is not { } handoff) return;
             if (handoff == DiscussionMember.Claude && room.Claude is null)
             {
@@ -1800,7 +1809,7 @@ internal sealed partial class DiscussionWindow(
     private static DeliveryRecipients RecipientFlag(DiscussionMember agent) =>
         agent == DiscussionMember.Claude ? DeliveryRecipients.Claude : DeliveryRecipients.Codex;
 
-    private Task<bool> SetPostDelivery(DiscussionRoom room, Delivery delivery, bool notSent)
+    private Task<bool> SetPostDelivery(DiscussionRoom room, Delivery delivery, DeliveryStage stage)
     {
         if (delivery.Post is not { } post) return Task.FromResult(true);
         var flag = RecipientFlag(delivery.To);
@@ -1810,7 +1819,8 @@ internal sealed partial class DiscussionWindow(
         post.Message = previous with
         {
             PendingFor = previous.PendingFor & ~flag,
-            NotSentTo = notSent ? previous.NotSentTo | flag : previous.NotSentTo,
+            UnconfirmedFor = stage == DeliveryStage.Unconfirmed ? previous.UnconfirmedFor | flag : previous.UnconfirmedFor & ~flag,
+            NotSentTo = stage == DeliveryStage.NotSent ? previous.NotSentTo | flag : previous.NotSentTo,
         };
         return ReplaceMessage(room, index, post.Message);
     }
@@ -1871,7 +1881,7 @@ internal sealed partial class DiscussionWindow(
 
     private Task<bool> Append(DiscussionRoom room, DiscussionMessage message)
     {
-        if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed
+        if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed && !message.Interrupted
             && message.Command is null && message.DeliveryId is null && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
             _ = speak(message.Text);
         if (message.Command is null && message.Sender != DiscussionMember.Boss)
@@ -1908,6 +1918,8 @@ internal sealed partial class DiscussionWindow(
         var view = new MarkdownView { IsVisible = false };
         var waiting = new TextBlock { Text = "•", FontSize = 18, Foreground = MemberColor(agent), LetterSpacing = 2 };
         var steps = new TextBlock { FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, IsVisible = false, LineHeight = 17 };
+        var log = agent == DiscussionMember.Claude ? WorkLogPanel(steps, expanded: true) : null;
+        if (log is not null) log.IsVisible = false;
         var activity = new TextBlock { FontSize = 11, Foreground = TrayvoraTheme.Muted, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         var meta = new StackPanel
         {
@@ -1919,7 +1931,7 @@ internal sealed partial class DiscussionWindow(
             Background = TrayvoraTheme.Surface, BorderBrush = MemberColor(agent), BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(4, 14, 14, 14), Padding = new Thickness(14, 10), MaxWidth = BubbleWidth,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Child = new StackPanel { Spacing = 6, Children = { steps, waiting, view } },
+            Child = new StackPanel { Spacing = 6, Children = { (Control?)log ?? steps, waiting, view } },
         };
         var avatar = TrayvoraTheme.Avatar(Initials(agent), MemberColor(agent), 32);
         avatar.VerticalAlignment = VerticalAlignment.Top;
@@ -1927,7 +1939,7 @@ internal sealed partial class DiscussionWindow(
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(0, 0, 80, 0) };
         Grid.SetColumn(column, 1);
         row.Children.AddRange([avatar, column]);
-        _live[agent] = new LiveBubble(stream, row, view, activity, waiting, steps);
+        _live[agent] = new LiveBubble(stream, row, view, activity, waiting, steps, log);
         _messages.Children.Add(row);
         UpdateLive();
         ScrollToEnd();
@@ -1944,15 +1956,18 @@ internal sealed partial class DiscussionWindow(
             var doing = activity ?? (text.Length == 0 ? "is working" : "is writing");
             bubble.Activity.Text = seconds < 1 ? doing + "…" : $"{doing}… · {seconds} s";
             if (text.Length == 0) bubble.Waiting.Text = new string('•', 1 + (int)(DateTime.Now - bubble.Started).TotalMilliseconds / 380 % 3);
+            if (version == bubble.Version) continue;
             var (recent, total) = bubble.Stream.Steps;
-            var steps = ReplyStream.FormatSteps(recent, total, running: activity is not null);
+            var steps = bubble.Log is null
+                ? ReplyStream.FormatSteps(recent, total, running: activity is not null)
+                : ReplyStream.FormatWorkLog(recent, total);
             if (bubble.Steps.Text != steps)
             {
                 bubble.Steps.Text = steps;
                 bubble.Steps.IsVisible = steps.Length > 0;
+                if (bubble.Log is { } log) log.IsVisible = steps.Length > 0;
                 grew = true;
             }
-            if (version == bubble.Version) continue;
             bubble.Version = version;
             bubble.Waiting.IsVisible = text.Length == 0;
             bubble.View.IsVisible = text.Length > 0;
@@ -1961,6 +1976,17 @@ internal sealed partial class DiscussionWindow(
         }
         if (grew) ScrollToEnd();
     }
+
+    private static Expander WorkLogPanel(TextBlock steps, bool expanded = false) => new()
+    {
+        Header = "Work log", IsExpanded = expanded,
+        Content = new ScrollViewer { MaxHeight = 188, Content = steps },
+    };
+
+    private static Expander SavedWorkLog(string log) => WorkLogPanel(new SelectableTextBlock
+    {
+        FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, Text = log,
+    });
 
     private void Render(DiscussionMessage message, bool scroll = true, int insertAt = -1)
     {
@@ -2009,6 +2035,7 @@ internal sealed partial class DiscussionWindow(
                     failedTools,
                 },
             };
+            if (message.WorkLog is { Length: > 0 } failedLog) notice.Children.Insert(1, SavedWorkLog(failedLog));
             AttachTools(notice, failedTools, message);
             Place(message, notice, scroll, insertAt);
             return;
@@ -2035,6 +2062,8 @@ internal sealed partial class DiscussionWindow(
             meta.Children.Add(TrayvoraTheme.Hint($"{UiLanguage.T("Queued for")} {message.PendingFor}"));
         if (message.NotSentTo != DeliveryRecipients.None)
             meta.Children.Add(TrayvoraTheme.Hint($"{UiLanguage.T("Not sent to")} {message.NotSentTo}"));
+        if (message.UnconfirmedFor != DeliveryRecipients.None)
+            meta.Children.Add(TrayvoraTheme.Hint($"{UiLanguage.T("Delivery unconfirmed for")} {message.UnconfirmedFor}"));
         if (message.DiscussWith is { } partnerBadge)
         {
             var badge = new Border
@@ -2097,6 +2126,7 @@ internal sealed partial class DiscussionWindow(
         var tools = LazyTools(alignRight: mine);
 
         var column = new StackPanel { Spacing = 4, Children = { meta, bubble } };
+        if (message.WorkLog is { Length: > 0 } log) column.Children.Add(SavedWorkLog(log));
         if (message.Note is { Length: > 0 } note)
             column.Children.Add(new TextBlock
             {

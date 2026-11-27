@@ -23,6 +23,7 @@ internal static class ClaudeToolPrompts
         Task<bool>? decision = null;
         var waiting = new List<(string Id, string Tool, JsonElement Input)>();
         string? pending = null;
+        string? pendingTool = null;
         JsonElement arguments = default;
         try
         {
@@ -35,13 +36,17 @@ internal static class ClaudeToolPrompts
                     var first = waiting[0];
                     waiting.RemoveAt(0);
                     pending = first.Id;
+                    pendingTool = first.Tool;
+                    parser.PermissionStatus(first.Tool, "Waiting for permission");
                     arguments = first.Input;
                     dialog = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                     decision = confirm(first.Tool, first.Input, dialog.Token);
                 }
                 if (decision is not null && await Task.WhenAny(decision, next).ConfigureAwait(false) == decision)
                 {
-                    if (await decision.ConfigureAwait(false))
+                    var allowed = await decision.ConfigureAwait(false);
+                    parser.PermissionStatus(pendingTool!, allowed ? "Permission granted" : "Permission denied");
+                    if (allowed)
                         await Reply(pending!, new { behavior = "allow", updatedInput = arguments }).ConfigureAwait(false);
                     else await Deny(pending!).ConfigureAwait(false);
                     decision = null;
@@ -76,6 +81,7 @@ internal static class ClaudeToolPrompts
                     waiting.RemoveAll(item => item.Id == id);
                     if (id == pending && dialog is not null)
                     {
+                        parser.PermissionStatus(pendingTool!, "Permission request closed");
                         dialog.Cancel();
                         dialog.Dispose();
                         dialog = null;
