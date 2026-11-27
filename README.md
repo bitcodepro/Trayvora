@@ -37,6 +37,8 @@ For a portable copy, download `trayvora-win-x64.zip`, extract it to a writable f
 
 ## Interactive controls
 
+- In **Sessions**, turn on **/ Command mode** next to **Voice mode**, type `/`, then click a suggestion or use ↓ and Enter. Use `/mcp` to check servers in the selected Claude workspace, `/resume` to pick a saved chat by title, and `/effort` or `/model` to set the next Claude turns in this Trayvora session. `/help` lists the supported commands. Results are saved in the conversation as **Claude CLI → You**. Turn the mode off to return to your message draft, where slash-prefixed text follows the usual recipient and relay settings.
+
 - Trayvora checks the Claude Code account at startup and opens sign-in if the CLI reports that the session needs it. Claude uses the selected chat's workspace and CLI profile. When Claude asks permission to call an MCP tool, review its name, arguments and workspace, then choose **Allow once** or **Deny**.
 - Enable **Settings → Theme → Plain text replies (continuous mouse selection)** to drag across paragraphs in an answer. The reply's **Copy** action includes link addresses and file paths in plain text. If streamed formatting makes a selection ambiguous, clearing the selection shows the latest text.
 

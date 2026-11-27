@@ -45,6 +45,7 @@ public sealed class DesktopEventsTests
                 window.Close();
                 VerifyOverlay();
                 VerifySessions();
+                VerifyCommandMode();
                 VerifyLongSession();
                 VerifyDiscussWith();
                 VerifyStreamingSession();
@@ -241,6 +242,98 @@ public sealed class DesktopEventsTests
         {
             preview.Close();
         }
+    }
+
+    private static void VerifyCommandMode()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-commands-");
+        var window = new Window { Width = 900, Height = 650 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Review project");
+            var calls = new List<string>();
+            var sent = new List<string>();
+            var view = new DiscussionWindow(store, (_, text, _, _, _, _) => { sent.Add(text); return Task.FromResult<string?>("OK"); },
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([chat]), () => null,
+                (_, _, _) => Task.FromResult<string?>(null));
+            view.RunClaudeCommand = (args, workspace, ct) =>
+            {
+                Assert.Equal(folder.FullName, workspace);
+                calls.Add(string.Join(" ", args));
+                return Task.FromResult((0, "sample: server --config private-value - ✓ Connected"));
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.IsEnabled);
+            Assert.True(view.IsEnabled);
+            var controls = view.GetLogicalDescendants().ToArray();
+            var mode = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>()
+                .Single(b => AutomationProperties.GetName(b) == "Claude command mode");
+            var line = controls.OfType<TextBox>().Single(b => b.PlaceholderText == "Type / for Claude CLI commands");
+            var editor = controls.OfType<TextBox>().Single(b => b.PlaceholderText?.StartsWith("Message Codex") == true);
+            var run = controls.OfType<Button>().Single(b => Equals(b.Content, "Run command"));
+            var list = controls.OfType<ListBox>().Single(b => AutomationProperties.GetName(b) == "Claude command suggestions");
+            var send = controls.OfType<Button>().Single(b => AutomationProperties.GetName(b) == "Send");
+            var voice = controls.OfType<Avalonia.Controls.Primitives.ToggleButton>()
+                .Single(b => Equals(b.Content, "Voice mode"));
+            var switches = Assert.IsType<StackPanel>(mode.Parent);
+            Assert.Equal<Control>([voice, mode], switches.Children);
+            Assert.True(mode.IsEffectivelyVisible);
+            Assert.True(voice.IsEffectivelyVisible);
+
+            editor.Text = "/version";
+            mode.IsChecked = true;
+            Assert.True(mode.IsEffectivelyVisible);
+            Assert.True(voice.IsEffectivelyVisible);
+            Assert.False(voice.IsEnabled);
+            Assert.True(line.IsEffectivelyVisible);
+            Assert.False(editor.IsEffectivelyVisible);
+            line.Text = "/res";
+            PumpUntil(() => list.Items.OfType<CommandChoice>().SingleOrDefault()?.Command == "/resume");
+            void Run(string command)
+            {
+                line.Text = command;
+                run.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => !view.IsRunning);
+                Pump(view.PendingSaves);
+            }
+            list.SelectedIndex = 0;
+            list.RaiseEvent(new KeyEventArgs { Key = Key.Enter, RoutedEvent = InputElement.KeyDownEvent });
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
+            Assert.Contains(list.Items.OfType<CommandChoice>(), item => item.Description == chat.Title);
+            Run($"/resume {chat.Id}");
+            Run("/effort high");
+            Run("/model sonnet");
+            Run("/mcp");
+            Run("/mcp ; echo unsafe");
+            Run("/unknown");
+            var saved = Assert.Single(store.Load());
+            Assert.Equal(chat, saved.Claude);
+            Assert.Equal("high", saved.ClaudeEffort);
+            Assert.Equal("sonnet", saved.ClaudeModel);
+            var arguments = new List<string>();
+            ClaudeCommands.AddTurnOptions(arguments, saved.ClaudeEffort, saved.ClaudeModel);
+            Assert.Equal(["--effort", "high", "--model", "sonnet"], arguments);
+            Assert.Equal(["mcp list"], calls);
+            Assert.Equal(5, saved.Messages.Count);
+            Assert.All(saved.Messages, msg => { Assert.NotNull(msg.Command); Assert.Equal(DiscussionMember.Boss, msg.To); });
+            Assert.Equal("sample · ✓ Connected", saved.Messages[^1].Text);
+            send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.Empty(sent);
+            mode.IsChecked = false;
+            Assert.True(voice.IsEnabled);
+            Assert.False(line.IsEffectivelyVisible);
+            Assert.True(editor.IsEffectivelyVisible);
+            Assert.Equal("/version", editor.Text);
+            send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => sent.Count == 1 && !view.IsRunning);
+            Assert.Contains("/version", sent[0]);
+            Pump(view.PendingSaves);
+        }
+        finally { window.Close(); folder.Delete(recursive: true); }
     }
 
     private static void VerifySessions()

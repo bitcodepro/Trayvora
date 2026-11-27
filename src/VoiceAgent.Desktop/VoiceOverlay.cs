@@ -639,7 +639,7 @@ internal sealed class VoiceOverlay : Window
                     if (room.Claude is not { } chat) throw new IOException("Choose a Claude chat for this session first.");
                     var attachments = Path.Combine(folder, "attachments", room.Id.ToString("N"));
                     var reply = await ClaudeChats.SendAsync(_claudeExe.Text?.Trim() ?? "", ClaudeProfile(), chat, message, ct, stream, room.ClaudePermissions, attachments,
-                        (name, input, token) => ConfirmClaudeToolAsync(chat, name, input, token));
+                        (name, input, token) => ConfirmClaudeToolAsync(chat, name, input, token), room.ClaudeEffort, room.ClaudeModel);
                     // A chat Trayvora started is added to Claude Desktop's Code tab once Claude Code has saved it.
                     if (chat.Title.StartsWith("New Claude chat", StringComparison.Ordinal)) _ = Task.Run(() => ClaudeDesktopSessions.Register(chat));
                     return reply;
@@ -700,6 +700,8 @@ internal sealed class VoiceOverlay : Window
             DictateAsync,
             () => new DiscussionSettings(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings")).Rounds,
             OpenTerminal);
+            _discussion.RunClaudeCommand = (args, workspace, ct) => CliSession.RunAsync(
+                ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(ClaudeProfile()), ct, workspace);
             _discussion.StopSpeaking = () => _replyAudio?.Stop();
             if (_sharedChat is not null) _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
             _discussion.Initialize();

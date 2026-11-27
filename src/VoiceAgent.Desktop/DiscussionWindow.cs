@@ -24,7 +24,7 @@ internal sealed record CodexChatOption(Guid Id, string Title, bool Desktop)
 /// Replies are shown while they are written; messages to different agents are delivered at the same time.
 /// Several sessions can run at the same time.
 /// </summary>
-internal sealed class DiscussionWindow(
+internal sealed partial class DiscussionWindow(
     DiscussionStore store,
     Func<DiscussionMember, string, DiscussionRoom, ReplyStream, IReadOnlyList<string>, CancellationToken, Task<string?>> send,
     Func<IReadOnlyList<Conversation>> codexChats,
@@ -358,7 +358,8 @@ internal sealed class DiscussionWindow(
         }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         KeyDown += (_, args) =>
         {
-            if (args.Key == Key.Escape && _dictationCancel is { } dictation) { dictation.Cancel(); args.Handled = true; }
+            if (args.Key == Key.Escape && _commandMode.IsChecked == true) { _commandMode.IsChecked = false; args.Handled = true; }
+            else if (args.Key == Key.Escape && _dictationCancel is { } dictation) { dictation.Cancel(); args.Handled = true; }
             else if (args.Key == Key.Escape && CurrentRun is { } run) { run.Cancel.Cancel(); args.Handled = true; }
             else if (args.Key == Key.Escape) { BackRequested?.Invoke(); args.Handled = true; }
         };
@@ -423,12 +424,13 @@ internal sealed class DiscussionWindow(
 
     public Action? StopSpeaking { get; set; }
     public bool BusyForUpdate => IsRunning || _dictationStop is not null || _attachments?.Copying == true || !_saves.IsCompleted;
-    public bool IsRunning => _runs.Count > 0;
+    public bool IsRunning => _runs.Count > 0 || _commandCancel is not null;
     public DiscussionRoom? CurrentRoom => _room;
 
     /// <summary>Stops every running session (used on shutdown).</summary>
     public void Pause()
     {
+        _commandCancel?.Cancel();
         foreach (var run in _runs.Values) run.Cancel.Cancel();
     }
 
@@ -698,9 +700,9 @@ internal sealed class DiscussionWindow(
 
     private Control BuildComposer()
     {
-        var toRow = new StackPanel
+        var toRow = new WrapPanel
         {
-            Orientation = Orientation.Horizontal, Spacing = 6,
+            Orientation = Orientation.Horizontal, ItemSpacing = 6, LineSpacing = 6,
             Children = { new TextBlock { Text = "To", Foreground = TrayvoraTheme.Muted, FontSize = 12, VerticalAlignment = VerticalAlignment.Center, Margin = new Thickness(2, 0, 4, 0) }, Joined(_toCodex, _relayCodex), Joined(_toClaude, _relayClaude), _toBoth, RelayHint() },
         };
         var bottom = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto") };
@@ -728,7 +730,12 @@ internal sealed class DiscussionWindow(
         _voiceMode.IsVisible = dictate is not null;
         _voiceMode.FontSize = 11.5;
         _voiceMode.Padding = new Thickness(10, 3);
-        toRow.Children.Add(_voiceMode);
+        _commandMode.FontSize = _voiceMode.FontSize;
+        _commandMode.Padding = _voiceMode.Padding;
+        toRow.Children.Add(new StackPanel
+        {
+            Orientation = Orientation.Horizontal, Spacing = 6, Children = { _voiceMode, _commandMode },
+        });
         _recognizer.FontSize = 11.5;
         _recognizer.MinHeight = 26;
         _recognizer.Padding = new Thickness(10, 2);
@@ -741,6 +748,8 @@ internal sealed class DiscussionWindow(
         TrayvoraTheme.StyleControls(_recognizer);
         toRow.Children.Add(_recognizer);
 
+        var messageInput = new StackPanel { Spacing = 8, Children = { ResizeGrip(), Attachments.Chips, input, _level } };
+        var commandInput = BuildCommandInput(messageInput);
         var box = new Border
         {
             Background = TrayvoraTheme.Surface,
@@ -748,7 +757,7 @@ internal sealed class DiscussionWindow(
             BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(18),
             Padding = new Thickness(14, 10, 10, 10),
-            Child = new StackPanel { Spacing = 8, Children = { ResizeGrip(), Attachments.Chips, input, _level, bottom } },
+            Child = new StackPanel { Spacing = 8, Children = { messageInput, commandInput, bottom } },
         };
         _editor.GotFocus += (_, _) => box.BorderBrush = TrayvoraTheme.Accent;
         _editor.LostFocus += (_, _) => box.BorderBrush = TrayvoraTheme.Border;
@@ -881,6 +890,11 @@ internal sealed class DiscussionWindow(
         if (room.Claude is { } claude) text.AppendLine($"- Claude session: {claude.Title}");
         foreach (var message in room.Messages)
         {
+            if (message.Command is { } command)
+            {
+                text.AppendLine().AppendLine($"## Claude CLI → You · {command}").AppendLine().AppendLine(message.Text);
+                continue;
+            }
             var to = message.To is { } target ? $" → {target}" : message.Sender == DiscussionMember.Boss ? " → Both" : "";
             var flags = message.Failed ? " (did not answer)" : message.Interrupted ? " (interrupted)" : message.ForwardedFrom is { } from ? $" (forwarded from {from})" : "";
             text.AppendLine().AppendLine($"## {message.Sender}{to}{flags} · {message.Time.ToLocalTime():g}").AppendLine().AppendLine(message.Text.TrimEnd());
@@ -974,6 +988,7 @@ internal sealed class DiscussionWindow(
     private void Open(DiscussionRoom? room)
     {
         _openVersion++;
+        _commandMode.IsChecked = false;
         if (_room is { } previous && _items.Contains(previous))
             _drafts[previous.Id] = new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
         _room = room;
@@ -1033,6 +1048,7 @@ internal sealed class DiscussionWindow(
         {
             Id = room.Id, Title = room.Title, Created = room.Created, Updated = room.Updated,
             CodexChatId = room.CodexChatId, CodexDesktop = room.CodexDesktop, CodexChatTitle = room.CodexChatTitle,
+            ClaudeEffort = room.ClaudeEffort, ClaudeModel = room.ClaudeModel,
             Claude = room.Claude, Messages = [.. room.Messages],
             ClaudePermissions = room.ClaudePermissions, NewCodexFolder = room.NewCodexFolder, CodexWorkspace = room.CodexWorkspace,
         };
@@ -1328,15 +1344,19 @@ internal sealed class DiscussionWindow(
         var length = _editor.Text?.Length ?? 0;
         _counter.Text = length == 0 ? "" : length > MaxLength ? $"{length:N0} · sent as a .txt file" : $"{length:N0}";
         _counter.Foreground = length > MaxTypedLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
-        var idle = CurrentRun is null;
+        _counter.IsVisible = _commandMode.IsChecked != true;
+        var idle = CurrentRun is null && _commandCancel is null;
+        _commandMode.IsEnabled = CurrentRun is null && _dictationStop is null && !Attachments.Copying;
         var open = _room is not null;
         var files = _attachments?.Files.Count ?? 0;
         if (Attachments.Copying) _counter.Text = "Copying attachment…";
         _send.IsEnabled = idle && !Attachments.Copying && length <= MaxTypedLength && (files > 0 || (length > 0 && !string.IsNullOrWhiteSpace(_editor.Text)));
         _pause.Content = Attachments.Copying ? "Cancel copy" : "Pause";
-        _pause.IsVisible = !idle || Attachments.Copying;
+        _pause.IsVisible = CurrentRun is not null || Attachments.Copying;
         _delete.IsEnabled = idle && open;
-        _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle;
+        var messageMode = _commandMode.IsChecked != true;
+        _voiceMode.IsEnabled = _recognizer.IsEnabled = messageMode;
+        _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = idle && messageMode;
         _codexChat.IsEnabled = _claudeChat.IsEnabled = _codexSearch.IsEnabled = _claudeSearch.IsEnabled = _claudeRights.IsEnabled = _newCodex.IsEnabled = _newClaude.IsEnabled = idle && open;
         _loadDesktop.IsEnabled = idle && open && !Equals(_loadDesktop.Content, "Loading…");
         _loadClaude.IsEnabled = idle && open && !Equals(_loadClaude.Content, "Loading…");
@@ -1390,6 +1410,7 @@ internal sealed class DiscussionWindow(
 
     private void UpdateMic()
     {
+        _commandMode.IsEnabled = CurrentRun is null && _dictationStop is null && _attachments?.Copying != true;
         var recording = _dictationStop is not null && !_dictationTranscribing;
         _mic.Content = new TextBlock
         {
@@ -1406,7 +1427,7 @@ internal sealed class DiscussionWindow(
 
     private async Task ToggleDictationAsync()
     {
-        if (dictate is null || _dictationTranscribing) return;
+        if (dictate is null || _dictationTranscribing || _commandMode.IsChecked == true) return;
         if (_dictationStop is { } stop)
         {
             stop.Cancel();
@@ -1489,6 +1510,7 @@ internal sealed class DiscussionWindow(
 
     private async Task PostAsync()
     {
+        if (_commandMode.IsChecked == true || _commandCancel is not null) return;
         var attached = Attachments.Files.ToArray();
         if (Attachments.Copying || CurrentRun is not null || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
         var text = (_editor.Text ?? "").Trim();
@@ -1529,7 +1551,7 @@ internal sealed class DiscussionWindow(
         }
         if (!Ready(room, (relayTo ?? discuss?.Partner) is { } partnerAgent ? [.. targets, partnerAgent] : targets)) return;
 
-        if (room.Messages.Count == 0 && room.Title == DiscussionStore.DefaultTitle)
+        if (room.Title == DiscussionStore.DefaultTitle && room.Messages.All(m => m.Command is not null))
         {
             room.Title = DiscussionStore.TitleFrom(text);
             _title.Text = room.Title;
@@ -1566,6 +1588,11 @@ internal sealed class DiscussionWindow(
 
     private bool Ready(DiscussionRoom room, IEnumerable<DiscussionMember> targets)
     {
+        if (_commandMode.IsChecked == true || _commandCancel is not null)
+        {
+            _status.Text = "Exit command mode to send a message.";
+            return false;
+        }
         if (!targets.Contains(DiscussionMember.Claude) || room.Claude is not null) return true;
         _status.Text = "Choose a Claude chat for this session first (Load Claude chats).";
         return false;
@@ -1759,9 +1786,9 @@ internal sealed class DiscussionWindow(
     private Task<bool> Append(DiscussionRoom room, DiscussionMessage message)
     {
         if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed
-            && message.DeliveryId is null && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
+            && message.Command is null && message.DeliveryId is null && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
             _ = speak(message.Text);
-        if (message.Sender != DiscussionMember.Boss)
+        if (message.Command is null && message.Sender != DiscussionMember.Boss)
             message = message with { Workspace = WorkspaceFor(room, message.Sender),
                 DesktopThread = room.CodexDesktop && message.Sender == DiscussionMember.Codex,
                 ThreadId = message.Sender == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId };
@@ -1851,6 +1878,16 @@ internal sealed class DiscussionWindow(
 
     private void Render(DiscussionMessage message, bool scroll = true, int insertAt = -1)
     {
+        if (message.Command is { } command)
+        {
+            var result = new StackPanel { Spacing = 4, Margin = new Thickness(8), Children =
+            {
+                TrayvoraTheme.Hint($"Claude CLI → You   ·   {command}"),
+                new SelectableTextBlock { Text = message.Text, TextWrapping = TextWrapping.Wrap }
+            } };
+            Place(message, result, scroll, insertAt);
+            return;
+        }
         if (message.Failed)
         {
             var failedAt = message.Time.ToLocalTime();
