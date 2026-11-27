@@ -18,15 +18,26 @@ internal sealed partial class DiscussionWindow
     private CancellationTokenSource? _commandCancel;
     private string? _suggestionsFor;
     private bool _commandEnterDown;
-    internal Func<string[], string, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
+    internal Func<string>? CurrentClaudeProfile { get; set; }
+    internal Func<string[], TerminalContext, CancellationToken, Task<(int Code, string Output)>>? RunClaudeCommand { get; set; }
 
     private static string CommandWorkspace(DiscussionRoom? room) =>
         room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace ?? AppContext.BaseDirectory;
 
-    private void OpenCommandConsole(string? workspace = null)
+    private void OpenCommandConsole(DiscussionMessage? mcpResult = null)
     {
-        try { openTerminal?.Invoke(workspace ?? CommandWorkspace(_room)); }
-        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException)
+        if (openTerminal is null) return;
+        try
+        {
+            var profile = ClaudeCommands.NormalizeProfile(CurrentClaudeProfile?.Invoke());
+            if (mcpResult is not null && (mcpResult.McpProfile != profile || mcpResult.Workspace is null))
+            {
+                _status.Text = ClaudeCommands.RefreshMcp;
+                return;
+            }
+            openTerminal(new TerminalContext(mcpResult?.Workspace ?? CommandWorkspace(_room), profile));
+        }
+        catch (Exception error) when (error is IOException or System.ComponentModel.Win32Exception or InvalidOperationException or ArgumentException)
         { _status.Text = "Could not open the terminal: " + error.Message; }
     }
 
@@ -193,6 +204,7 @@ internal sealed partial class DiscussionWindow
         _status.Text = $"Running {name}…";
         string nextInput = "/";
         var workspace = CommandWorkspace(room);
+        string? mcpProfile = null;
         try
         {
             string result;
@@ -235,13 +247,16 @@ internal sealed partial class DiscussionWindow
             {
                 var args = ClaudeCommands.Arguments(name) ?? throw new InvalidOperationException("Unknown command.");
                 var runner = RunClaudeCommand ?? throw new IOException("Claude CLI is unavailable.");
-                var (code, output) = await runner(args, workspace, operation.Token);
+                var profile = ClaudeCommands.NormalizeProfile(CurrentClaudeProfile?.Invoke());
+                var (code, output) = await runner(args, new TerminalContext(workspace, profile), operation.Token);
+                if (name == "/mcp") mcpProfile = profile;
                 operation.Token.ThrowIfCancellationRequested();
                 result = ClaudeCommands.Output(name, code, output);
             }
             var label = arg.Length == 0 || name == "/resume" && !Guid.TryParse(arg, out _) ? name : $"{name} {arg}";
             _status.Text = "";
-            await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, result, DateTimeOffset.Now, Workspace: name == "/mcp" ? workspace : null, Command: label));
+            await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, result, DateTimeOffset.Now,
+                Workspace: mcpProfile is null ? null : workspace, Command: label, McpProfile: mcpProfile));
             if (!operation.IsCancellationRequested)
             {
                 _commandInput.Text = nextInput;
@@ -257,7 +272,7 @@ internal sealed partial class DiscussionWindow
                 await Append(room, new(DiscussionMember.Claude, DiscussionMember.Boss, "Claude CLI timed out.", DateTimeOffset.Now, Command: name));
             }
         }
-        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or System.ComponentModel.Win32Exception)
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException or InvalidOperationException or ArgumentException or System.ComponentModel.Win32Exception)
         {
             if (!operation.IsCancellationRequested)
             {

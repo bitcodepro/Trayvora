@@ -511,6 +511,7 @@
   "Replace console": "Замінити консоль",
   "Replacing the console will stop its running processes.": "Заміна консолі зупинить запущені в ній процеси.",
   "Manage MCP in console": "Керувати MCP у консолі",
+  "This MCP result belongs to a different or unknown Claude profile. Run /mcp again to manage its servers.": "Цей результат MCP належить іншому або невідомому профілю Claude. Запустіть /mcp ще раз, щоб керувати серверами.",
   "Open interactive Claude Code in this session’s workspace.": "Відкрити інтерактивний Claude Code в робочій папці цієї сесії.",
   "In Claude Code, type /mcp, choose a server and select Reconnect.": "У Claude Code введіть /mcp, виберіть сервер і натисніть Reconnect.",
   "Click inside to type. In Claude Code, enter /mcp to select a server and reconnect. Press Esc to leave the menu.": "Клацніть у консолі, щоб вводити текст. У Claude Code введіть /mcp, виберіть сервер і перепідключіть його. Esc закриває меню.",

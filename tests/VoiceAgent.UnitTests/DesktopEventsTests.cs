@@ -255,15 +255,24 @@ public sealed class DesktopEventsTests
             var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Review project");
             var calls = new List<string>();
             var sent = new List<string>();
-            var consoles = new List<string>();
+            var firstProfile = Path.Combine(folder.FullName, "profile-one");
+            var secondProfile = Path.Combine(folder.FullName, "profile-two");
+            var activeProfile = firstProfile + Path.DirectorySeparatorChar;
+            var consoles = new List<TerminalContext>();
+            var reply = new TaskCompletionSource<(int, string)>();
+            var legacy = store.Create(null);
+            legacy.Messages.Add(new(DiscussionMember.Claude, DiscussionMember.Boss, "Legacy MCP status",
+                DateTimeOffset.Now, Workspace: folder.FullName, Command: "/mcp"));
+            store.Save(legacy);
             var view = new DiscussionWindow(store, (_, text, _, _, _, _) => { sent.Add(text); return Task.FromResult<string?>("OK"); },
                 () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([chat]), () => null,
                 (_, _, _) => Task.FromResult<string?>(null), openTerminal: consoles.Add);
-            view.RunClaudeCommand = (args, workspace, ct) =>
+            view.CurrentClaudeProfile = () => activeProfile;
+            view.RunClaudeCommand = (args, context, ct) =>
             {
-                Assert.Equal(folder.FullName, workspace);
+                Assert.Equal(new TerminalContext(folder.FullName, firstProfile), context);
                 calls.Add(string.Join(" ", args));
-                return Task.FromResult((0, "sample: server --config private-value - ✓ Connected"));
+                return reply.Task;
             };
             view.Initialize();
             window.Content = view;
@@ -295,7 +304,13 @@ public sealed class DesktopEventsTests
             var console = controls.OfType<Button>().Single(b => Equals(b.Content, "Claude console"));
             Assert.True(console.IsEffectivelyVisible);
             console.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Assert.Equal([AppContext.BaseDirectory], consoles);
+            Assert.Equal([new TerminalContext(AppContext.BaseDirectory, firstProfile)], consoles);
+            void AssertNeedsFreshMcp() => Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(),
+                block => block.Text == ClaudeCommands.RefreshMcp);
+            var legacyManage = view.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "Manage MCP in console"));
+            legacyManage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            AssertNeedsFreshMcp();
+            Assert.Single(consoles);
             Assert.Empty(sent);
             line.Text = "/res";
             PumpUntil(() => list.Items.OfType<CommandChoice>().SingleOrDefault()?.Command == "/resume");
@@ -314,10 +329,10 @@ public sealed class DesktopEventsTests
             Press(Key.Enter);
             Assert.Equal("/resume", line.Text);
             Assert.Equal(line.Text.Length, line.CaretIndex);
-            Assert.Empty(store.ReadRoom(view.CurrentRoom!.Id).Messages);
+            Assert.Single(store.ReadRoom(view.CurrentRoom!.Id).Messages);
 
             Press(Key.Enter);
-            Assert.Empty(store.ReadRoom(view.CurrentRoom!.Id).Messages);
+            Assert.Single(store.ReadRoom(view.CurrentRoom!.Id).Messages);
             ReleaseEnter();
             Enter();
             PumpUntil(() => !view.IsRunning);
@@ -351,6 +366,9 @@ public sealed class DesktopEventsTests
             Assert.Empty(calls);
             ReleaseEnter();
             Enter();
+            Assert.True(view.IsRunning);
+            activeProfile = secondProfile;
+            reply.SetResult((0, "sample: server --config private-value - ✓ Connected"));
             PumpUntil(() => !view.IsRunning);
             Pump(view.PendingSaves);
             Run("/mcp ; echo unsafe");
@@ -363,14 +381,20 @@ public sealed class DesktopEventsTests
             ClaudeCommands.AddTurnOptions(arguments, saved.ClaudeEffort, saved.ClaudeModel);
             Assert.Equal(["--effort", "high", "--model", "sonnet"], arguments);
             Assert.Equal(["mcp list"], calls);
-            Assert.Equal(6, saved.Messages.Count);
+            Assert.Equal(7, saved.Messages.Count);
             Assert.All(saved.Messages, msg => { Assert.NotNull(msg.Command); Assert.Equal(DiscussionMember.Boss, msg.To); });
             Assert.Equal("sample · ✓ Connected", saved.Messages[^1].Text);
             Assert.Equal(folder.FullName, saved.Messages[^1].Workspace);
-            var manage = view.GetLogicalDescendants().OfType<Button>().Single(b => Equals(b.Content, "Manage MCP in console"));
+            Assert.Equal(firstProfile, saved.Messages[^1].McpProfile);
+            Assert.Null(saved.Messages[0].McpProfile);
+            var manage = view.GetLogicalDescendants().OfType<Button>().Last(b => Equals(b.Content, "Manage MCP in console"));
+            manage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            AssertNeedsFreshMcp();
+            Assert.Single(consoles);
+            activeProfile = firstProfile;
             view.CurrentRoom!.Claude = new ClaudeChat(Guid.NewGuid(), Path.Combine(folder.FullName, "other"), "Other project");
             manage.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            Assert.Equal([AppContext.BaseDirectory, folder.FullName], consoles);
+            Assert.Equal([new TerminalContext(AppContext.BaseDirectory, firstProfile), new TerminalContext(folder.FullName, firstProfile)], consoles);
             Assert.Equal(["mcp list"], calls);
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Assert.Empty(sent);
@@ -396,9 +420,11 @@ public sealed class DesktopEventsTests
             var first = new TerminalContext(Directory.CreateDirectory(Path.Combine(directory.FullName, "one")).FullName, "profile");
             var second = new TerminalContext(Directory.CreateDirectory(Path.Combine(directory.FullName, "two")).FullName, "profile");
             var starts = new List<TerminalContext>();
+            var currentProfile = first.Profile;
             // Use a hidden process with a fixed lifetime to exercise replacement without an agent session.
             var terminal = new TerminalPanel((_, context) =>
             {
+                if (context.Profile != currentProfile) throw new IOException(ClaudeCommands.RefreshMcp);
                 starts.Add(context);
                 var shell = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "WindowsPowerShell", "v1.0", "powershell.exe");
                 var start = new System.Diagnostics.ProcessStartInfo(shell) { WorkingDirectory = context.Workspace, CreateNoWindow = true };
@@ -421,6 +447,12 @@ public sealed class DesktopEventsTests
                 Assert.True(terminal.Running);
                 Assert.Equal([first], starts);
                 terminal.Start(TerminalKind.Claude, second);
+                currentProfile = "changed";
+                replace.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Assert.True(terminal.Running);
+                Assert.Equal([first], starts);
+
+                currentProfile = second.Profile;
                 replace.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
                 Assert.False(replace.IsEffectivelyVisible);
                 Assert.True(terminal.Running);

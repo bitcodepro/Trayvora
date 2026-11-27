@@ -700,8 +700,9 @@ internal sealed class VoiceOverlay : Window
             DictateAsync,
             () => new DiscussionSettings(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings")).Rounds,
             OpenTerminal);
-            _discussion.RunClaudeCommand = (args, workspace, ct) => CliSession.RunAsync(
-                ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(ClaudeProfile()), ct, workspace);
+            _discussion.CurrentClaudeProfile = ClaudeProfile;
+            _discussion.RunClaudeCommand = (args, context, ct) => CliSession.RunAsync(
+                ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(context.Profile), ct, context.Workspace);
             _discussion.StopSpeaking = () => _replyAudio?.Stop();
             if (_sharedChat is not null) _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
             _discussion.Initialize();
@@ -723,9 +724,9 @@ internal sealed class VoiceOverlay : Window
     /// <summary>
     /// Opens Claude Code interactively in the requested workspace with the configured Claude profile.
     /// </summary>
-    private void OpenTerminal(string workspace)
+    private void OpenTerminal(TerminalContext context)
     {
-        if (OperatingSystem.IsWindows()) ShowTerminal(TerminalKind.Claude, workspace);
+        if (OperatingSystem.IsWindows()) ShowTerminal(TerminalKind.Claude, context);
     }
 
     private Button? _terminalButton;
@@ -735,19 +736,28 @@ internal sealed class VoiceOverlay : Window
 
     /// <summary>Opens the built-in terminal beside the chat (or restarts it with another program).</summary>
     [System.Runtime.Versioning.SupportedOSPlatform("windows")]
-    public void ShowTerminal(TerminalKind kind, string? workspace = null)
+    public void ShowTerminal(TerminalKind kind, TerminalContext? context = null)
     {
-        var room = _discussion?.IsVisible == true ? _discussion.CurrentRoom : null;
-        var folder = workspace ?? room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace;
-        if (workspace is not null && !Directory.Exists(workspace))
-            throw new DirectoryNotFoundException($"The console workspace is unavailable: {workspace}");
-        if (!Directory.Exists(folder)) folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
-        var context = new TerminalContext(folder!, ClaudeProfile());
+        if (context is null)
+        {
+            var room = _discussion?.IsVisible == true ? _discussion.CurrentRoom : null;
+            var folder = room?.Claude?.Workspace ?? room?.NewCodexFolder ?? room?.CodexWorkspace;
+            if (!Directory.Exists(folder)) folder = Environment.GetFolderPath(Environment.SpecialFolder.UserProfile);
+            context = new TerminalContext(folder!, ClaudeProfile());
+        }
+        else if (!Directory.Exists(context.Workspace))
+            throw new DirectoryNotFoundException($"The console workspace is unavailable: {context.Workspace}");
         Show();
         Activate();
         if (_terminal is null)
         {
-            _terminal = new TerminalPanel((which, target) => TerminalStart(target.Workspace, target.Profile, which));
+            _terminal = new TerminalPanel((which, target) =>
+            {
+                // A replacement may wait for confirmation while settings change.
+                if (which == TerminalKind.Claude && ClaudeCommands.NormalizeProfile(target.Profile) != ClaudeCommands.NormalizeProfile(ClaudeProfile()))
+                    throw new IOException(UiLanguage.T(ClaudeCommands.RefreshMcp));
+                return TerminalStart(target.Workspace, target.Profile, which);
+            });
             _terminal.CloseRequested += HideTerminal;
             Grid.SetColumn(_terminal, 2);
             _shell.Children.Add(_terminal);
