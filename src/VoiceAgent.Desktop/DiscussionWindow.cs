@@ -33,7 +33,7 @@ internal sealed partial class DiscussionWindow(
     Func<ClaudeChat?> defaultClaude,
     Func<CancellationToken, CancellationToken, IProgress<double>, Task<string?>>? dictate = null,
     Func<int>? discussRounds = null,
-    Action<TerminalContext>? openTerminal = null) : UserControl
+    Action<TerminalKind, TerminalContext>? openTerminal = null) : UserControl
 {
     private readonly Button _newCodex = new() { Content = "New…" };
     private readonly Button _newClaude = new() { Content = "New…" };
@@ -354,7 +354,7 @@ internal sealed partial class DiscussionWindow(
         _newClaude.Click += async (_, _) => await NewClaudeAsync(false);
         _newCodex.ContextFlyout = ChooseMenu(NewCodexAsync);
         _newClaude.ContextFlyout = ChooseMenu(NewClaudeAsync);
-        _terminal.Click += (_, _) => OpenCommandConsole();
+        _terminal.Click += (_, _) => OpenCommandConsole(_commandAgent ?? DiscussionMember.Claude);
         _loadClaude.Click += async (_, _) => await LoadClaudeAsync();
         _editor.TextChanged += (_, _) => UpdateComposer();
         _editor.AddHandler(KeyDownEvent, async (_, args) =>
@@ -365,7 +365,7 @@ internal sealed partial class DiscussionWindow(
         }, Avalonia.Interactivity.RoutingStrategies.Tunnel);
         KeyDown += (_, args) =>
         {
-            if (args.Key == Key.Escape && _commandMode.IsChecked == true) { _commandMode.IsChecked = false; args.Handled = true; }
+            if (args.Key == Key.Escape && InCommandMode) { CloseCommandMode(); args.Handled = true; }
             else if (args.Key == Key.Escape && _dictationCancel is { } dictation) { dictation.Cancel(); args.Handled = true; }
             else if (args.Key == Key.Escape && CurrentRun is { } run) { run.Cancel.Cancel(); args.Handled = true; }
             else if (args.Key == Key.Escape) { BackRequested?.Invoke(); args.Handled = true; }
@@ -750,11 +750,11 @@ internal sealed partial class DiscussionWindow(
         _voiceMode.IsVisible = dictate is not null;
         _voiceMode.FontSize = 11.5;
         _voiceMode.Padding = new Thickness(10, 3);
-        _commandMode.FontSize = _voiceMode.FontSize;
-        _commandMode.Padding = _voiceMode.Padding;
+        _commandClaude.FontSize = _commandCodex.FontSize = _voiceMode.FontSize;
+        _commandClaude.Padding = _commandCodex.Padding = _voiceMode.Padding;
         toRow.Children.Add(new StackPanel
         {
-            Orientation = Orientation.Horizontal, Spacing = 6, Children = { _voiceMode, _commandMode },
+            Orientation = Orientation.Horizontal, Spacing = 6, Children = { _voiceMode, _commandClaude, _commandCodex },
         });
         _recognizer.FontSize = 11.5;
         _recognizer.MinHeight = 26;
@@ -910,9 +910,9 @@ internal sealed partial class DiscussionWindow(
         if (room.Claude is { } claude) text.AppendLine($"- Claude session: {claude.Title}");
         foreach (var message in room.Messages)
         {
-            if (message.Command is { } command)
+            if (message.Command is not null)
             {
-                text.AppendLine().AppendLine($"## Claude CLI → You · {command}").AppendLine().AppendLine(message.Text);
+                text.AppendLine().AppendLine($"## {CommandTitle(message)}").AppendLine().AppendLine(message.Text);
                 continue;
             }
             var to = message.To is { } target ? $" → {target}" : message.Sender == DiscussionMember.Boss ? " → Both" : "";
@@ -1009,7 +1009,7 @@ internal sealed partial class DiscussionWindow(
     private void Open(DiscussionRoom? room)
     {
         _openVersion++;
-        _commandMode.IsChecked = false;
+        CloseCommandMode();
         if (_room is { } previous && _items.Contains(previous))
             _drafts[previous.Id] = new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
         _room = room;
@@ -1365,18 +1365,18 @@ internal sealed partial class DiscussionWindow(
         var length = _editor.Text?.Length ?? 0;
         _counter.Text = length == 0 ? "" : length > MaxLength ? $"{length:N0} · sent as a .txt file" : $"{length:N0}";
         _counter.Foreground = length > MaxTypedLength ? TrayvoraTheme.Danger : TrayvoraTheme.Faint;
-        _counter.IsVisible = _commandMode.IsChecked != true;
+        _counter.IsVisible = !InCommandMode;
         var idle = CurrentRun is null && _commandCancel is null;
-        _commandMode.IsEnabled = CurrentRun is null && _dictationStop is null && !Attachments.Copying;
+        _commandClaude.IsEnabled = _commandCodex.IsEnabled = CurrentRun is null && _dictationStop is null && !Attachments.Copying;
         var open = _room is not null;
         var files = _attachments?.Files.Count ?? 0;
         if (Attachments.Copying) _counter.Text = "Copying attachment…";
-        _send.IsEnabled = _commandMode.IsChecked != true && _commandCancel is null && CurrentRun?.Cancel.IsCancellationRequested != true
+        _send.IsEnabled = !InCommandMode && _commandCancel is null && CurrentRun?.Cancel.IsCancellationRequested != true
             && !Attachments.Copying && length <= MaxTypedLength && (files > 0 || !string.IsNullOrWhiteSpace(_editor.Text));
         _pause.Content = Attachments.Copying ? "Cancel copy" : "Pause";
         _pause.IsVisible = CurrentRun is not null || Attachments.Copying;
         _delete.IsEnabled = idle && open;
-        var messageMode = _commandMode.IsChecked != true;
+        var messageMode = !InCommandMode;
         _voiceMode.IsEnabled = _recognizer.IsEnabled = messageMode;
         _toCodex.IsEnabled = _toClaude.IsEnabled = _toBoth.IsEnabled = _relayCodex.IsEnabled = _relayClaude.IsEnabled = messageMode && _commandCancel is null;
         _codexChat.IsEnabled = _claudeChat.IsEnabled = _codexSearch.IsEnabled = _claudeSearch.IsEnabled = _claudeRights.IsEnabled = _newCodex.IsEnabled = _newClaude.IsEnabled = idle && open;
@@ -1432,7 +1432,7 @@ internal sealed partial class DiscussionWindow(
 
     private void UpdateMic()
     {
-        _commandMode.IsEnabled = CurrentRun is null && _dictationStop is null && _attachments?.Copying != true;
+        _commandClaude.IsEnabled = _commandCodex.IsEnabled = CurrentRun is null && _dictationStop is null && _attachments?.Copying != true;
         var recording = _dictationStop is not null && !_dictationTranscribing;
         _mic.Content = new TextBlock
         {
@@ -1449,7 +1449,7 @@ internal sealed partial class DiscussionWindow(
 
     private async Task ToggleDictationAsync()
     {
-        if (dictate is null || _dictationTranscribing || _commandMode.IsChecked == true) return;
+        if (dictate is null || _dictationTranscribing || InCommandMode) return;
         if (_dictationStop is { } stop)
         {
             stop.Cancel();
@@ -1532,7 +1532,7 @@ internal sealed partial class DiscussionWindow(
 
     private async Task PostAsync()
     {
-        if (_commandMode.IsChecked == true || _commandCancel is not null) return;
+        if (InCommandMode || _commandCancel is not null) return;
         var attached = Attachments.Files.ToArray();
         if (Attachments.Copying || CurrentRun?.Cancel.IsCancellationRequested == true
             || (string.IsNullOrWhiteSpace(_editor.Text) && attached.Length == 0)) return;
@@ -1609,7 +1609,7 @@ internal sealed partial class DiscussionWindow(
 
     private bool Ready(DiscussionRoom room, IEnumerable<DiscussionMember> targets)
     {
-        if (_commandMode.IsChecked == true || _commandCancel is not null)
+        if (InCommandMode || _commandCancel is not null)
         {
             _status.Text = "Exit command mode to send a message.";
             return false;
@@ -2000,21 +2000,30 @@ internal sealed partial class DiscussionWindow(
         FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, Text = log,
     });
 
+    private static string CommandTitle(DiscussionMessage message)
+    {
+        var profile = message.Sender == DiscussionMember.Codex && message.Command == "/mcp" && message.McpProfile is not null
+            ? " · " + UiLanguage.T("Profile configuration") : "";
+        return $"{message.Sender} CLI → You · {message.Command}{profile}";
+    }
+
     private void Render(DiscussionMessage message, bool scroll = true, int insertAt = -1)
     {
         if (message.Command is { } command)
         {
             var result = new StackPanel { Spacing = 4, Margin = new Thickness(8), Children =
             {
-                TrayvoraTheme.Hint($"Claude CLI → You   ·   {command}"),
+                TrayvoraTheme.Hint(CommandTitle(message)),
                 new SelectableTextBlock { Text = message.Text, TextWrapping = TextWrapping.Wrap }
             } };
-            if (command == "/mcp" && openTerminal is not null)
+            if (command == "/mcp" && openTerminal is not null && (message.Sender == DiscussionMember.Claude || message.McpProfile is not null))
             {
                 var manage = new Button { Content = "Manage MCP in console" };
                 TrayvoraTheme.Ghost(manage);
-                ToolTip.SetTip(manage, "In Claude Code, type /mcp, choose a server and select Reconnect.");
-                manage.Click += (_, _) => OpenCommandConsole(message);
+                ToolTip.SetTip(manage, message.Sender == DiscussionMember.Claude
+                    ? "In Claude Code, type /mcp, choose a server and select Reconnect."
+                    : "Open Codex and type /mcp to inspect server status.");
+                manage.Click += (_, _) => OpenCommandConsole(message.Sender, message);
                 result.Children.Add(manage);
             }
             Place(message, result, scroll, insertAt);
@@ -2152,7 +2161,7 @@ internal sealed partial class DiscussionWindow(
             TrayvoraTheme.StyleControls(type, voice);
             bool Prepare()
             {
-                if (_room is not { } active || _commandMode.IsChecked == true || _commandCancel is not null) return false;
+                if (_room is not { } active || InCommandMode || _commandCancel is not null) return false;
                 var bound = sender == DiscussionMember.Claude ? active.Claude?.Id : active.CodexChatId;
                 if (message.ThreadId is { } expected && expected != bound)
                 { _status.Text = "Select the original chat before replying to this question."; return false; }

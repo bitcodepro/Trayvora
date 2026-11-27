@@ -70,35 +70,54 @@ public sealed partial class CodexSession(string dataDirectory)
 
     public async Task<IReadOnlyList<string>> ConfiguredMcpServersAsync()
     {
-        if (!await _turn.WaitAsync(0).ConfigureAwait(false))
+        var config = await ReadMcpConfigAsync(null, CancellationToken.None).ConfigureAwait(false);
+        if (!config.TryGetProperty("mcp_servers", out var entries) || entries.ValueKind != JsonValueKind.Object)
+            return [];
+
+        return entries.EnumerateObject()
+            .Where(entry => ThreadIdPattern().IsMatch(entry.Name))
+            .Select(entry => entry.Value.TryGetProperty("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.False
+                ? $"{entry.Name} · Disabled" : $"{entry.Name} · Configured, blocked for turns")
+            .Take(100).ToArray();
+    }
+
+    public async Task<bool> VerifySessionMcpAsync(bool useRevqora, CancellationToken ct)
+    {
+        var revqora = useRevqora ? RevqoraExecutable() : null;
+        var config = await ReadMcpConfigAsync(revqora, ct).ConfigureAwait(false);
+        VerifyConfig(config, revqora);
+        return revqora is not null;
+    }
+
+    private async Task<JsonElement> ReadMcpConfigAsync(string? revqora, CancellationToken ct)
+    {
+        if (!await _turn.WaitAsync(0, ct).ConfigureAwait(false))
         {
             throw new InvalidOperationException("Wait for the current Codex request to finish.");
         }
 
         try
         {
-            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(10));
-            var (connection, _, workspace) = OpenConnection();
+            using var timeout = CancellationTokenSource.CreateLinkedTokenSource(ct);
+            timeout.CancelAfter(TimeSpan.FromSeconds(10));
+            var (connection, _, workspace) = OpenConnection(revqora);
             await using var ownedConnection = connection;
             await connection.InitializeAsync(timeout.Token).ConfigureAwait(false);
-            var response = await connection.RequestAsync("config/read", new { cwd = workspace, includeLayers = false }, timeout.Token)
-                .ConfigureAwait(false);
-            var config = response.GetProperty("config");
-            if (!config.TryGetProperty("mcp_servers", out var entries) || entries.ValueKind != JsonValueKind.Object)
-            {
-                return [];
-            }
-
-            return entries.EnumerateObject()
-                .Where(entry => ThreadIdPattern().IsMatch(entry.Name))
-                .Select(entry => entry.Value.TryGetProperty("enabled", out var enabled) && enabled.ValueKind == JsonValueKind.False
-                    ? $"{entry.Name} · Disabled" : $"{entry.Name} · Configured, blocked for turns")
-                .Take(100).ToArray();
+            return await ReadConfigAsync(connection, workspace, timeout.Token).ConfigureAwait(false);
         }
         finally
         {
             _turn.Release();
         }
+    }
+
+    private static async Task<JsonElement> ReadConfigAsync(ICodexConnection connection, string workspace, CancellationToken ct)
+    {
+        var response = await connection.RequestAsync("config/read", new { cwd = workspace, includeLayers = false }, ct)
+            .ConfigureAwait(false);
+        if (response.ValueKind != JsonValueKind.Object || !response.TryGetProperty("config", out var config) || config.ValueKind != JsonValueKind.Object)
+            throw new InvalidDataException("Codex App Server did not return a configuration object.");
+        return config;
     }
 
     private (AppServerConnection Connection, string Home, string Workspace) OpenConnection(string? revqora = null)
@@ -169,9 +188,7 @@ public sealed partial class CodexSession(string dataDirectory)
             throw new InvalidOperationException("Sign in with ChatGPT in the Trayvora Codex profile, then retry.");
         }
 
-        var response = await connection.RequestAsync("config/read", new { cwd = workspace, includeLayers = false }, token)
-            .ConfigureAwait(false);
-        VerifyConfig(response.GetProperty("config"), revqora);
+        VerifyConfig(await ReadConfigAsync(connection, workspace, token).ConfigureAwait(false), revqora);
 
         var previous = ReadThread(threadFile);
         JsonElement thread;
@@ -386,9 +403,15 @@ public sealed partial class CodexSession(string dataDirectory)
 
     internal static void VerifyConfig(JsonElement config, string? revqora)
     {
-        var features = config.GetProperty("features");
-        if (config.GetProperty("model_provider").GetString() != "openai" ||
-            config.GetProperty("web_search").GetString() != "disabled" ||
+        if (config.ValueKind != JsonValueKind.Object ||
+            !config.TryGetProperty("features", out var features) || features.ValueKind != JsonValueKind.Object ||
+            !config.TryGetProperty("model_provider", out var provider) || provider.ValueKind != JsonValueKind.String ||
+            !config.TryGetProperty("web_search", out var webSearch) || webSearch.ValueKind != JsonValueKind.String)
+        {
+            throw new InvalidDataException("Codex App Server returned an incomplete configuration.");
+        }
+
+        if (provider.GetString() != "openai" || webSearch.GetString() != "disabled" ||
             DisabledFeatures.Any(name => !features.TryGetProperty(name, out var value) || value.ValueKind != JsonValueKind.False))
         {
             throw new InvalidOperationException("The VoiceAgent Codex profile must have shell and external integrations disabled.");
@@ -454,7 +477,7 @@ public sealed partial class CodexSession(string dataDirectory)
         }
     }
 
-    internal static string FindExecutable()
+    public static string FindExecutable()
     {
         var configured = Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE");
         if (!string.IsNullOrWhiteSpace(configured) && Path.IsPathFullyQualified(configured) && File.Exists(configured)) return configured;

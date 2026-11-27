@@ -28,7 +28,7 @@ internal sealed class CliSession : IDisposable
     private readonly Process _process;
     public event Action<string>? Line;
 
-    public CliSession(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string>? environment = null, string? workspace = null)
+    public CliSession(string executable, IEnumerable<string> arguments, IReadOnlyDictionary<string, string?>? environment = null, string? workspace = null, bool includeStandardError = true)
     {
         var start = new ProcessStartInfo(executable)
         {
@@ -38,10 +38,18 @@ internal sealed class CliSession : IDisposable
         };
         if (workspace is not null) start.WorkingDirectory = workspace;
         foreach (var argument in arguments) start.ArgumentList.Add(argument);
-        if (environment is not null) foreach (var (name, value) in environment) start.Environment[name] = value;
+        if (environment is not null)
+        {
+            foreach (var (name, value) in environment)
+            {
+                if (value is null) start.Environment.Remove(name);
+                else start.Environment[name] = value;
+            }
+        }
         _process = new Process { StartInfo = start, EnableRaisingEvents = true };
         _process.OutputDataReceived += (_, args) => { if (args.Data is { } text) Line?.Invoke(Clean(text)); };
-        _process.ErrorDataReceived += (_, args) => { if (args.Data is { } text) Line?.Invoke(Clean(text)); };
+        if (includeStandardError)
+            _process.ErrorDataReceived += (_, args) => { if (args.Data is { } text) Line?.Invoke(Clean(text)); };
     }
 
     public void Start()
@@ -67,9 +75,9 @@ internal sealed class CliSession : IDisposable
 
     /// <summary>Runs a short command to completion and returns its exit code and output.</summary>
     public static async Task<(int Code, string Output)> RunAsync(string executable, IEnumerable<string> arguments,
-        IReadOnlyDictionary<string, string>? environment, CancellationToken cancellationToken, string? workspace = null)
+        IReadOnlyDictionary<string, string?>? environment, CancellationToken cancellationToken, string? workspace = null, bool includeStandardError = true)
     {
-        using var session = new CliSession(executable, arguments, environment, workspace);
+        using var session = new CliSession(executable, arguments, environment, workspace, includeStandardError);
         var output = new System.Text.StringBuilder();
         session.Line += line => { lock (output) output.AppendLine(line); };
         session.Start();
@@ -96,8 +104,6 @@ internal sealed class CliSession : IDisposable
 
 internal static class AccountProviders
 {
-    private static readonly string[] CodexAuth = ["-c", "cli_auth_credentials_store=\"file\"", "-c", "forced_login_method=\"chatgpt\""];
-
     /// <summary>ChatGPT sign-in for Trayvora's own Codex profile (kept in codex-data next to Trayvora.exe).</summary>
     public static AccountProvider ChatGpt() => new(
         "ChatGPT",
@@ -105,12 +111,12 @@ internal static class AccountProviders
         async ct =>
         {
             if (CodexExe() is not { } codex) return new(false, "Codex was not found. Install the Codex app or Codex CLI, then restart Trayvora.", Available: false);
-            var (code, output) = await CliSession.RunAsync(codex, [.. CodexAuth, "login", "status"], null, ct);
+            var (code, output) = await CliSession.RunAsync(codex, [.. CodexCommands.LoginFileOptions, "login", "status"], null, ct);
             var first = output.Split('\n', StringSplitOptions.RemoveEmptyEntries | StringSplitOptions.TrimEntries).FirstOrDefault() ?? "";
             return code == 0 ? new(true, first.Length > 0 ? first : "Signed in") : new(false, "Not signed in");
         },
-        () => new CliSession(CodexExe() ?? throw new IOException("Codex was not found. Install the Codex app or Codex CLI."), [.. CodexAuth, "login"]),
-        async ct => CodexExe() is { } codex ? (await CliSession.RunAsync(codex, [.. CodexAuth, "logout"], null, ct)).Code : 1);
+        () => new CliSession(CodexExe() ?? throw new IOException("Codex was not found. Install the Codex app or Codex CLI."), [.. CodexCommands.LoginFileOptions, "login"]),
+        async ct => CodexExe() is { } codex ? (await CliSession.RunAsync(codex, [.. CodexCommands.LoginFileOptions, "logout"], null, ct)).Code : 1);
 
     private static string? CodexExe() =>
         Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE") is { Length: > 0 } path && File.Exists(path) ? path : null;

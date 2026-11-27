@@ -209,9 +209,9 @@ internal static class ClaudeChats
         }
     }
 
-    internal static Dictionary<string, string> CliEnvironment(string profile)
+    internal static Dictionary<string, string?> CliEnvironment(string profile)
     {
-        var env = RealUserFolders().ToDictionary(item => item.Name, item => item.Value);
+        var env = RealUserFolders().ToDictionary(item => item.Name, item => (string?)item.Value);
         var standard = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.UserProfile), ".claude");
         if (Path.IsPathFullyQualified(profile) && (Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR") is not null ||
             Environment.GetEnvironmentVariable("CLAUDE_CONFIG_DIR", EnvironmentVariableTarget.User) is not null ||

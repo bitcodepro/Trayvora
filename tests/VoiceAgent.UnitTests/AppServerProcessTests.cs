@@ -116,6 +116,26 @@ public sealed class AppServerProcessTests
     }
 
     [Fact]
+    public async Task MalformedJsonIsReportedAsInvalidDataToTheWaitingRequest()
+    {
+        var start = new ProcessStartInfo("powershell.exe")
+        {
+            UseShellExecute = false, CreateNoWindow = true, RedirectStandardInput = true,
+            RedirectStandardOutput = true, RedirectStandardError = true,
+            StandardInputEncoding = new UTF8Encoding(false),
+        };
+        const string script = "$null = [Console]::ReadLine(); [Console]::WriteLine('{broken')";
+        foreach (var argument in new[] { "-NoLogo", "-NoProfile", "-NonInteractive", "-Command", script })
+            start.ArgumentList.Add(argument);
+
+        using var deadline = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        await using var connection = AppServerConnection.Start(start);
+        var error = await Assert.ThrowsAsync<InvalidDataException>(() =>
+            connection.RequestAsync("config/read", new { }, deadline.Token));
+        Assert.Equal("Invalid JSON from Codex App Server.", error.Message);
+    }
+
+    [Fact]
     public async Task InstalledServerRejectsUnsignedProfileWhenSmokeTestIsEnabled()
     {
         var directory = Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_UNSIGNED_SMOKE_DIR");
@@ -140,11 +160,19 @@ public sealed class AppServerProcessTests
         var workspace = Path.Combine(home, "workspace");
         Directory.CreateDirectory(workspace);
         var executable = Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE")!;
-        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+        using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+        var session = new CodexSession(home);
+        Assert.False(await session.VerifySessionMcpAsync(false, timeout.Token));
+        Assert.True(await session.VerifySessionMcpAsync(true, timeout.Token));
+        var invalidHome = Path.Combine(home, "unexpected-mcp");
+        Directory.CreateDirectory(invalidHome);
+        await File.WriteAllTextAsync(Path.Combine(invalidHome, "config.toml"),
+            "[mcp_servers.other]\ncommand = \"should-not-run.exe\"\n", timeout.Token);
+        var error = await Assert.ThrowsAsync<InvalidOperationException>(() =>
+            new CodexSession(invalidHome).VerifySessionMcpAsync(false, timeout.Token));
+        Assert.Contains("Unexpected MCP configuration", error.Message);
         await using var connection = AppServerConnection.Start(executable, workspace, home, CodexSession.DisabledFeatures, revqora);
         await connection.InitializeAsync(timeout.Token);
-        var config = await connection.RequestAsync("config/read", new { cwd = workspace, includeLayers = false }, timeout.Token);
-        CodexSession.VerifyConfig(config.GetProperty("config"), revqora);
         await CodexSession.VerifyRevqoraCatalogAsync(connection, null, timeout.Token);
     }
 }

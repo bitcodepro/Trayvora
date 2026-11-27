@@ -676,7 +676,7 @@ internal sealed class VoiceOverlay : Window
                 try
                 {
                     result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
-                        steps: new ReplyStream.Reporter(stream.Activity),
+                        useRevqora: room.UsesRevqora, steps: new ReplyStream.Reporter(stream.Activity),
                         attachments: files, onAccepted: stream.ConfirmReceipt);
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
@@ -705,6 +705,10 @@ internal sealed class VoiceOverlay : Window
             _discussion.CurrentClaudeProfile = ClaudeProfile;
             _discussion.RunClaudeCommand = (args, context, ct) => CliSession.RunAsync(
                 ClaudeChats.FindExecutable(_claudeExe.Text?.Trim() ?? ""), args, ClaudeChats.CliEnvironment(context.Profile), ct, context.Workspace);
+            _discussion.VerifyLocalCodexMcp = (room, ct) => _codex.VerifySessionMcpAsync(room.UsesRevqora, ct);
+            _discussion.RunCodexCommand = (args, context, ct) => CliSession.RunAsync(
+                CodexSession.FindExecutable(), args, CodexCommands.EnvironmentFor(context.CodexHome!, context.CodexDesktop), ct, context.Workspace,
+                includeStandardError: args[0] != "mcp");
             _discussion.StopSpeaking = () => _replyAudio?.Stop();
             if (_sharedChat is not null) _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
             _discussion.Initialize();
@@ -724,11 +728,11 @@ internal sealed class VoiceOverlay : Window
     }
 
     /// <summary>
-    /// Opens Claude Code interactively in the requested workspace with the configured Claude profile.
+    /// Opens the requested interactive CLI in the session workspace.
     /// </summary>
-    private void OpenTerminal(TerminalContext context)
+    private void OpenTerminal(TerminalKind kind, TerminalContext context)
     {
-        if (OperatingSystem.IsWindows()) ShowTerminal(TerminalKind.Claude, context);
+        if (OperatingSystem.IsWindows()) ShowTerminal(kind, context);
     }
 
     private Button? _terminalButton;
@@ -758,7 +762,10 @@ internal sealed class VoiceOverlay : Window
                 // A replacement may wait for confirmation while settings change.
                 if (which == TerminalKind.Claude && ClaudeCommands.NormalizeProfile(target.Profile) != ClaudeCommands.NormalizeProfile(ClaudeProfile()))
                     throw new IOException(UiLanguage.T(ClaudeCommands.RefreshMcp));
-                return TerminalStart(target.Workspace, target.Profile, which);
+                if (which == TerminalKind.Codex && target.CodexHome is { } codexHome
+                    && codexHome != CodexCommands.Profile(target.CodexDesktop, _sharedChat?.Profile))
+                    throw new IOException(UiLanguage.T(CodexCommands.RefreshMcp));
+                return TerminalStart(target, which);
             });
             _terminal.CloseRequested += HideTerminal;
             Grid.SetColumn(_terminal, 2);
@@ -791,7 +798,7 @@ internal sealed class VoiceOverlay : Window
         _shell.ColumnDefinitions[2].Width = new GridLength(0);
     }
 
-    private System.Diagnostics.ProcessStartInfo TerminalStart(string folder, string profile, TerminalKind kind)
+    private System.Diagnostics.ProcessStartInfo TerminalStart(TerminalContext context, TerminalKind kind)
     {
         var shell = new[] { "pwsh.exe", "powershell.exe" }
             .Select(name => (Environment.GetEnvironmentVariable("PATH") ?? "").Split(Path.PathSeparator)
@@ -799,9 +806,9 @@ internal sealed class VoiceOverlay : Window
                 .Select(dir => Path.Combine(dir, name)).FirstOrDefault(File.Exists))
             .FirstOrDefault(path => path is not null) ?? "powershell.exe";
         var conhost = Path.Combine(Environment.GetFolderPath(Environment.SpecialFolder.System), "conhost.exe");
-        var start = new System.Diagnostics.ProcessStartInfo(conhost) { WorkingDirectory = folder, UseShellExecute = false };
+        var start = new System.Diagnostics.ProcessStartInfo(conhost) { WorkingDirectory = context.Workspace, UseShellExecute = false };
         start.ArgumentList.Add(shell);
-        foreach (var (name, value) in ClaudeChats.CliEnvironment(profile)) start.Environment[name] = value;
+        foreach (var (name, value) in ClaudeChats.CliEnvironment(context.Profile)) start.Environment[name] = value;
         start.Environment.Remove("CODEX_SQLITE_HOME");
         var paths = new List<string>();
         try
@@ -811,9 +818,22 @@ internal sealed class VoiceOverlay : Window
             paths.Add(Path.GetDirectoryName(claude)!);
         }
         catch (FileNotFoundException) when (kind != TerminalKind.Claude) { }
-        if (Environment.GetEnvironmentVariable("VOICEAGENT_CODEX_EXE") is { Length: > 0 } codex && File.Exists(codex))
+        try
+        {
+            var codex = CodexSession.FindExecutable();
+            start.Environment["TRAYVORA_TERMINAL_CODEX"] = codex;
             paths.Add(Path.GetDirectoryName(codex)!);
-        if (_sharedChat?.Profile is { Length: > 0 } codexHome && Directory.Exists(codexHome)) start.Environment["CODEX_HOME"] = codexHome;
+        }
+        catch (FileNotFoundException) when (kind != TerminalKind.Codex) { }
+        if (context.CodexHome is { } home)
+        {
+            foreach (var (name, value) in CodexCommands.EnvironmentFor(home, context.CodexDesktop))
+            {
+                if (value is null) start.Environment.Remove(name);
+                else start.Environment[name] = value;
+            }
+        }
+        else if (_sharedChat?.Profile is { Length: > 0 } codexHome && Directory.Exists(codexHome)) start.Environment["CODEX_HOME"] = codexHome;
         else start.Environment.Remove("CODEX_HOME");
         start.Environment["PATH"] = string.Join(Path.PathSeparator, paths.Append(start.Environment["PATH"] ?? ""));
         const string hint =
@@ -825,7 +845,7 @@ internal sealed class VoiceOverlay : Window
         // The codex.exe bundled with Codex Desktop needs --no-daemon to run interactively (new chat, resume, fork);
         // the function adds it whenever "codex" is typed that way, and leaves subcommands such as "codex login" as they are.
         const string codexFunction =
-            "; $codexExe = (Get-Command codex.exe -CommandType Application -ErrorAction SilentlyContinue | Select-Object -First 1).Source; " +
+            "; $codexExe = $env:TRAYVORA_TERMINAL_CODEX; " +
             "if ($codexExe) { function global:codex { if ($args.Count -eq 0 -or $args[0] -in @('resume','fork') -or \"$($args[0])\".StartsWith('-')) { & $codexExe --no-daemon @args } else { & $codexExe @args } } }";
         var program = kind switch { TerminalKind.Claude => "; & $env:TRAYVORA_TERMINAL_CLAUDE", TerminalKind.Codex => "; codex", _ => "" };
         foreach (var arg in new[] { "-NoLogo", "-NoExit", "-Command", hint + codexFunction + program }) start.ArgumentList.Add(arg);
