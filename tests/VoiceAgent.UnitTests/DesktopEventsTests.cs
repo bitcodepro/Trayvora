@@ -57,6 +57,8 @@ public sealed class DesktopEventsTests
                 VerifyMarkdown();
                 VerifyAttachments();
                 VerifyDesktopDelivery();
+                VerifyDesktopRecoveryCanRetryAfterASaveFailure();
+                VerifyRestoredDraftUsesItsOwnRelay();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
                 VerifyFloatingAgent();
@@ -753,10 +755,7 @@ public sealed class DesktopEventsTests
             // Delete removes the message from the saved session only.
             var before = Stored().Single(item => item.Title == "First question").Messages.Count;
             // Hover the message so its toolbar is built, then press its own Delete.
-            Control row = view.GetLogicalDescendants().OfType<SelectableTextBlock>().Single(block => block.Text == "First question");
-            while (row.GetLogicalParent() is Control parent && parent is not StackPanel { Spacing: 14 }) row = parent;
-            row.RaiseEvent(new PointerEventArgs(InputElement.PointerEnteredEvent, row, new Pointer(0, PointerType.Mouse, true),
-                window, default, 0, new PointerPointProperties(), KeyModifiers.None));
+            var row = HoverMessage(view, window, "First question");
             row.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Delete from this session")
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Pump(Task.Delay(100));
@@ -1252,6 +1251,155 @@ public sealed class DesktopEventsTests
         finally { folder.Delete(true); }
     }
 
+    private static void VerifyDesktopRecoveryCanRetryAfterASaveFailure()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-recovery-write-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var thread = Guid.NewGuid();
+            var delivery = Guid.NewGuid();
+            var post = Guid.NewGuid();
+            var room = new DiscussionRoom { CodexDesktop = true, CodexChatId = thread };
+            room.Messages.Add(new(DiscussionMember.Boss, DiscussionMember.Codex, "Find a reply", DateTimeOffset.Now,
+                PostId: post, UnconfirmedFor: DeliveryRecipients.Codex | DeliveryRecipients.Claude));
+            room.Messages.Add(new(DiscussionMember.Codex, DiscussionMember.Boss, "Waiting", DateTimeOffset.Now,
+                ThreadId: thread, DesktopThread: true, DeliveryId: delivery, DeliveryProfile: "test-profile", DeliveryPostId: post));
+            store.Save(room);
+
+            var checks = 0;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (_, _, _, _) => Task.FromResult<DesktopTurn?>(++checks == 1
+                    ? new("exact-turn", "interrupted", "", "Partial", [])
+                    : new("exact-turn", "completed", "", "Recovered reply", [])),
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            void Check()
+            {
+                HoverMessage(view, window, "Waiting");
+                WaitForButton(view, "Check delivery without sending again").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+
+            Check();
+            PumpUntil(() => view.CurrentRoom?.Messages[1].RemoteTurnId == "exact-turn");
+            Assert.Equal(delivery, view.CurrentRoom!.Messages[1].DeliveryId);
+            Assert.Equal("Waiting", view.CurrentRoom.Messages[1].Text);
+            Assert.Equal(DeliveryRecipients.Claude, view.CurrentRoom.Messages[0].UnconfirmedFor);
+
+            var file = Path.Combine(store.Directory, $"{room.Id:N}.json");
+            using (File.Open(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Check();
+                WaitForButton(view, "Check delivery without sending again");
+                Pump(view.PendingSaves);
+                PumpUntil(() => view.GetLogicalDescendants().OfType<TextBlock>()
+                    .Any(t => t.Text?.StartsWith("Could not save the recovered reply", StringComparison.Ordinal) == true));
+                Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(),
+                    t => t.Text?.StartsWith("Could not save the recovered reply", StringComparison.Ordinal) == true);
+                Assert.Equal(delivery, view.CurrentRoom.Messages[1].DeliveryId);
+                Assert.Equal(delivery, store.ReadRoom(room.Id).Messages[1].DeliveryId);
+            }
+
+            Task laterSave;
+            using (File.Open(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Check();
+                var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+                editor.Text = "Draft changed while the reply is being saved";
+                PumpUntil(() => view.CurrentRoom.Draft?.Text == editor.Text);
+                laterSave = view.StopAndSaveAsync();
+            }
+            Pump(laterSave);
+            PumpUntil(() => view.CurrentRoom.Messages[1].DeliveryId is null);
+            var saved = store.ReadRoom(room.Id);
+            Assert.Equal(3, checks);
+            Assert.Null(saved.Messages[1].DeliveryId);
+            Assert.Equal("Recovered reply", saved.Messages[1].Text);
+            Assert.Equal(DeliveryRecipients.Claude, saved.Messages[0].UnconfirmedFor);
+            Assert.Equal("Draft changed while the reply is being saved", saved.Draft?.Text);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyRestoredDraftUsesItsOwnRelay()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-retry-relay-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Claude test chat");
+            var ordinary = CreateRoom("Ordinary draft", null);
+            var routed = CreateRoom("Routed draft", DiscussionMember.Claude);
+            var sent = new List<DiscussionMember>();
+            var view = new DiscussionWindow(store, (agent, _, _, _, _, _) =>
+            {
+                sent.Add(agent);
+                return Task.FromResult<string?>("Reply");
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => chat);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom is not null);
+
+            Select(ordinary);
+            Click("Pass the reply on to Claude");
+            RestoreAndSend();
+            Assert.Equal([DiscussionMember.Codex], sent);
+
+            Select(routed);
+            sent.Clear();
+            RestoreAndSend();
+            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], sent);
+
+            DiscussionRoom CreateRoom(string title, DiscussionMember? relay)
+            {
+                var room = store.Create(chat);
+                room.Title = title;
+                room.Messages.Add(new(DiscussionMember.Boss, DiscussionMember.Codex, "Question", DateTimeOffset.Now,
+                    RelayTo: relay, PostId: Guid.NewGuid(), NotSentTo: DeliveryRecipients.Codex));
+                store.Save(room);
+                return room;
+            }
+
+            void Click(string name) => WaitForButton(view, name).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            void Select(DiscussionRoom room)
+            {
+                if (view.CurrentRoom?.Id != room.Id) Click(room.Title);
+                PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+                Assert.Equal(room.Id, view.CurrentRoom?.Id);
+            }
+
+            void RestoreAndSend()
+            {
+                HoverMessage(view, window, "Question");
+                Click("Load the message into the editor with its original recipients");
+                var send = WaitForButton(view, "Send");
+                PumpUntil(() => send.IsEnabled);
+                Assert.True(send.IsEnabled);
+                send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => !view.IsRunning);
+                Pump(view.PendingSaves);
+            }
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
     private static void VerifyAttachments()
     {
         var folder = Directory.CreateTempSubdirectory("trayvora-attach-ui-");
@@ -1558,6 +1706,15 @@ public sealed class DesktopEventsTests
     }
 
     /// <summary>Runs the UI loop until <paramref name="done"/> is true (at most 8 seconds).</summary>
+    private static Control HoverMessage(Control view, Window window, string text)
+    {
+        Control row = view.GetLogicalDescendants().OfType<SelectableTextBlock>().Single(block => block.Text == text);
+        while (row.GetLogicalParent() is Control parent && parent is not StackPanel { Spacing: 14 }) row = parent;
+        row.RaiseEvent(new PointerEventArgs(InputElement.PointerEnteredEvent, row, new Pointer(0, PointerType.Mouse, true),
+            window, default, 0, new PointerPointProperties(), KeyModifiers.None));
+        return row;
+    }
+
     private static void PumpUntil(Func<bool> done)
     {
         var deadline = DateTime.UtcNow.AddSeconds(8);

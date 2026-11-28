@@ -1,4 +1,5 @@
 using System.Text.Json;
+using System.Threading.Channels;
 using VoiceAgent.Codex;
 using Xunit;
 
@@ -26,6 +27,56 @@ public sealed class DesktopChatClientTests
         Assert.Equal("completed", reply.Status);
         Assert.Equal(new[] { "thread/queue/add", "thread/turns/list" }, connection.Methods);
         Assert.Equal(chat.ToString(), connection.ChatId);
+    }
+
+    [Theory]
+    [InlineData(false)]
+    [InlineData(true)]
+    public async Task ProvisionalHistoryInterruptionDoesNotCutOffTheReply(bool confirmedStop)
+    {
+        using var limit = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var thread = Guid.NewGuid();
+        var delivery = Guid.NewGuid();
+        var events = Channel.CreateUnbounded<JsonElement>();
+        var firstRead = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var polls = 0;
+        await using var connection = new ScriptConnection((method, _, _) =>
+        {
+            if (method == "thread/queue/add")
+                return JsonSerializer.SerializeToElement(new { queuedSubmission = new { id = "queue-1", clientUserMessageId = delivery } });
+            Assert.Equal("thread/turns/list", method);
+            var interim = ++polls == 1;
+            if (interim) firstRead.TrySetResult();
+            return JsonSerializer.SerializeToElement(new
+            {
+                data = new[]
+                {
+                    new { id = "our-turn", status = interim || confirmedStop ? "interrupted" : "completed", items = new object[]
+                    {
+                        new { type = "userMessage", clientId = delivery, content = Array.Empty<object>() },
+                        new { type = "agentMessage", phase = "final_answer", text = interim ? "Partial" : "Partial with the rest" },
+                    } },
+                },
+            });
+        }, ct => events.Reader.ReadAllAsync(ct));
+
+        var reply = DesktopChatClient.SubmitAsync(connection, thread, "Question", new Progress<string>(),
+            limit.Token, delivery: delivery, observeEvents: true);
+        await firstRead.Task.WaitAsync(limit.Token);
+        Assert.False(reply.IsCompleted);
+        Complete("other-turn");
+        if (confirmedStop) Complete("our-turn");
+
+        var final = Assert.IsType<DesktopTurn>(await reply.WaitAsync(limit.Token));
+        Assert.Equal(confirmedStop ? "interrupted" : "completed", final.Status);
+        Assert.Equal(confirmedStop, final.InterruptionConfirmed);
+        Assert.Equal("Partial with the rest", final.Answer);
+
+        void Complete(string turnId) => events.Writer.TryWrite(JsonSerializer.SerializeToElement(new
+        {
+            method = "turn/completed",
+            @params = new { threadId = thread, turn = new { id = turnId, status = "interrupted" } },
+        }));
     }
 
     [Fact]
@@ -172,7 +223,7 @@ public sealed class DesktopChatClientTests
 
         static object Turn(string id, string clientId) => new
         {
-            id, status = "inProgress", items = new[] { new { type = "userMessage", clientId, content = Array.Empty<object>() } }
+            id, status = "interrupted", items = new[] { new { type = "userMessage", clientId, content = Array.Empty<object>() } }
         };
     }
 
@@ -186,11 +237,12 @@ public sealed class DesktopChatClientTests
             beforeDispatch: () => { cancellation.Cancel(); return Task.CompletedTask; }));
     }
 
-    private sealed class ScriptConnection(Func<string, JsonElement, CancellationToken, JsonElement> script) : ICodexConnection
+    private sealed class ScriptConnection(Func<string, JsonElement, CancellationToken, JsonElement> script,
+        Func<CancellationToken, IAsyncEnumerable<JsonElement>>? events = null) : ICodexConnection
     {
         public Task InitializeAsync(CancellationToken ct) => Task.CompletedTask;
         public ValueTask DisposeAsync() => ValueTask.CompletedTask;
-        public IAsyncEnumerable<JsonElement> ReadEventsAsync(CancellationToken ct) => throw new NotSupportedException();
+        public IAsyncEnumerable<JsonElement> ReadEventsAsync(CancellationToken ct) => (events ?? throw new NotSupportedException())(ct);
         public Task<JsonElement> RequestAsync(string method, object parameters, CancellationToken ct) =>
             Task.FromResult(script(method, JsonSerializer.SerializeToElement(parameters), ct));
     }

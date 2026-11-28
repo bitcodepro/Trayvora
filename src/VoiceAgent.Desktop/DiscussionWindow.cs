@@ -1163,7 +1163,28 @@ internal sealed partial class DiscussionWindow(
         UpdateEarlier();
     }
 
-    private Task<bool> Persist(DiscussionRoom room)
+    private sealed class RecoveredReply(Guid roomId, Guid delivery, DiscussionMessage replacement)
+    {
+        public Guid RoomId { get; } = roomId;
+        public bool Saved { get; set; }
+
+        public void Apply(DiscussionRoom room)
+        {
+            var index = room.Messages.FindIndex(message => message.DeliveryId == delivery);
+            if (index < 0) return;
+            if (room.Messages[index].DeliveryPostId is { } postId &&
+                room.Messages.FindIndex(message => message.PostId == postId) is var post && post >= 0)
+            {
+                var accepted = room.Messages[post];
+                room.Messages[post] = accepted with { UnconfirmedFor = accepted.UnconfirmedFor & ~DeliveryRecipients.Codex };
+            }
+            room.Messages[index] = replacement;
+        }
+    }
+
+    private readonly Dictionary<Guid, RecoveredReply> _replyWrites = [];
+
+    private Task<bool> Persist(DiscussionRoom room, RecoveredReply? recovery = null)
     {
         var snapshot = new DiscussionRoom
         {
@@ -1173,10 +1194,20 @@ internal sealed partial class DiscussionWindow(
             Claude = room.Claude, Draft = room.Draft, Messages = [.. room.Messages],
             ClaudePermissions = room.ClaudePermissions, NewCodexFolder = room.NewCodexFolder, CodexWorkspace = room.CodexWorkspace,
         };
-        return Enqueue(() => store.Save(snapshot), "Could not save this session. Check access to the settings folder.");
+        // Later snapshots may be queued before a successful recovery reaches the UI. Apply the same
+        // committed change to those snapshots so a draft or another agent's reply cannot restore the marker.
+        var pending = _replyWrites.Values.Where(write => write.RoomId == room.Id).ToArray();
+        return Enqueue(() =>
+        {
+            foreach (var previous in pending)
+                if (previous.Saved) previous.Apply(snapshot);
+            recovery?.Apply(snapshot);
+            store.Save(snapshot);
+            if (recovery is not null) recovery.Saved = true;
+        }, recovery is null ? "Could not save this session. Check access to the settings folder." : null);
     }
 
-    private Task<bool> Enqueue(Action write, string failure)
+    private Task<bool> Enqueue(Action write, string? failure)
     {
         var result = _saves.ContinueWith(_ =>
         {
@@ -1185,7 +1216,7 @@ internal sealed partial class DiscussionWindow(
             {
                 // Never silent: the reason goes to the Error log and the window says the session was not saved.
                 ErrorLog.Write(error, "Sessions · save");
-                Dispatcher.UIThread.Post(() => _status.Text = failure);
+                if (failure is not null) Dispatcher.UIThread.Post(() => _status.Text = failure);
                 return false;
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
@@ -2480,47 +2511,7 @@ internal sealed partial class DiscussionWindow(
             _status.Text = "Message copied.";
         });
         if (message.DeliveryProfile is { } profile && message.DeliveryId is { } delivery && message.ThreadId is { } thread && _room is { } room && CheckDelivery is { } check)
-            Add("↻", "Check reply", "Check delivery without sending again", async () =>
-            {
-                if (DesktopDeliveryIsLive()) { _status.Text = "Trayvora is already following this delivery."; return; }
-                try
-                {
-                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                    var turn = message.RemoteTurnId is { } turnId && CheckRemoteTurn is { } checkTurn
-                        ? await checkTurn(profile, thread, turnId, timeout.Token)
-                        : await check(profile, thread, delivery, timeout.Token);
-                    if (DesktopDeliveryIsLive()) return;
-                    var index = room.Messages.FindIndex(item => item.DeliveryId == delivery);
-                    if (index < 0) return;
-                    if (turn is null) { _status.Text = "No matching reply yet. Open the Desktop chat to check."; return; }
-                    var marker = room.Messages[index];
-                    if (marker.DeliveryPostId is { } postId &&
-                        room.Messages.FindIndex(item => item.PostId == postId) is var post && post >= 0)
-                    {
-                        var accepted = room.Messages[post];
-                        room.Messages[post] = accepted with { UnconfirmedFor = accepted.UnconfirmedFor & ~DeliveryRecipients.Codex };
-                    }
-                    if (turn.Status is not ("completed" or "failed" or "interrupted"))
-                    {
-                        if (turn.Id.Length > 0) room.Messages[index] = marker with { RemoteTurnId = turn.Id };
-                        _ = Persist(room);
-                        if (ReferenceEquals(room, _room)) RefreshTimeline(room);
-                        _status.Text = $"Delivery · {turn.Status}";
-                        return;
-                    }
-                    var work = new ReplyStream();
-                    foreach (var entry in turn.Activity) work.Observe(entry);
-                    work.FinishActivity(turn.Status == "interrupted");
-                    room.Messages[index] = marker with { DeliveryId = null, Text = string.IsNullOrEmpty(turn.Answer) ? turn.Status : turn.Answer,
-                        Failed = turn.Status == "failed", Interrupted = turn.Status == "interrupted", WorkLog = work.WorkLog };
-                    _ = Persist(room);
-                    if (ReferenceEquals(room, _room)) RefreshTimeline(room);
-                }
-                catch (Exception error) { _status.Text = ErrorLog.Redact(error.Message); }
-
-                bool DesktopDeliveryIsLive() => _runs.TryGetValue(room.Id, out var run)
-                    && run.Live.TryGetValue(DiscussionMember.Codex, out var live) && live.DesktopDeliveryId == delivery;
-            });
+            Add("↻", "Check reply", "Check delivery without sending again", () => CheckDesktopReplyAsync(room, message, delivery, profile, thread, check));
         if (message.ThreadId is { } id && id != Guid.Empty && message.Sender == DiscussionMember.Codex && message.DesktopThread)
             Add("↗", "Open chat", "Open this thread in Codex Desktop", async () =>
             {
@@ -2562,6 +2553,60 @@ internal sealed partial class DiscussionWindow(
         }, danger: true);
 
         return new ContextMenu { ItemsSource = items };
+    }
+
+    private async Task CheckDesktopReplyAsync(DiscussionRoom room, DiscussionMessage message, Guid delivery, string profile, Guid thread,
+        Func<string, Guid, Guid, CancellationToken, Task<DesktopTurn?>> check)
+    {
+        bool DesktopDeliveryIsLive() => _runs.TryGetValue(room.Id, out var run)
+            && run.Live.TryGetValue(DiscussionMember.Codex, out var live) && live.DesktopDeliveryId == delivery;
+
+        if (DesktopDeliveryIsLive()) { _status.Text = "Trayvora is already following this delivery."; return; }
+        if (_replyWrites.ContainsKey(delivery)) return;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var turn = message.RemoteTurnId is { } turnId && CheckRemoteTurn is { } checkTurn
+                ? await checkTurn(profile, thread, turnId, timeout.Token)
+                : await check(profile, thread, delivery, timeout.Token);
+            if (DesktopDeliveryIsLive() || _replyWrites.ContainsKey(delivery)) return;
+            var marker = room.Messages.Find(item => item.DeliveryId == delivery);
+            if (marker is null) return;
+            if (turn is null) { _status.Text = "No matching reply yet. Open the Desktop chat to check."; return; }
+
+            var replacement = turn.Id.Length == 0 ? marker : marker with { RemoteTurnId = turn.Id };
+            if (turn.IsTerminal)
+            {
+                var work = new ReplyStream();
+                foreach (var entry in turn.Activity) work.Observe(entry);
+                work.FinishActivity(turn.Status == "interrupted");
+                replacement = replacement with
+                {
+                    DeliveryId = null, Text = string.IsNullOrEmpty(turn.Answer) ? turn.Status : turn.Answer,
+                    Failed = turn.Status == "failed", Interrupted = turn.Status == "interrupted", WorkLog = work.WorkLog,
+                };
+            }
+
+            var recovery = new RecoveredReply(room.Id, delivery, replacement);
+            _replyWrites.Add(delivery, recovery);
+            try
+            {
+                if (!await Persist(room, recovery))
+                {
+                    if (ReferenceEquals(room, _room))
+                        _status.Text = "Could not save the recovered reply. Check access to the settings folder, then use Check reply again.";
+                    return;
+                }
+                recovery.Apply(room);
+                if (!ReferenceEquals(room, _room)) return;
+                RefreshTimeline(room);
+                _status.Text = turn.IsTerminal ? "Saved the Codex Desktop reply."
+                    : turn.Status == "interrupted" ? "Codex has yet to confirm the stop. Use Check reply again or open the chat."
+                    : $"Delivery · {turn.Status}";
+            }
+            finally { _replyWrites.Remove(delivery); }
+        }
+        catch (Exception error) { if (ReferenceEquals(room, _room)) _status.Text = ErrorLog.Redact(error.Message); }
     }
 
     /// <summary>The message as a Markdown quote ("> " before each line) with who wrote it.</summary>
@@ -2607,6 +2652,8 @@ internal sealed partial class DiscussionWindow(
         var files = ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room));
         _editor.Text = ComposerAttachments.WithoutFiles(message.Text);
         Attachments.Restore(files);
+        _relayFromCodex = targets == DeliveryRecipients.Codex && message.RelayTo == DiscussionMember.Claude;
+        _relayFromClaude = targets == DeliveryRecipients.Claude && message.RelayTo == DiscussionMember.Codex;
         SetTarget(targets == DeliveryRecipients.Claude ? DiscussionTarget.Claude
             : targets == (DeliveryRecipients.Claude | DeliveryRecipients.Codex) ? DiscussionTarget.Both : DiscussionTarget.Codex);
         _editor.CaretIndex = _editor.Text.Length;

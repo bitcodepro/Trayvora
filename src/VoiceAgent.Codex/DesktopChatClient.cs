@@ -11,6 +11,8 @@ public sealed record DesktopChat(Guid Id, string Title, string? Workspace)
 public sealed record DesktopTurn(string Id, string Status, string Question, string Answer, IReadOnlyList<string> ClientIds)
 {
     public IReadOnlyList<CodexActivity> Activity { get; init; } = [];
+    public bool InterruptionConfirmed { get; init; }
+    public bool IsTerminal => Status is "completed" or "failed" || Status == "interrupted" && InterruptionConfirmed;
 }
 
 public sealed class DesktopChatClient(string scratchDirectory)
@@ -102,7 +104,7 @@ public sealed class DesktopChatClient(string scratchDirectory)
         var messageId = (delivery ?? Guid.NewGuid()).ToString();
         var input = TurnInput(text, attachments);
         using var listening = new CancellationTokenSource();
-        var finished = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
+        var finished = new System.Collections.Concurrent.ConcurrentDictionary<string, (string Status, string Answer)>();
         var live = new CodexTurnEvents(null, answer, activity);
         string? liveTurn = null;
         var receipt = 0;
@@ -155,9 +157,9 @@ public sealed class DesktopChatClient(string scratchDirectory)
                         steer?.Invoke(observed.Status == "inProgress" ? Clarify(server, chat.ToString(), boundTurn, ct) : null);
                     }
                     foreach (var step in observed.Activity) activity?.Report(step);
-                    if (observed.Status is "completed" or "failed" or "interrupted") return observed;
-                    if (finished.TryGetValue(observed.Id, out var status) && status == "interrupted")
-                        return observed with { Status = status };
+                    if (finished.TryGetValue(observed.Id, out var completion))
+                        return await ConfirmedTurnAsync(observed, completion, ct).ConfigureAwait(false);
+                    if (observed.IsTerminal) return observed;
                     progress.Report("Codex Desktop is working on it…");
                     if (answer is not null && Volatile.Read(ref liveTurn) != observed.Id && observed.Answer.Length > 0 && observed.Answer != shown)
                     {
@@ -192,19 +194,22 @@ public sealed class DesktopChatClient(string scratchDirectory)
                     catch (AppServerRpcException) { } // older clients or the item has just started
                 }
                 observed = await FindTurnAsync(server, chat, messageId, stop.Token).ConfigureAwait(false) ?? observed;
-                if (observed is { Status: "completed" or "failed" or "interrupted" }) return observed;
                 if (observed?.Id is { Length: > 0 } turnId)
                 {
                     if (onTurnStarted is not null && boundTurn != turnId) await onTurnStarted(turnId).ConfigureAwait(false);
-                    if (finished.TryGetValue(turnId, out var status) && status == "interrupted") return StopResult(status);
-                    await server.RequestAsync("turn/interrupt", new { threadId = chat.ToString(), turnId }, stop.Token).ConfigureAwait(false);
-                    while (observeEvents && !observations.IsCompleted)
+                    if (finished.TryGetValue(turnId, out var completion))
+                        return await ConfirmedTurnAsync(observed, completion, stop.Token).ConfigureAwait(false);
+                    if (observed.IsTerminal) return observed;
+                    try { await server.RequestAsync("turn/interrupt", new { threadId = chat.ToString(), turnId }, stop.Token).ConfigureAwait(false); }
+                    catch (AppServerRpcException) when (finished.ContainsKey(turnId)) { }
+                    do
                     {
-                        if (finished.TryGetValue(turnId, out status))
-                            return await FindTurnAsync(server, chat, messageId, stop.Token).ConfigureAwait(false) is { } final
-                                ? final with { Status = status } : StopResult(status);
-                        await Task.Delay(150, stop.Token).ConfigureAwait(false);
-                    }
+                        if (finished.TryGetValue(turnId, out completion))
+                            return await ConfirmedTurnAsync(observed, completion, stop.Token).ConfigureAwait(false);
+                        if (observations.IsCompleted) break;
+                        await Task.WhenAny(observations, Task.Delay(150, stop.Token)).ConfigureAwait(false);
+                        stop.Token.ThrowIfCancellationRequested();
+                    } while (true);
                     return StopResult("stopRequested");
                 }
             }
@@ -216,6 +221,17 @@ public sealed class DesktopChatClient(string scratchDirectory)
             steer?.Invoke(null);
             await listening.CancelAsync().ConfigureAwait(false);
             await observations.ConfigureAwait(false);
+        }
+
+        async Task<DesktopTurn> ConfirmedTurnAsync(DesktopTurn current, (string Status, string Answer) completion, CancellationToken token)
+        {
+            // An event can arrive while a history read is in progress. Read once more, retaining any newer live text.
+            try { current = await FindTurnAsync(server, chat, current.Id, token, byTurnId: true).ConfigureAwait(false) ?? current; }
+            catch (Exception error) when (error is OperationCanceledException or IOException or InvalidDataException or TimeoutException) { }
+            var text = current.Answer;
+            if (completion.Answer.Length > text.Length && completion.Answer.StartsWith(text, StringComparison.Ordinal))
+                text = completion.Answer;
+            return current with { Status = completion.Status, Answer = text, InterruptionConfirmed = completion.Status == "interrupted" };
         }
 
         void ConfirmReceipt()
@@ -243,11 +259,12 @@ public sealed class DesktopChatClient(string scratchDirectory)
                         ConfirmReceipt();
                     }
                     if (method == "turn/completed" && data.TryGetProperty("turn", out var done)
-                        && ReadString(done, "id") is { } id && ReadString(done, "status") is { } status)
+                        && ReadString(done, "id") is { Length: > 0 } id
+                        && ReadString(done, "status") is ("completed" or "failed" or "interrupted") and { } status)
                     {
-                        if (finished.Count >= 128) finished.Clear();
-                        finished[id] = status;
                         if (id == liveTurn) live.FlushAnswer();
+                        if (finished.Count >= 128) finished.Clear();
+                        finished[id] = (status, id == liveTurn ? live.Answer : "");
                     }
                     else if (method is not null && liveTurn is not null && turnId == liveTurn && !live.Observe(method, data))
                         live.FlushAnswer();
@@ -404,7 +421,13 @@ public sealed class DesktopChatClient(string scratchDirectory)
 
             turns.Add(new DesktopTurn(ReadString(turn, "id") ?? "",
                 ReadString(turn, "status") ?? "unknown", string.Join("\n", questions),
-                string.Join("\n\n", final.Count > 0 ? final : answers), ids) { Activity = activity });
+                string.Join("\n\n", final.Count > 0 ? final : answers), ids)
+            {
+                Activity = activity,
+                // App Server can project a still-running or abandoned turn as interrupted with no recorded end.
+                InterruptionConfirmed = turn.TryGetProperty("completedAt", out var end) && end.ValueKind == JsonValueKind.Number
+                    && end.TryGetInt64(out var completedAt) && completedAt > 0,
+            });
         }
         return turns;
     }
