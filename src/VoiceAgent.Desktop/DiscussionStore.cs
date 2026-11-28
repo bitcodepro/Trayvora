@@ -103,12 +103,16 @@ internal sealed class DiscussionStore(string directory)
     {
         lock (Gate)
         {
-            using var stream = new FileStream(FileFor(id), FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete);
-            var room = JsonSerializer.Deserialize<DiscussionRoom>(stream, Json);
+            var saved = SavedFileFor(id);
+            DiscussionRoom? room;
+            using (var stream = new FileStream(saved, FileMode.Open, FileAccess.Read, FileShare.ReadWrite | FileShare.Delete))
+                room = JsonSerializer.Deserialize<DiscussionRoom>(stream, Json);
             if (room?.Id != id || id == Guid.Empty) throw new JsonException("Session ID does not match its filename.");
             room.Messages ??= [];
             if (room.CodexDesktop && room.NewCodexFolder is not null && room.CodexChatId == room.Id) room.CodexChatId = Guid.Empty;
             else if (room.CodexChatId == Guid.Empty && !room.CodexDesktop) room.CodexChatId = room.Id;
+            var primary = FileFor(id);
+            if (saved != primary && TryRestorePrimary(saved, primary)) Index(room, new FileInfo(primary));
             return room;
         }
     }
@@ -118,21 +122,24 @@ internal sealed class DiscussionStore(string directory)
         lock (Gate)
         {
             var rows = new List<DiscussionRoom>();
-            if (!System.IO.Directory.Exists(Directory)) return rows;
-            foreach (var file in new DirectoryInfo(Directory).EnumerateFiles("*.json"))
+            foreach (var id in SavedRoomIds())
             {
-                if (!Guid.TryParseExact(Path.GetFileNameWithoutExtension(file.Name), "N", out var id)) continue;
                 try
                 {
+                    var file = new FileInfo(SavedFileFor(id));
+                    var primary = file.Extension == ".json";
                     Header? header = null;
-                    try { header = SettingsFile.Read<Header>(HeaderFile(id)); }
-                    catch (JsonException) { }
+                    if (primary)
+                    {
+                        try { header = SettingsFile.Read<Header>(HeaderFile(id)); }
+                        catch (JsonException) { }
+                    }
                     if (header is not null && header.Id == id && header.Size == file.Length && header.Stamp == file.LastWriteTimeUtc.Ticks)
                         rows.Add(new DiscussionRoom { Id = id, Title = header.Title, Updated = header.Updated, IndexedPreview = header.Preview });
                     else
                     {
                         var room = ReadRoom(id);
-                        Index(room, file);
+                        if (primary) Index(room, file);
                         rows.Add(new DiscussionRoom { Id = id, Title = room.Title, Updated = room.Updated, IndexedPreview = room.Preview });
                     }
                 }
@@ -150,11 +157,9 @@ internal sealed class DiscussionStore(string directory)
 
     private IReadOnlyList<DiscussionRoom> LoadLocked()
     {
-        if (!System.IO.Directory.Exists(Directory)) return [];
         var rooms = new List<DiscussionRoom>();
-        foreach (var file in System.IO.Directory.EnumerateFiles(Directory, "*.json"))
+        foreach (var id in SavedRoomIds())
         {
-            if (!Guid.TryParse(Path.GetFileNameWithoutExtension(file), out var id)) continue;
             try
             {
                 var room = Retry(() => ReadRoom(id));
@@ -163,22 +168,45 @@ internal sealed class DiscussionStore(string directory)
             catch (FileNotFoundException) { } // deleted meanwhile
             catch (Exception error) when (error is IOException or UnauthorizedAccessException or JsonException)
             {
-                ErrorLog.Write(error, "Sessions · load", $"file {Path.GetFileName(file)}");
+                ErrorLog.Write(error, "Sessions · load", $"session {id}");
             }
         }
         return rooms.OrderByDescending(room => room.Updated).ToArray();
     }
 
-    /// <summary>Writes the session through a temporary file; throws if it could not be saved after several tries.</summary>
-    public void Save(DiscussionRoom room)
+    /// <summary>Atomically writes the session. A received reply can use a recovery file if the main file is locked.</summary>
+    public void Save(DiscussionRoom room, bool preserveReply = false)
     {
         System.IO.Directory.CreateDirectory(Directory);
         var file = FileFor(room.Id);
+        var recovery = RecoveryFileFor(room.Id);
         var temporary = file + "." + Guid.NewGuid().ToString("N") + ".tmp";
         try
         {
-            using (var stream = File.Create(temporary)) JsonSerializer.Serialize(stream, room, Json);
-            lock (Gate) { Retry(() => { File.Move(temporary, file, overwrite: true); return true; }); Index(room, new FileInfo(file)); }
+            using (var stream = File.Create(temporary))
+            {
+                JsonSerializer.Serialize(stream, room, Json);
+                if (preserveReply || File.Exists(recovery)) stream.Flush(flushToDisk: true);
+            }
+            lock (Gate)
+            {
+                if (File.Exists(recovery))
+                {
+                    // The recovery file is authoritative while it exists. Update it before trying the primary file.
+                    MoveInto(temporary, recovery);
+                    if (!TryRestorePrimary(recovery, file)) return;
+                }
+                else
+                {
+                    try { MoveInto(temporary, file); }
+                    catch (Exception error) when (preserveReply && error is IOException or UnauthorizedAccessException)
+                    {
+                        MoveInto(temporary, recovery);
+                        return;
+                    }
+                }
+                Index(room, new FileInfo(file));
+            }
         }
         finally
         {
@@ -193,6 +221,7 @@ internal sealed class DiscussionStore(string directory)
         lock (Gate)
         {
             Retry(() => { File.Delete(file); return true; });
+            Retry(() => { File.Delete(RecoveryFileFor(id)); return true; });
             if (File.Exists(HeaderFile(id))) File.Delete(HeaderFile(id));
             var root = Path.Combine(Directory, "attachments");
             var folder = Path.Combine(root, id.ToString("N"));
@@ -222,6 +251,33 @@ internal sealed class DiscussionStore(string directory)
         }
     }
 
+    private static bool TryRestorePrimary(string recovery, string primary)
+    {
+        try { File.Move(recovery, primary, overwrite: true); return true; }
+        catch (Exception error) when (error is IOException or UnauthorizedAccessException) { return false; }
+    }
+
+    private static void MoveInto(string source, string target) =>
+        Retry(() => { File.Move(source, target, overwrite: true); return true; });
+
+    private IEnumerable<Guid> SavedRoomIds()
+    {
+        if (!System.IO.Directory.Exists(Directory)) yield break;
+        var seen = new HashSet<Guid>();
+        var primary = System.IO.Directory.EnumerateFiles(Directory, "*.json");
+        var recoveries = System.IO.Directory.EnumerateFiles(Directory, "*.recovery");
+        foreach (var file in primary.Concat(recoveries))
+            if (Guid.TryParseExact(Path.GetFileNameWithoutExtension(file), "N", out var id) && seen.Add(id))
+                yield return id;
+    }
+
+    private string SavedFileFor(Guid id)
+    {
+        var recovery = RecoveryFileFor(id);
+        return File.Exists(recovery) ? recovery : FileFor(id);
+    }
+
+    private string RecoveryFileFor(Guid id) => Path.Combine(Directory, $"{id:N}.recovery");
     private string FileFor(Guid id) => Path.Combine(Directory, $"{id:N}.json");
 
     public static string TitleFrom(string text)

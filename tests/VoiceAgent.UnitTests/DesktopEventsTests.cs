@@ -58,6 +58,8 @@ public sealed class DesktopEventsTests
                 VerifyAttachments();
                 VerifyDesktopDelivery();
                 VerifyDesktopRecoveryCanRetryAfterASaveFailure();
+                VerifyLiveDesktopReplySurvivesLockedSessionAndRestart();
+                VerifyDesktopReplyRecoversWhenASavedSessionOpens();
                 VerifyRestoredDraftUsesItsOwnRelay();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
@@ -1270,16 +1272,14 @@ public sealed class DesktopEventsTests
 
             var checks = 0;
             var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
-                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
-            {
-                CheckDelivery = (_, _, _, _) => Task.FromResult<DesktopTurn?>(++checks == 1
-                    ? new("exact-turn", "interrupted", "", "Partial", [])
-                    : new("exact-turn", "completed", "", "Recovered reply", [])),
-            };
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
             view.Initialize();
             window.Content = view;
             window.Show();
             PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            view.CheckDelivery = (_, _, _, _) => Task.FromResult<DesktopTurn?>(++checks == 1
+                ? new("exact-turn", "interrupted", "", "Partial", [])
+                : new("exact-turn", "completed", "", "Recovered reply", []));
             void Check()
             {
                 HoverMessage(view, window, "Waiting");
@@ -1323,6 +1323,121 @@ public sealed class DesktopEventsTests
             Assert.Equal("Recovered reply", saved.Messages[1].Text);
             Assert.Equal(DeliveryRecipients.Claude, saved.Messages[0].UnconfirmedFor);
             Assert.Equal("Draft changed while the reply is being saved", saved.Draft?.Text);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyLiveDesktopReplySurvivesLockedSessionAndRestart()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-live-reply-restart-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            room.CodexDesktop = true;
+            room.CodexChatId = Guid.NewGuid();
+            store.Save(room);
+
+            var answer = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            DiscussionWindow? view = null;
+            view = new DiscussionWindow(store, async (_, _, selected, stream, _, token) =>
+            {
+                var delivery = await view!.StartDesktopDeliveryAsync(selected, "test-profile", stream.PostId);
+                stream.DesktopDeliveryId = delivery.Id;
+                stream.ConfirmReceipt();
+                var reply = await answer.Task.WaitAsync(token);
+                stream.DesktopDeliveryFinished = true;
+                return reply;
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+            editor.Text = "Test question";
+            var send = WaitForButton(view, "Send");
+            PumpUntil(() => send.IsEnabled);
+            send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.CurrentRoom!.Messages.Count == 2 && view.CurrentRoom.Messages[0].UnconfirmedFor == DeliveryRecipients.None);
+            Pump(view.PendingSaves);
+            Assert.Contains(store.ReadRoom(room.Id).Messages, item => item.DeliveryId is not null);
+
+            var primary = Path.Combine(store.Directory, $"{room.Id:N}.json");
+            var recovery = Path.Combine(store.Directory, $"{room.Id:N}.recovery");
+            using (var locked = File.Open(primary, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                answer.SetResult("Exact finished reply");
+                PumpUntil(() => view.CurrentRoom!.Messages.Any(item => item.Text == "Exact finished reply"));
+                Assert.True(File.Exists(recovery));
+                using var diskBeforeRecovery = System.Text.Json.JsonDocument.Parse(locked);
+                Assert.Contains(diskBeforeRecovery.RootElement.GetProperty("Messages").EnumerateArray(),
+                    item => item.GetProperty("DeliveryId").ValueKind == System.Text.Json.JsonValueKind.String);
+
+                editor.Text = "Draft saved while the main file is still locked";
+                PumpUntil(() => view.CurrentRoom!.Draft?.Text == editor.Text);
+                Pump(view.StopAndSaveAsync());
+
+                var reopened = new DiscussionWindow(new DiscussionStore(folder.FullName), (_, _, _, _, _, _) => throw new NotSupportedException(),
+                    () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+                reopened.Initialize();
+                window.Content = reopened;
+                PumpUntil(() => reopened.CurrentRoom?.Id == room.Id);
+                var messages = reopened.CurrentRoom!.Messages;
+                Assert.Single(messages, item => item.Text == "Exact finished reply");
+                Assert.DoesNotContain(messages, item => item.DeliveryId is not null);
+                Assert.Equal("Draft saved while the main file is still locked", reopened.CurrentRoom.Draft?.Text);
+            }
+
+            Assert.Single(new DiscussionStore(folder.FullName).ReadRoom(room.Id).Messages, item => item.Text == "Exact finished reply");
+            Assert.False(File.Exists(recovery));
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyDesktopReplyRecoversWhenASavedSessionOpens()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-auto-reply-recovery-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            var chat = Guid.NewGuid();
+            var delivery = Guid.NewGuid();
+            room.Messages.Add(new(DiscussionMember.Codex, DiscussionMember.Boss, "Pending desktop delivery", DateTimeOffset.Now,
+                ThreadId: chat, DesktopThread: true, DeliveryId: delivery, DeliveryProfile: "original-profile"));
+            store.Save(room);
+
+            var didRead = 0;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (profile, thread, clientMessage, _) =>
+                {
+                    Assert.Equal("original-profile", profile);
+                    Assert.Equal(chat, thread);
+                    Assert.Equal(delivery, clientMessage);
+                    didRead++;
+                    return Task.FromResult<DesktopTurn?>(new("saved-turn", "completed", "", "Recovered automatically", [delivery.ToString()]));
+                },
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Messages.Any(message => message.Text == "Recovered automatically") == true);
+            Assert.Equal(1, didRead);
+            var recovered = Assert.Single(new DiscussionStore(folder.FullName).ReadRoom(room.Id).Messages);
+            Assert.Equal("Recovered automatically", recovered.Text);
+            Assert.Null(recovered.DeliveryId);
         }
         finally
         {
