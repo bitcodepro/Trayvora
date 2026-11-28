@@ -28,6 +28,71 @@ public sealed class DesktopChatClientTests
         Assert.Equal(chat.ToString(), connection.ChatId);
     }
 
+    [Theory]
+    [InlineData(true, "removed")]
+    [InlineData(false, "stopRequested")]
+    public async Task StopUsesTheRemoteSubmissionOrTheMatchingTurn(bool queued, string expected)
+    {
+        using var cancellation = new CancellationTokenSource();
+        var chat = Guid.NewGuid();
+        var delivery = Guid.NewGuid();
+        var methods = new List<string>();
+        await using var connection = new ScriptConnection((method, args, ct) =>
+        {
+            methods.Add(method);
+            Assert.Equal(chat.ToString(), args.GetProperty("threadId").GetString());
+            Assert.False(ct.IsCancellationRequested);
+            switch (method)
+            {
+                case "thread/queue/add":
+                    Assert.Equal(delivery.ToString(), args.GetProperty("clientUserMessageId").GetString());
+                    cancellation.Cancel();
+                    return JsonSerializer.SerializeToElement(new { queuedSubmission = new { id = "server-queue-id", clientUserMessageId = delivery.ToString() } });
+                case "thread/queue/delete":
+                    Assert.Equal("server-queue-id", args.GetProperty("queuedSubmissionId").GetString());
+                    return JsonSerializer.SerializeToElement(new { deleted = queued });
+                case "thread/turns/list":
+                    return JsonSerializer.SerializeToElement(new
+                    {
+                        data = new[] { Turn("other-turn", "other-client"), Turn("our-turn", delivery.ToString()) }
+                    });
+                case "turn/interrupt":
+                    Assert.Equal("our-turn", args.GetProperty("turnId").GetString());
+                    return JsonSerializer.SerializeToElement(new { });
+                default: throw new InvalidOperationException(method);
+            }
+        });
+        var reply = await DesktopChatClient.SubmitAsync(connection, chat, "question", new Progress<string>(), cancellation.Token, delivery: delivery);
+
+        Assert.Equal(expected, Assert.IsType<DesktopTurn>(reply).Status);
+        Assert.Equal(queued ? new[] { "thread/queue/add", "thread/queue/delete" }
+            : ["thread/queue/add", "thread/queue/delete", "thread/turns/list", "turn/interrupt"], methods);
+
+        static object Turn(string id, string clientId) => new
+        {
+            id, status = "inProgress", items = new[] { new { type = "userMessage", clientId, content = Array.Empty<object>() } }
+        };
+    }
+
+    [Fact]
+    public async Task StopBeforeDispatchDoesNotReadOrModifyTheRemoteQueue()
+    {
+        using var cancellation = new CancellationTokenSource();
+        await using var connection = new ScriptConnection((method, _, _) => throw new InvalidOperationException(method));
+        await Assert.ThrowsAnyAsync<OperationCanceledException>(() => DesktopChatClient.SubmitAsync(connection,
+            Guid.NewGuid(), "question", new Progress<string>(), cancellation.Token,
+            beforeDispatch: () => { cancellation.Cancel(); return Task.CompletedTask; }));
+    }
+
+    private sealed class ScriptConnection(Func<string, JsonElement, CancellationToken, JsonElement> script) : ICodexConnection
+    {
+        public Task InitializeAsync(CancellationToken ct) => Task.CompletedTask;
+        public ValueTask DisposeAsync() => ValueTask.CompletedTask;
+        public IAsyncEnumerable<JsonElement> ReadEventsAsync(CancellationToken ct) => throw new NotSupportedException();
+        public Task<JsonElement> RequestAsync(string method, object parameters, CancellationToken ct) =>
+            Task.FromResult(script(method, JsonSerializer.SerializeToElement(parameters), ct));
+    }
+
     [Fact]
     public async Task DiscoveryReadsPastFirstPageAndKeepsFullTitles()
     {

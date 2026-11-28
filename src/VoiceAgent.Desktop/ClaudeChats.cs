@@ -285,7 +285,23 @@ internal static class ClaudeChats
         var stderr = process.StandardError.ReadToEndAsync(CancellationToken.None);
         try
         {
-            if (confirm is not null)
+            if (stream?.BeforeDispatch is { } dispatch) await dispatch();
+            ct.ThrowIfCancellationRequested();
+            if (confirm is not null && stream is not null)
+            {
+                using var hardStop = CancellationTokenSource.CreateLinkedTokenSource(stream.Emergency);
+                using var deadline = ct.Register(() => hardStop.CancelAfter(TimeSpan.FromSeconds(8)));
+                if (await ClaudeToolPrompts.RunAsync(process.StandardInput, process.StandardOutput, prompt, parser, confirm, hardStop.Token, ct))
+                {
+                    stream.StopConfirmed = true;
+                    stream.StopOutcome = "Claude confirmed the stop.";
+                    if (!parser.Failed && !string.IsNullOrWhiteSpace(parser.Result)) stream.Replace(parser.Result);
+                    await process.WaitForExitAsync(hardStop.Token);
+                    throw new OperationCanceledException(ct);
+                }
+                await process.WaitForExitAsync(hardStop.Token);
+            }
+            else if (confirm is not null)
                 await ClaudeToolPrompts.RunAsync(process.StandardInput, process.StandardOutput, prompt, parser, confirm, ct);
             else
             {
@@ -293,10 +309,10 @@ internal static class ClaudeChats
                 process.StandardInput.Close();
                 while (await process.StandardOutput.ReadLineAsync(ct) is { } line) parser.Accept(line);
             }
-            await process.WaitForExitAsync(ct);
+            if (!process.HasExited) await process.WaitForExitAsync(ct);
             var errors = await stderr;
             if (process.ExitCode != 0 || parser.Failed || parser.Result is null)
-                throw new IOException(FailureMessage(parser.Result, errors, parser.Other));
+                throw new IOException(ErrorLog.Redact(FailureMessage(parser.Result, errors, parser.Other)));
             return parser.Result;
         }
         finally
@@ -305,6 +321,8 @@ internal static class ClaudeChats
             {
                 process.Kill(entireProcessTree: true);
                 await process.WaitForExitAsync();
+                if (ct.IsCancellationRequested && stream is not null && stream.StopOutcome is null)
+                    stream.StopOutcome = "Claude process stopped. Remote work may still be running.";
             }
 
         }
@@ -432,8 +450,9 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
                 if (_tools.TryGetValue(id, out var previous) && (previous == label || previous.StartsWith(label + " ·", StringComparison.Ordinal))) return;
                 if (_tools.Count >= 512) _tools.Remove(_tools.Keys.First());
                 _tools[id] = label;
+                stream?.Observe(new("tool:" + id, label, "running"));
             }
-            stream?.Activity(label);
+            else stream?.Activity(label);
         }
         else if (type is "thinking" or "redacted_thinking")
         {
@@ -453,7 +472,7 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
             {
                 if (_tools.Count >= 512) _tools.Remove(_tools.Keys.First());
                 _tools[id] = label;
-                stream?.RecordStep(label);
+                stream?.Observe(new("tool:" + id, label, "running"));
             }
             else label = saved;
         }
@@ -466,7 +485,7 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
     {
         if (Identifier(Text(result, "tool_use_id")) is not { } id || !_tools.Remove(id, out var label)) return;
         var failed = result.TryGetProperty("is_error", out var flag) && flag.ValueKind == JsonValueKind.True;
-        stream?.RecordStep($"{(failed ? "Failed" : "Completed")} · {label}");
+        stream?.Observe(new("tool:" + id, label, failed ? "failed" : "completed"));
         stream?.Activity(_tools.Count == 0 ? "Waiting for Claude" : _tools.Values.Last(), record: false);
     }
 
@@ -496,14 +515,17 @@ internal sealed class ClaudeStreamParser(ReplyStream? stream)
                 stream?.Activity("Retrying the Claude API");
                 break;
             case "task_started":
-                stream?.Activity("Background task started");
+                if (Identifier(Text(item, "task_id")) is { } startedTask) stream?.Observe(new("task:" + startedTask, "Background task", "running"));
+                else stream?.Activity("Background task started");
                 break;
             case "task_progress":
                 var last = Identifier(Text(item, "last_tool_name"));
                 stream?.Activity(last is null ? "Background task running" : $"Background task running · {last}", record: false);
                 break;
             case "task_notification" when Text(item, "status") is "completed" or "failed" or "stopped":
-                stream?.RecordStep($"Background task · {Text(item, "status")}");
+                if (Identifier(Text(item, "task_id")) is { } endedTask)
+                    stream?.Observe(new("task:" + endedTask, "Background task", Text(item, "status")));
+                else stream?.RecordStep($"Background task · {Text(item, "status")}");
                 stream?.Activity("Waiting for Claude", record: false);
                 break;
         }

@@ -15,7 +15,12 @@ internal sealed record DiscussionMessage(DiscussionMember Sender, DiscussionMemb
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients PendingFor = DeliveryRecipients.None,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients NotSentTo = DeliveryRecipients.None,
     [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingDefault)] DeliveryRecipients UnconfirmedFor = DeliveryRecipients.None,
-    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkLog = null);
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? WorkLog = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? PostId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] string? RemoteTurnId = null,
+    [property: JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)] Guid? DeliveryPostId = null);
+
+internal sealed record DiscussionDraft(string Text, string[] Files, DiscussionWindow.DiscussionTarget To, bool RelayCodex, bool RelayClaude);
 
 /// <summary>A "discuss with …" exchange: the lead works with the partner and reports the decision to Boss.</summary>
 internal sealed record DiscussionPlan(DiscussionMember Lead, DiscussionMember Partner, int ExchangesLeft);
@@ -50,6 +55,8 @@ internal sealed class DiscussionRoom
     public string? ClaudeModel { get; set; }
 
     public List<DiscussionMessage> Messages { get; set; } = [];
+    [JsonIgnore(Condition = JsonIgnoreCondition.WhenWritingNull)]
+    public DiscussionDraft? Draft { get; set; }
 
     public bool OwnCodexThread => !CodexDesktop && CodexChatId == Id;
     internal bool UsesRevqora => !CodexDesktop && CodexChatId == CodexSession.PreviousRevqoraChatId;

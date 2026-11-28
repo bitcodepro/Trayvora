@@ -52,6 +52,7 @@ public sealed class DesktopEventsTests
                 VerifyDiscussWith();
                 VerifyStreamingSession();
                 VerifySessionQueues();
+                VerifyDraftSurvivesVoiceModeChange();
                 VerifyMarkdown();
                 VerifyAttachments();
                 VerifyDesktopDelivery();
@@ -689,24 +690,22 @@ public sealed class DesktopEventsTests
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Second question");
             Assert.DoesNotContain(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Other topic");
 
-            // Both agents: Codex hands off to Claude, Claude fails. Each failure is shown and saved; nothing else is lost.
+            // Both agents get the user's message. An address in the resulting text does not create a third request.
             claudeFails = true;
             sent.Clear();
             view.GetLogicalDescendants().OfType<Button>().Single(button => Equals(button.Content, "Both"))
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             editor.Text = "Say hello to Claude";
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            PumpUntil(() => sent.Count >= 3 && Stored().Single(item => item.Title == "First question").Messages.Count(message => message.Failed) >= 2);
+            PumpUntil(() => Stored().Single(item => item.Title == "First question").Messages.Count >= 7);
             Pump(Task.Delay(50));
             Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], sent.Take(2).Select(item => item.Agent).Order());
-            Assert.Equal(DiscussionMember.Claude, sent[2].Agent);
-            Assert.Contains("hello from Codex", sent[2].Text);
-            Assert.StartsWith("Codex wrote:", sent[2].Text);
-            var saved = Stored().Single(item => item.Title == "First question").Messages.TakeLast(4).ToArray();
+            Assert.Equal(2, sent.Count);
+            var saved = Stored().Single(item => item.Title == "First question").Messages.TakeLast(3).ToArray();
             Assert.Equal("Say hello to Claude", saved[0].Text);
-            var handoff = Assert.Single(saved[1..], message => message.Sender == DiscussionMember.Codex);
-            Assert.Equal(((DiscussionMember?)DiscussionMember.Claude, "hello from Codex"), (handoff.To, handoff.Text));
-            Assert.Equal(2, saved[1..].Count(message => message.Failed && message.Sender == DiscussionMember.Claude));
+            var reply = Assert.Single(saved[1..], message => message.Sender == DiscussionMember.Codex);
+            Assert.Equal(((DiscussionMember?)DiscussionMember.Boss, "hello from Codex"), (reply.To, reply.Text));
+            Assert.Single(saved[1..], message => message.Failed && message.Sender == DiscussionMember.Claude);
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Claude Code was not found.");
 
             // Relay toggle on the Claude chip: Claude's plain reply is passed on to Codex automatically.
@@ -895,14 +894,14 @@ public sealed class DesktopEventsTests
             Pump(Task.Delay(250));
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Inlines?.Any(inline => inline is Avalonia.Controls.Documents.Span) == true);
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Codex says");
-            var liveLog = view.GetLogicalDescendants().OfType<Expander>().Single(log => Equals(log.Header, "Work log"));
+            var liveLog = view.GetLogicalDescendants().OfType<Expander>().Single(log => log.IsVisible && Equals(log.Header, "Work log"));
             Assert.True(liveLog.IsExpanded);
             liveLog.IsExpanded = false;
 
             // Codex finishes, Claude is paused: Codex's answer and Claude's partial text are both kept.
             replies[DiscussionMember.Codex].SetResult("Codex final answer");
             Pump(Task.Delay(100));
-            Named("Pause").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Named("Stop session").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Pump(Task.Delay(200));
             var messages = store.Load().Single().Messages;
             Assert.Equal("Codex final answer", messages[1].Text);
@@ -914,7 +913,59 @@ public sealed class DesktopEventsTests
             savedLog.IsExpanded = true;
             Assert.Contains(savedLog.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Read · Sample.cs");
             Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text == "⏸ interrupted");
-            Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text?.StartsWith("Paused", StringComparison.Ordinal) == true);
+            Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text?.StartsWith("Session stopped", StringComparison.Ordinal) == true);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyDraftSurvivesVoiceModeChange()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-voice-draft-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            var transcript = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var recording = false;
+            var sent = false;
+            string? originalDraft = null;
+            var view = new DiscussionWindow(store, (_, text, _, _, _, _) =>
+                {
+                    sent = true;
+                    originalDraft = text;
+                    return Task.FromResult<string?>("Unexpected");
+                },
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null,
+                (_, _, _) => { recording = true; return transcript.Task; });
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            var voice = view.GetLogicalDescendants().OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(b => Equals(b.Content, "Voice mode"));
+            var mic = view.GetLogicalDescendants().OfType<Button>().Single(b => AutomationProperties.GetName(b) == "Dictate a message");
+            var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+            voice.IsChecked = true;
+            mic.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.True(recording);
+            voice.IsChecked = false;
+            editor.Text = "Existing notes";
+            transcript.SetResult("recognized text");
+            PumpUntil(() => editor.Text == "Existing notes recognized text");
+            Pump(view.StopAndSaveAsync());
+            Assert.False(sent, originalDraft);
+            Assert.Equal("Existing notes recognized text", store.ReadRoom(room.Id).Draft?.Text);
+
+            var restored = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+            restored.Initialize();
+            window.Content = restored;
+            PumpUntil(() => restored.CurrentRoom?.Id == room.Id);
+            Assert.Contains(restored.GetLogicalDescendants().OfType<TextBox>(), box => box.Text == "Existing notes recognized text");
         }
         finally
         {
@@ -1005,7 +1056,15 @@ public sealed class DesktopEventsTests
             var queued = store.ReadRoom(room.Id).Messages.Where(m => m.PendingFor == DeliveryRecipients.Codex);
             Assert.Equal(["Codex second", "Codex third"], queued.Select(m => m.Text));
 
-            opened[0].Reply.SetResult("Codex first reply");
+            Button VisibleButton(string label) => view.GetLogicalDescendants().OfType<Button>()
+                .Single(button => button.IsVisible && Equals(button.Content, label));
+            VisibleButton("Pause queue").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            VisibleButton("Stop Codex").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => store.ReadRoom(room.Id).Messages.Any(message => message.Text == "Codex has started answering" && message.Interrupted));
+            Assert.Equal(2, opened.Count);
+            Assert.False(opened[1].Reply.Task.IsCompleted);
+            Assert.Equal(DeliveryRecipients.Codex, Message("Codex second").PendingFor);
+            VisibleButton("Resume queue").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             PumpUntil(() => opened.Count == 3);
             Assert.Contains("Codex second", opened[2].Prompt);
             Assert.False(opened[1].Reply.Task.IsCompleted);
@@ -1022,7 +1081,7 @@ public sealed class DesktopEventsTests
                 PumpUntil(() => view.CurrentRoom!.Messages.Single(m => m.Text == "Codex third").UnconfirmedFor == DeliveryRecipients.None);
                 Assert.Equal(DeliveryRecipients.None, view.CurrentRoom!.Messages.Single(m => m.Text == "Codex third").UnconfirmedFor);
                 Assert.False(view.PendingSaves.IsCompleted);
-                Named("Pause").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Named("Stop session").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             }
             PumpUntil(() => !view.IsRunning);
             Pump(view.PendingSaves);

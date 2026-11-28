@@ -6,18 +6,29 @@ namespace VoiceAgent.Desktop;
 /// A reply that is still being written. The agent adapters append to it from any thread; the session view reads
 /// snapshots on a timer, so a burst of small deltas costs one redraw.
 /// </summary>
-internal sealed class ReplyStream
+internal sealed class ReplyStream(CancellationTokenSource? emergency = null)
 {
     private readonly object _gate = new();
     private readonly StringBuilder _text = new();
     private readonly TaskCompletionSource _received = new(TaskCreationOptions.RunContinuationsAsynchronously);
 
     public Task Receipt => _received.Task;
+    public CancellationToken Emergency => emergency?.Token ?? CancellationToken.None;
+    public void Abort() => emergency?.Cancel();
+    public string? StopOutcome { get; set; }
+    public bool StopConfirmed { get; set; }
+    public Guid? PostId { get; init; }
+    public Guid? DesktopDeliveryId { get; set; }
+    public bool DesktopDeliveryFinished { get; set; }
+    public Func<string, CancellationToken, Task>? Steer { get; set; }
+    public Func<Task>? BeforeDispatch { get; set; }
 
     public void ConfirmReceipt() => _received.TrySetResult();
     private readonly List<string> _notes = [];
     private string? _activity;
     private readonly List<string> _steps = [];
+    private readonly Dictionary<string, (string Label, string? State, DateTimeOffset Started)> _entries = [];
+
     public const int StepsShown = 8;
     private int _stepCount;
     private int _version;
@@ -32,6 +43,7 @@ internal sealed class ReplyStream
         lock (_gate)
         {
             _text.Append(delta);
+            _activity = null;
             _version++;
         }
     }
@@ -55,11 +67,17 @@ internal sealed class ReplyStream
         {
             if (_text.Length == text.Length && _text.ToString() == text) return;
             _text.Clear().Append(text);
+            if (text.Length > 0) _activity = null;
             _version++;
         }
     }
 
     /// <summary>Reports on the calling thread (no SynchronizationContext hop), so updates keep their order.</summary>
+    public sealed class ActivityReporter(Action<VoiceAgent.Codex.CodexActivity> report) : IProgress<VoiceAgent.Codex.CodexActivity>
+    {
+        public void Report(VoiceAgent.Codex.CodexActivity value) => report(value);
+    }
+
     public sealed class Reporter(Action<string> report) : IProgress<string>
     {
         public void Report(string value) => report(value);
@@ -88,11 +106,41 @@ internal sealed class ReplyStream
         }
     }
 
+    public void Observe(VoiceAgent.Codex.CodexActivity entry)
+    {
+        var label = ErrorLog.Redact(entry.Label);
+        if (label.Length > 1800) label = label[..1800] + "…";
+        lock (_gate)
+        {
+            if (_entries.TryGetValue(entry.Id, out var previous) && previous.Label == label && previous.State == entry.Status) return;
+            if (_entries.Count >= 120 && !_entries.ContainsKey(entry.Id)) _entries.Remove(_entries.Keys.First());
+            _entries[entry.Id] = (label, entry.Status, previous.Started == default ? DateTimeOffset.Now : previous.Started);
+            _activity = entry.Status == "running" ? label : _entries.Values.LastOrDefault(step => step.State == "running").Label;
+            _version++;
+        }
+    }
+
+    public void FinishActivity(bool stopConfirmed)
+    {
+        lock (_gate)
+        {
+            foreach (var (id, entry) in _entries.ToArray())
+                if (entry.State == "running") _entries[id] = (entry.Label, stopConfirmed ? "interrupted" : "result unknown", entry.Started);
+            _activity = null;
+            _version++;
+        }
+    }
+
     public string? WorkLog
     {
         get
         {
-            lock (_gate) return _steps.Count == 0 ? null : FormatWorkLog(_steps, _stepCount);
+            lock (_gate)
+            {
+                if (_entries.Count == 0) return _steps.Count == 0 ? null : FormatWorkLog(_steps, _stepCount);
+                var entries = _entries.Values.Select(item => $"{item.Started:HH:mm:ss}  {item.Label}" + (item.State is null ? "" : $" · {item.State}"));
+                return string.Join("\n", _steps.Concat(entries));
+            }
         }
     }
 

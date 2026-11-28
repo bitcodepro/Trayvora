@@ -34,7 +34,7 @@ internal sealed class VoiceOverlay : Window
         _stop is { IsCancellationRequested: false } && _operation?.IsCancellationRequested == false ? AgentState.Recording :
         _transcribing ? AgentState.Transcribing :
         _codexAbort is not null ? AgentState.Sending :
-        _suspended || _operation is not null ? AgentState.Busy : AgentState.Ready;
+        _suspended || _operation is not null || _discussion?.IsRunning == true ? AgentState.Busy : AgentState.Ready;
     private readonly CodexSession _codex;
     private readonly DesktopChatPanel? _sharedChat;
     private readonly ReplyAudioPanel? _replyAudio;
@@ -651,39 +651,68 @@ internal sealed class VoiceOverlay : Window
                     var profile = _sharedChat.Profile;
                     if (room.CodexChatId == Guid.Empty && room.NewCodexFolder is { } folder)
                     {
-                        var created = await _sharedChat.StartChatAsync(profile, folder, DiscussionStore.TitleFrom(message), message, ct, stream);
-                        // The chat exists in Codex Desktop now; later messages go to it like to any Desktop chat.
-                        room.CodexChatId = created.Chat.Id;
-                        if (_settingsDirectory is { } settings)
-                        {
-                            var id = created.Chat.Id.ToString();
-                            if (!await Task.Run(() => CodexDesktopChats.Register(profile, settings, id)))
-                                stream.Activity("Close Codex Desktop once to see this chat in it; Trayvora adds it when Codex Desktop is closed.");
-                        }
-                        room.CodexChatTitle = $"Codex Desktop · {created.Chat.Title}";
-                        room.NewCodexFolder = null;
-                        if (created.Status != "completed") throw new IOException($"Codex Desktop returned {created.Status}.");
-                        return created.Answer;
+                        var created = await _sharedChat.StartChatAsync(profile, folder, DiscussionStore.TitleFrom(message), message, ct, stream, files,
+                            chat => Dispatcher.UIThread.InvokeAsync(async () =>
+                            {
+                                if (!await _discussion!.BindDesktopChatAsync(room, chat))
+                                    throw new AgentNotSentException("Could not save the new Desktop chat before sending.");
+                                stream.DesktopDeliveryId = (await _discussion.StartDesktopDeliveryAsync(room, profile, stream.PostId)).Id;
+                            }),
+                            id => Dispatcher.UIThread.InvokeAsync(async () =>
+                            {
+                                if (stream.DesktopDeliveryId is { } deliveryId) await _discussion!.RecordDesktopTurnAsync(room, deliveryId, id);
+                            }));
+                        if (_settingsDirectory is { } settings && !await Task.Run(() => CodexDesktopChats.Register(profile, settings, created.Chat.Id.ToString())))
+                            stream.Note("Close Codex Desktop once to see this chat in it.");
+                        return FinishDesktop(created.Status, created.Answer);
                     }
-                    var turn = await _discussion!.SubmitDesktopDeliveryAsync(room, profile,
-                        delivery => _sharedChat.SubmitToAsync(delivery, message, ct, stream));
-                    if (turn is null) return null;
-                    if (turn.Status != "completed") throw new IOException($"Codex Desktop returned {turn.Status}.");
-                    return turn.Answer;
+                    var turn = await _discussion!.SubmitDesktopDeliveryAsync(room, profile, delivery =>
+                    {
+                        stream.DesktopDeliveryId = delivery.Id;
+                        return _sharedChat.SubmitToAsync(delivery, message, ct, stream, files,
+                            id => Dispatcher.UIThread.InvokeAsync(async () => { await _discussion!.RecordDesktopTurnAsync(room, delivery.Id, id); }));
+                    }, stream.PostId);
+                    return turn is null ? null : FinishDesktop(turn.Status, turn.Answer);
+
+                    string FinishDesktop(string status, string answer)
+                    {
+                        stream.DesktopDeliveryFinished = status is "completed" or "failed" or "interrupted" or "removed";
+                        stream.StopConfirmed = status == "interrupted";
+                        if (status == "completed") return answer;
+                        if (!string.IsNullOrEmpty(answer)) stream.Replace(answer);
+                        stream.StopOutcome = status switch
+                        {
+                            "removed" => "Removed from the Codex Desktop queue.",
+                            "interrupted" => "Codex Desktop confirmed the stop.",
+                            "stopRequested" => "Codex Desktop accepted the stop request. Check reply for the final status.",
+                            "detached" => "Stopped waiting. Codex Desktop may still be working. Check reply to reconnect.",
+                            _ => null,
+                        };
+                        if (status == "removed") throw new AgentNotSentException(stream.StopOutcome!);
+                        throw new IOException(stream.StopOutcome ?? $"Codex Desktop returned {status}.");
+                    }
                 }
 
                 CodexTurnStatus result;
                 try
                 {
-                    result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: ct, chatId: room.CodexChatId,
-                        useRevqora: room.UsesRevqora, steps: new ReplyStream.Reporter(stream.Activity),
-                        attachments: files, onAccepted: stream.ConfirmReceipt);
+                    result = await _codex.RunAsync(message, new CodexOutput(stream.Append), ct, emergencyStop: stream.Emergency, chatId: room.CodexChatId,
+                        useRevqora: room.UsesRevqora, attachments: files, onAccepted: stream.ConfirmReceipt, activity: new ReplyStream.ActivityReporter(stream.Observe),
+                        answer: new ReplyStream.Reporter(stream.Replace), steer: callback => stream.Steer = callback, waitInQueue: true,
+                        beforeDispatch: stream.BeforeDispatch);
                 }
                 catch (Exception error) when (error is InvalidOperationException or ArgumentException or InvalidDataException or TimeoutException)
                 {
                     // Sign-in, queue and length problems carry a readable reason; show it instead of a generic failure.
                     throw new IOException(error.Message, error);
                 }
+                if (result == CodexTurnStatus.Interrupted)
+                {
+                    stream.StopConfirmed = true;
+                    stream.StopOutcome = "Codex confirmed the stop.";
+                }
+                else if (ct.IsCancellationRequested && result == CodexTurnStatus.Unknown)
+                    stream.StopOutcome = "Stopped waiting. Codex did not confirm the stop.";
                 if (result != CodexTurnStatus.Completed) throw new IOException($"Codex returned {result}.");
                 return stream.Text;
             },
@@ -700,6 +729,7 @@ internal sealed class VoiceOverlay : Window
             DictateAsync,
             () => new DiscussionSettings(_settingsDirectory ?? Path.Combine(AppContext.BaseDirectory, "settings")).Rounds,
             OpenTerminal);
+            _discussion.PreciseDeliveryStages = true;
             _discussion.CurrentAgentProfile = (room, agent) => agent == DiscussionMember.Claude
                 ? ClaudeProfile() : room.CodexDesktop ? _sharedChat?.Profile : null;
             _discussion.CurrentClaudeProfile = ClaudeProfile;
@@ -710,7 +740,12 @@ internal sealed class VoiceOverlay : Window
                 CodexSession.FindExecutable(), args, CodexCommands.EnvironmentFor(context.CodexHome!, context.CodexDesktop), ct, context.Workspace,
                 includeStandardError: args[0] != "mcp");
             _discussion.StopSpeaking = () => _replyAudio?.Stop();
-            if (_sharedChat is not null) _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
+            if (_sharedChat is not null)
+            {
+                _discussion.CheckDelivery = _sharedChat.CheckDeliveryAsync;
+                _discussion.CheckRemoteTurn = _sharedChat.CheckTurnAsync;
+            }
+            _discussion.RunningChanged += RefreshControls;
             _discussion.Initialize();
             _discussion.BackRequested += CloseDiscussion;
             if (_replyAudio is not null) _discussion.Speak = text => _replyAudio.ReadAsync(text);
@@ -1914,10 +1949,9 @@ internal sealed class VoiceOverlay : Window
     public async Task CancelAndWaitAsync()
     {
         Cancel();
-        if (_codexRun is { } run)
-        {
-            await run;
-        }
+        var sessions = _discussion?.StopAndSaveAsync() ?? Task.CompletedTask;
+        if (_codexRun is { } run) await run;
+        await sessions;
     }
 
     public async Task ShowHistoryAsync()
@@ -2154,7 +2188,9 @@ internal sealed class VoiceOverlay : Window
 
     public void EmergencyStop()
     {
+        _discussion?.Pause(emergency: true);
         Cancel();
+        RefreshControls();
         if (_codexAbort is { IsCancellationRequested: false } abort)
         {
             _emergencyRequested = true;

@@ -7,8 +7,8 @@ internal static class ClaudeToolPrompts
 {
     internal delegate Task<bool> Confirm(string name, JsonElement input, CancellationToken ct);
 
-    public static async Task RunAsync(TextWriter stdin, TextReader stdout, string prompt, ClaudeStreamParser parser,
-        Confirm confirm, CancellationToken ct)
+    public static async Task<bool> RunAsync(TextWriter stdin, TextReader stdout, string prompt, ClaudeStreamParser parser,
+        Confirm confirm, CancellationToken ct, CancellationToken softStop = default)
     {
         async Task WriteAsync(object value)
         {
@@ -25,6 +25,11 @@ internal static class ClaudeToolPrompts
         string? pending = null;
         string? pendingTool = null;
         JsonElement arguments = default;
+        using var stopping = CancellationTokenSource.CreateLinkedTokenSource(softStop, lifetime.Token);
+        var stopSignal = Task.Delay(Timeout.InfiniteTimeSpan, stopping.Token);
+        var noDecision = Task.Delay(Timeout.InfiniteTimeSpan, lifetime.Token);
+        string? interruptId = null;
+        var interruptAccepted = false;
         try
         {
             await WriteAsync(new { type = "user", message = new { role = "user", content = prompt }, parent_tool_use_id = (string?)null, session_id = "" }).ConfigureAwait(false);
@@ -41,6 +46,18 @@ internal static class ClaudeToolPrompts
                     arguments = first.Input;
                     dialog = CancellationTokenSource.CreateLinkedTokenSource(lifetime.Token);
                     decision = confirm(first.Tool, first.Input, dialog.Token);
+                }
+                if (interruptId is null && !next.IsCompleted &&
+                    await Task.WhenAny(stopSignal, next, decision ?? noDecision).ConfigureAwait(false) == stopSignal)
+                {
+                    dialog?.Cancel();
+                    dialog?.Dispose();
+                    dialog = null;
+                    pending = null;
+                    decision = null;
+                    waiting.Clear();
+                    interruptId = Guid.NewGuid().ToString();
+                    await WriteAsync(new { type = "control_request", request_id = interruptId, request = new { subtype = "interrupt" } }).ConfigureAwait(false);
                 }
                 if (decision is not null && await Task.WhenAny(decision, next).ConfigureAwait(false) == decision)
                 {
@@ -61,11 +78,18 @@ internal static class ClaudeToolPrompts
                 try { data = JsonSerializer.Deserialize<JsonElement>(line); }
                 catch (JsonException) { parser.Accept(line); next = stdout.ReadLineAsync(ct).AsTask(); continue; }
                 var type = data.ValueKind == JsonValueKind.Object && data.TryGetProperty("type", out var kind) ? kind.ToString() : "";
-                if (type == "control_request" && data.TryGetProperty("request_id", out var rid))
+                if (type == "control_response" && interruptId is not null && data.TryGetProperty("response", out var response)
+                    && response.ValueKind == JsonValueKind.Object &&
+                    response.TryGetProperty("request_id", out var responseId) && responseId.GetString() == interruptId)
+                {
+                    interruptAccepted = response.TryGetProperty("subtype", out var subtype) && subtype.GetString() == "success";
+                }
+                else if (type == "control_request" && data.TryGetProperty("request_id", out var rid))
                 {
                     var id = rid.GetString()!;
                     var request = data.GetProperty("request");
-                    if (request.GetProperty("subtype").GetString() != "can_use_tool")
+                    if (interruptId is not null) await Deny(id).ConfigureAwait(false);
+                    else if (request.GetProperty("subtype").GetString() != "can_use_tool")
                         await WriteAsync(new { type = "control_response", response = new { subtype = "error", request_id = id, error = "Unsupported host request" } }).ConfigureAwait(false);
                     else if (request.TryGetProperty("tool_name", out var tool) &&
                         tool.GetString() is { } name && name.StartsWith("mcp__", StringComparison.Ordinal) &&
@@ -93,7 +117,7 @@ internal static class ClaudeToolPrompts
                 {
                     if (data.ValueKind == JsonValueKind.Object) parser.Accept(data);
                     else parser.Accept(line);
-                    if (type == "result") break;
+                    if (type == "result") return interruptAccepted;
                 }
                 next = stdout.ReadLineAsync(ct).AsTask();
             }
@@ -104,5 +128,6 @@ internal static class ClaudeToolPrompts
             dialog?.Dispose();
             stdin.Close();
         }
+        return false;
     }
 }
