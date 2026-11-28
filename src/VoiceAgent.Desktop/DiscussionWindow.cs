@@ -1826,23 +1826,25 @@ internal sealed partial class DiscussionWindow(
                 var prompt = Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss);
                 async Task BeginDispatch()
                 {
-                    while (run.QueueResume is { } resume) await resume.Task.WaitAsync(turnToken);
-                    if (delivery.Post?.Message.PostId is { } id && run.RemovedPosts.Contains(id))
-                        throw new AgentNotSentException("The queued message was removed.");
-                    turnToken.ThrowIfCancellationRequested();
+                    var releaseCodexSlotOnPause = PreciseDeliveryStages && agent == DiscussionMember.Codex && !room.CodexDesktop;
                     var profile = agent == DiscussionMember.Claude ? claudeProfile : codexProfile;
-                    if (CurrentAgentProfile?.Invoke(room, agent) != profile)
-                        throw new AgentNotSentException("The agent profile changed while the request was queued.");
                     while (true)
                     {
+                        while (run.QueueResume is { } paused)
+                        {
+                            if (releaseCodexSlotOnPause) throw new CodexDispatchDeferredException(paused.Task);
+                            await paused.Task.WaitAsync(turnToken);
+                        }
+                        if (delivery.Post?.Message.PostId is { } id && run.RemovedPosts.Contains(id))
+                            throw new AgentNotSentException("The queued message was removed.");
+                        turnToken.ThrowIfCancellationRequested();
+                        if (CurrentAgentProfile?.Invoke(room, agent) != profile)
+                            throw new AgentNotSentException("The agent profile changed while the request was queued.");
                         if (!await SetPostDelivery(room, delivery, DeliveryStage.Unconfirmed))
                             throw new AgentNotSentException("Could not update the queued message. The request was not sent.");
-                        if (run.QueueResume is not { } paused) break;
-                        await SetPostDelivery(room, delivery, DeliveryStage.Pending);
-                        await paused.Task.WaitAsync(turnToken);
-                        while (run.QueueResume is { } pending) await pending.Task.WaitAsync(turnToken);
-                        if (delivery.Post?.Message.PostId is { } removed && run.RemovedPosts.Contains(removed))
-                            throw new AgentNotSentException("The queued message was removed.");
+                        if (run.QueueResume is null) break;
+                        if (!await SetPostDelivery(room, delivery, DeliveryStage.Pending))
+                            throw new AgentNotSentException("Could not save the paused message. The request was not sent.");
                     }
                     if (CurrentAgentProfile?.Invoke(room, agent) != profile)
                         throw new AgentNotSentException("The agent profile changed before dispatch.");

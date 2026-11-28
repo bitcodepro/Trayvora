@@ -52,6 +52,7 @@ public sealed class DesktopEventsTests
                 VerifyDiscussWith();
                 VerifyStreamingSession();
                 VerifySessionQueues();
+                VerifyPausedRoomDoesNotBlockAnotherRoom();
                 VerifyDraftSurvivesVoiceModeChange();
                 VerifyMarkdown();
                 VerifyAttachments();
@@ -917,6 +918,95 @@ public sealed class DesktopEventsTests
         }
         finally
         {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyPausedRoomDoesNotBlockAnotherRoom()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-paused-room-");
+        var window = new Window { Width = 1000, Height = 700 };
+        var allowDispatch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        DiscussionWindow? view = null;
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var first = store.Create(null);
+            first.Title = "First local room";
+            store.Save(first);
+            var second = store.Create(null);
+            second.Title = "Second local room";
+            store.Save(second);
+
+            var codex = new CodexSession(folder.FullName);
+            var firstHasSlot = false;
+            var sent = new List<Guid>();
+            view = new DiscussionWindow(store, async (_, _, room, stream, _, token) =>
+            {
+                await codex.WithTurnSlotAsync(async () =>
+                {
+                    if (room.Id == first.Id)
+                    {
+                        firstHasSlot = true;
+                        await allowDispatch.Task.WaitAsync(token);
+                    }
+                    await stream.BeforeDispatch!();
+                    sent.Add(room.Id);
+                    return CodexTurnStatus.Completed;
+                }, token, waitInQueue: true);
+                return "Reply";
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                PreciseDeliveryStages = true,
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom is not null);
+
+            void Select(DiscussionRoom room)
+            {
+                if (view.CurrentRoom?.Id != room.Id)
+                    WaitForButton(view, room.Title).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+                Assert.Equal(room.Id, view.CurrentRoom?.Id);
+            }
+
+            void Post(string text)
+            {
+                view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true).Text = text;
+                var sendButton = view.GetLogicalDescendants().OfType<Button>().Single(b => AutomationProperties.GetName(b) == "Send");
+                PumpUntil(() => sendButton.IsEnabled);
+                Assert.True(sendButton.IsEnabled);
+                sendButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+
+            void Click(string label) => view.GetLogicalDescendants().OfType<Button>()
+                .Single(b => b.IsVisible && Equals(b.Content, label)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            Select(first);
+            Post("First request");
+            PumpUntil(() => firstHasSlot);
+            Assert.True(firstHasSlot);
+            Click("Pause queue");
+            allowDispatch.SetResult();
+            Select(second);
+            Post("Second request");
+            PumpUntil(() => view.CurrentRoom!.Messages.Any(m => m.Sender == DiscussionMember.Codex));
+            Assert.Equal([second.Id], sent);
+            Assert.Equal(DeliveryRecipients.Codex, store.ReadRoom(first.Id).Messages.Single().PendingFor);
+
+            Select(first);
+            Click("Resume queue");
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
+            Assert.Equal([second.Id, first.Id], sent);
+            Assert.Equal("Reply", store.ReadRoom(first.Id).Messages.Last().Text);
+        }
+        finally
+        {
+            if (view is not null) Pump(view.StopAndSaveAsync());
             window.Close();
             folder.Delete(recursive: true);
         }

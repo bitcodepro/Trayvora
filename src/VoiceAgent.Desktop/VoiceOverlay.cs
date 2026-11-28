@@ -656,7 +656,9 @@ internal sealed class VoiceOverlay : Window
                             {
                                 if (!await _discussion!.BindDesktopChatAsync(room, chat))
                                     throw new AgentNotSentException("Could not save the new Desktop chat before sending.");
-                                stream.DesktopDeliveryId = (await _discussion.StartDesktopDeliveryAsync(room, profile, stream.PostId)).Id;
+                                var id = (await _discussion.StartDesktopDeliveryAsync(room, profile, stream.PostId)).Id;
+                                stream.DesktopDeliveryId = id;
+                                return id;
                             }),
                             id => Dispatcher.UIThread.InvokeAsync(async () =>
                             {
@@ -664,7 +666,7 @@ internal sealed class VoiceOverlay : Window
                             }));
                         if (_settingsDirectory is { } settings && !await Task.Run(() => CodexDesktopChats.Register(profile, settings, created.Chat.Id.ToString())))
                             stream.Note("Close Codex Desktop once to see this chat in it.");
-                        return FinishDesktop(created.Status, created.Answer);
+                        return created.Turn is { } first ? FinishDesktop(first.Status, first.Answer) : null;
                     }
                     var turn = await _discussion!.SubmitDesktopDeliveryAsync(room, profile, delivery =>
                     {

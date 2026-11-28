@@ -287,6 +287,11 @@ internal sealed class AppServerConnection : ICodexConnection
 internal sealed class AppServerRpcException(JsonElement response) : IOException("Codex App Server rejected the request.")
 {
     public bool ThreadMissing { get; } = IsThreadMissing(response);
+    public bool TurnHistoryNotReady { get; } = response.TryGetProperty("error", out var error) &&
+        error.ValueKind == JsonValueKind.Object && error.TryGetProperty("code", out var code) &&
+        code.ValueKind == JsonValueKind.Number && code.TryGetInt32(out var value) && value == -32600 &&
+        error.TryGetProperty("message", out var message) && message.ValueKind == JsonValueKind.String &&
+        message.GetString()!.Contains("thread/turns/list is unavailable before first user message", StringComparison.OrdinalIgnoreCase);
 
     private static bool IsThreadMissing(JsonElement response) =>
         response.TryGetProperty("error", out var error) && error.ValueKind == JsonValueKind.Object &&

@@ -28,6 +28,108 @@ public sealed class DesktopChatClientTests
         Assert.Equal(chat.ToString(), connection.ChatId);
     }
 
+    [Fact]
+    public async Task FirstMessageCanWaitForTheNewChatsHistory()
+    {
+        using var ct = new CancellationTokenSource(TimeSpan.FromSeconds(10));
+        var chat = Guid.NewGuid();
+        var delivery = Guid.NewGuid();
+        var polls = 0;
+        await using var connection = new ScriptConnection((method, _, _) => method switch
+        {
+            "thread/start" => JsonSerializer.SerializeToElement(new { thread = new { id = chat } }),
+            "thread/name/set" => JsonSerializer.SerializeToElement(new { }),
+            "thread/queue/add" => JsonSerializer.SerializeToElement(new { queuedSubmission = new { id = "queue-1", clientUserMessageId = delivery } }),
+            "thread/turns/list" when ++polls == 1 => throw new AppServerRpcException(JsonSerializer.SerializeToElement(new
+            {
+                error = new { code = -32600, message = $"thread {chat} is not materialized yet; thread/turns/list is unavailable before first user message" },
+            })),
+            "thread/turns/list" => JsonSerializer.SerializeToElement(new
+            {
+                data = new[]
+                {
+                    new { id = "first-turn", status = "completed", items = new object[]
+                    {
+                        new { type = "userMessage", clientId = delivery, content = Array.Empty<object>() },
+                        new { type = "agentMessage", phase = "final_answer", text = "Reply" },
+                    } },
+                },
+            }),
+            _ => throw new InvalidOperationException(method),
+        });
+
+        var result = await DesktopChatClient.StartChatAsync(connection, "workspace", "Name", "Question",
+            new Progress<string>(), new Progress<string>(), ct.Token, _ => Task.FromResult(delivery));
+        Assert.Equal("Reply", Assert.IsType<DesktopTurn>(result.Turn).Answer);
+        Assert.Equal(2, polls);
+    }
+
+    [Fact]
+    public async Task FirstReplyCanBeRecoveredAfterItsAcknowledgmentIsLost()
+    {
+        var chatId = Guid.NewGuid();
+        var deliveryId = Guid.NewGuid();
+        var sent = new List<string>();
+        Guid? savedChat = null;
+        string? receivedId = null;
+        var room = Directory.CreateTempSubdirectory("trayvora-recover-first-");
+        try
+        {
+            await using (var connection = new ScriptConnection((method, args, _) =>
+            {
+                sent.Add(method);
+                switch (method)
+                {
+                    case "thread/start":
+                        return JsonSerializer.SerializeToElement(new { thread = new { id = chatId } });
+                    case "thread/name/set":
+                        return JsonSerializer.SerializeToElement(new { });
+                    case "thread/queue/add":
+                        Assert.Equal(chatId, savedChat);
+                        Assert.Equal(chatId.ToString(), args.GetProperty("threadId").GetString());
+                        receivedId = args.GetProperty("clientUserMessageId").GetString();
+                        Assert.Equal(deliveryId.ToString(), receivedId);
+                        throw new TimeoutException("Lost the acknowledgment after accepting the request.");
+                    default: throw new InvalidOperationException(method);
+                }
+            }))
+            {
+                var error = await Assert.ThrowsAsync<IOException>(() => DesktopChatClient.StartChatAsync(connection, room.FullName,
+                    "Sample chat", "Same question", new Progress<string>(), new Progress<string>(), default, chat =>
+                    {
+                        savedChat = chat.Id;
+                        return Task.FromResult(deliveryId);
+                    }));
+                Assert.Contains("Check reply", error.Message);
+            }
+
+            await using var fresh = new ScriptConnection((method, args, _) =>
+            {
+                Assert.Equal("thread/turns/list", method);
+                Assert.Equal(savedChat!.Value.ToString(), args.GetProperty("threadId").GetString());
+                return JsonSerializer.SerializeToElement(new
+                {
+                    data = new[] { Turn("different client", "An unrelated reply"), Turn(receivedId!, "The first reply") },
+                });
+            });
+
+            var recovered = await DesktopChatClient.CheckDeliveryAsync(fresh, savedChat!.Value, deliveryId, default);
+            Assert.Equal("The first reply", Assert.IsType<DesktopTurn>(recovered).Answer);
+            Assert.Equal(["thread/start", "thread/name/set", "thread/queue/add"], sent);
+        }
+        finally { room.Delete(); }
+
+        static object Turn(string clientId, string reply) => new
+        {
+            id = Guid.NewGuid(), status = "completed",
+            items = new object[]
+            {
+                new { type = "userMessage", clientId, content = new[] { new { type = "text", text = "Same question" } } },
+                new { type = "agentMessage", phase = "final_answer", text = reply },
+            },
+        };
+    }
+
     [Theory]
     [InlineData(true, "removed")]
     [InlineData(false, "stopRequested")]

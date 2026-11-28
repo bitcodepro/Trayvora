@@ -141,11 +141,11 @@ internal sealed class DesktopChatPanel : StackPanel
     public string Profile => _options.Profile;
 
     /// <summary>Creates a Codex Desktop chat in <paramref name="workspace"/> with its first message.</summary>
-    public Task<(DesktopChat Chat, string Status, string Answer)> StartChatAsync(string profile, string workspace, string title, string text,
-        CancellationToken ct, ReplyStream stream, IReadOnlyList<string> files, Func<DesktopChat, Task> onCreated, Func<string, Task> onTurnStarted) =>
+    public Task<(DesktopChat Chat, DesktopTurn? Turn)> StartChatAsync(string profile, string workspace, string title, string text,
+        CancellationToken ct, ReplyStream stream, IReadOnlyList<string> files, Func<DesktopChat, Task<Guid>> saveDelivery, Func<string, Task> onTurnStarted) =>
         _client.StartChatAsync(profile, workspace, title, text,
-            new ReplyStream.Reporter(status => stream.Activity(status, record: false)), new ReplyStream.Reporter(stream.Replace), ct, stream.ConfirmReceipt,
-            onCreated, onTurnStarted, stream.BeforeDispatch, files, new ReplyStream.ActivityReporter(stream.Observe), callback => stream.Steer = callback);
+            new ReplyStream.Reporter(status => stream.Activity(status, record: false)), new ReplyStream.Reporter(stream.Replace), ct, saveDelivery,
+            stream.ConfirmReceipt, onTurnStarted, stream.BeforeDispatch, files, new ReplyStream.ActivityReporter(stream.Observe), callback => stream.Steer = callback);
 
     /// <summary>Sends to a specific Codex Desktop chat without changing the main-window selection.</summary>
     /// <remarks>Shows the reply while it is written and waits for it until the session is paused.</remarks>

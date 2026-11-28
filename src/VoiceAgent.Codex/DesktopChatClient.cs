@@ -103,7 +103,10 @@ public sealed class DesktopChatClient(string scratchDirectory)
         var input = TurnInput(text, attachments);
         using var listening = new CancellationTokenSource();
         var finished = new System.Collections.Concurrent.ConcurrentDictionary<string, string>();
-        var observations = observeEvents ? ObserveCompletionsAsync() : Task.CompletedTask;
+        var live = new CodexTurnEvents(null, answer, activity);
+        string? liveTurn = null;
+        var receipt = 0;
+        var observations = observeEvents ? ObserveTurnAsync() : Task.CompletedTask;
         string? submission = null;
         var submissionStarted = false;
         string? boundTurn = null;
@@ -116,15 +119,23 @@ public sealed class DesktopChatClient(string scratchDirectory)
             // Once queue/add starts, get its reply even if Stop is pressed while the server is accepting it.
             using var admission = new CancellationTokenSource(TimeSpan.FromSeconds(15));
             submissionStarted = true;
-            var queued = await server.RequestAsync("thread/queue/add", new
+            JsonElement queued;
+            try
             {
-                threadId = chat.ToString(), clientUserMessageId = messageId, input,
-            }, admission.Token).ConfigureAwait(false);
+                queued = await server.RequestAsync("thread/queue/add", new
+                {
+                    threadId = chat.ToString(), clientUserMessageId = messageId, input,
+                }, admission.Token).ConfigureAwait(false);
+            }
+            catch (Exception error) when (!ct.IsCancellationRequested && error is TimeoutException or OperationCanceledException)
+            {
+                throw new IOException("Codex did not confirm the submission. Use Check reply to check this message.", error);
+            }
             var accepted = queued.GetProperty("queuedSubmission");
             if (ReadString(accepted, "clientUserMessageId") != messageId)
                 throw new InvalidDataException("Codex did not acknowledge the same message ID.");
             submission = ReadString(accepted, "id");
-            onAccepted?.Invoke();
+            ConfirmReceipt();
 
             progress.Report("Queued in Codex. Waiting for this message's reply…");
             var deadline = Stopwatch.StartNew();
@@ -144,11 +155,11 @@ public sealed class DesktopChatClient(string scratchDirectory)
                         steer?.Invoke(observed.Status == "inProgress" ? Clarify(server, chat.ToString(), boundTurn, ct) : null);
                     }
                     foreach (var step in observed.Activity) activity?.Report(step);
-                    if (observed.Status is "completed" or "failed") return observed;
+                    if (observed.Status is "completed" or "failed" or "interrupted") return observed;
                     if (finished.TryGetValue(observed.Id, out var status) && status == "interrupted")
                         return observed with { Status = status };
                     progress.Report("Codex Desktop is working on it…");
-                    if (answer is not null && observed.Answer.Length > 0 && observed.Answer != shown)
+                    if (answer is not null && Volatile.Read(ref liveTurn) != observed.Id && observed.Answer.Length > 0 && observed.Answer != shown)
                     {
                         shown = observed.Answer;
                         answer.Report(shown);
@@ -207,24 +218,43 @@ public sealed class DesktopChatClient(string scratchDirectory)
             await observations.ConfigureAwait(false);
         }
 
+        void ConfirmReceipt()
+        {
+            if (Interlocked.Exchange(ref receipt, 1) == 0) onAccepted?.Invoke();
+        }
+
         DesktopTurn StopResult(string status) => observed is null
             ? new DesktopTurn("", status, "", "", [messageId]) : observed with { Status = status };
 
-        async Task ObserveCompletionsAsync()
+        async Task ObserveTurnAsync()
         {
             try
             {
                 await foreach (var notification in server.ReadEventsAsync(listening.Token).WithCancellation(listening.Token).ConfigureAwait(false))
-                    if (ReadString(notification, "method") == "turn/completed"
-                        && notification.TryGetProperty("params", out var data) && ReadString(data, "threadId") == chat.ToString()
-                        && data.TryGetProperty("turn", out var done) && ReadString(done, "id") is { } id
-                        && ReadString(done, "status") is { } status)
+                {
+                    if (!notification.TryGetProperty("params", out var data) || ReadString(data, "threadId") != chat.ToString()) continue;
+                    var method = ReadString(notification, "method");
+                    var turnId = ReadString(data, "turnId");
+                    if (liveTurn is null && turnId is { Length: > 0 } && method is "item/started" or "item/completed"
+                        && data.TryGetProperty("item", out var item) && ReadString(item, "type") == "userMessage"
+                        && ReadString(item, "clientId") == messageId)
+                    {
+                        Volatile.Write(ref liveTurn, turnId);
+                        ConfirmReceipt();
+                    }
+                    if (method == "turn/completed" && data.TryGetProperty("turn", out var done)
+                        && ReadString(done, "id") is { } id && ReadString(done, "status") is { } status)
                     {
                         if (finished.Count >= 128) finished.Clear();
                         finished[id] = status;
+                        if (id == liveTurn) live.FlushAnswer();
                     }
+                    else if (method is not null && liveTurn is not null && turnId == liveTurn && !live.Observe(method, data))
+                        live.FlushAnswer();
+                }
             }
             catch (Exception readError) when (readError is OperationCanceledException or IOException or InvalidDataException) { }
+            finally { live.FlushAnswer(); }
         }
     }
 
@@ -232,8 +262,11 @@ public sealed class DesktopChatClient(string scratchDirectory)
     {
         await using var server = Connect(profile);
         await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
-        return await FindTurnAsync(server, chat, delivery.ToString(), ct).ConfigureAwait(false);
+        return await CheckDeliveryAsync(server, chat, delivery, ct).ConfigureAwait(false);
     }
+
+    internal static Task<DesktopTurn?> CheckDeliveryAsync(ICodexConnection server, Guid chat, Guid delivery, CancellationToken ct) =>
+        FindTurnAsync(server, chat, delivery.ToString(), ct);
 
     public async Task<DesktopTurn?> CheckTurnAsync(string profile, Guid chat, string turnId, CancellationToken ct)
     {
@@ -248,10 +281,15 @@ public sealed class DesktopChatClient(string scratchDirectory)
         var seen = new HashSet<string>();
         do
         {
-            var result = await server.RequestAsync("thread/turns/list", new
+            JsonElement result;
+            try
             {
-                threadId = chat.ToString(), limit = PollTurns, cursor, itemsView = "full",
-            }, ct).ConfigureAwait(false);
+                result = await server.RequestAsync("thread/turns/list", new
+                {
+                    threadId = chat.ToString(), limit = PollTurns, cursor, itemsView = "full",
+                }, ct).ConfigureAwait(false);
+            }
+            catch (AppServerRpcException error) when (error.TurnHistoryNotReady) { return null; }
             var turns = ParseTurns(result);
             var found = turns.FirstOrDefault(turn => byTurnId ? turn.Id == messageId : turn.ClientIds.Contains(messageId));
             if (found is not null) { searchedBoundaries?.Clear(); return found; }
@@ -261,77 +299,41 @@ public sealed class DesktopChatClient(string scratchDirectory)
         return null;
     }
 
-    /// <summary>
-    /// Creates a chat in the Codex Desktop profile with its first message and runs that turn here, so the chat
-    /// appears in Codex Desktop (an empty chat is not saved, so it is created together with the first message).
-    /// Later messages go through <see cref="SubmitAsync(string, Guid, string, IProgress{string}, CancellationToken, IProgress{string}?, TimeSpan?)"/>.
-    /// </summary>
-    /// <returns>The new chat, the turn status and the reply.</returns>
-    public async Task<(DesktopChat Chat, string Status, string Answer)> StartChatAsync(string profile, string workspace, string title, string text,
-        IProgress<string> progress, IProgress<string> answer, CancellationToken ct, Action? onAccepted = null,
-        Func<DesktopChat, Task>? onCreated = null, Func<string, Task>? onTurnStarted = null, Func<Task>? beforeDispatch = null,
+    /// <summary>Creates a Desktop chat and submits its first message with the saved recovery ID.</summary>
+    public async Task<(DesktopChat Chat, DesktopTurn? Turn)> StartChatAsync(string profile, string workspace, string title, string text,
+        IProgress<string> progress, IProgress<string> answer, CancellationToken ct, Func<DesktopChat, Task<Guid>> saveDelivery,
+        Action? onAccepted = null, Func<string, Task>? onTurnStarted = null, Func<Task>? beforeDispatch = null,
         IReadOnlyList<string>? attachments = null, IProgress<CodexActivity>? activity = null, Action<Func<string, CancellationToken, Task>?>? steer = null)
     {
         if (!Directory.Exists(workspace)) throw new IOException("The folder for the new Codex chat does not exist.");
         if (string.IsNullOrWhiteSpace(text) || text.Length > 16000) throw new ArgumentException("Enter up to 16,000 characters.");
         await using var server = Connect(profile);
         await server.InitializeAsync(ct, experimental: true).ConfigureAwait(false);
+        return await StartChatAsync(server, workspace, title, text, progress, answer, ct, saveDelivery,
+            onAccepted, onTurnStarted, beforeDispatch, attachments, activity, steer, observeEvents: true).ConfigureAwait(false);
+    }
+
+    internal static async Task<(DesktopChat Chat, DesktopTurn? Turn)> StartChatAsync(ICodexConnection server, string workspace, string title, string text,
+        IProgress<string> progress, IProgress<string> answer, CancellationToken ct, Func<DesktopChat, Task<Guid>> saveDelivery,
+        Action? onAccepted = null, Func<string, Task>? onTurnStarted = null, Func<Task>? beforeDispatch = null,
+        IReadOnlyList<string>? attachments = null, IProgress<CodexActivity>? activity = null,
+        Action<Func<string, CancellationToken, Task>?>? steer = null, bool observeEvents = false)
+    {
         progress.Report("Creating the Codex Desktop chat…");
         // Trayvora cannot answer approval prompts, so the turn must not wait for one.
         var started = await server.RequestAsync("thread/start", new { cwd = workspace, ephemeral = false, approvalPolicy = "never" }, ct).ConfigureAwait(false);
-        var threadId = started.GetProperty("thread").GetProperty("id").GetString() ?? throw new InvalidDataException("Codex did not report the chat ID.");
-        if (!Guid.TryParse(threadId, out var id)) throw new InvalidDataException("Codex returned an unexpected chat ID.");
+        var threadId = ReadString(started.GetProperty("thread"), "id");
+        if (!Guid.TryParse(threadId, out var id) || id == Guid.Empty) throw new InvalidDataException("Codex returned an unexpected chat ID.");
         var chat = new DesktopChat(id, title, workspace);
-        if (onCreated is not null) await onCreated(chat).ConfigureAwait(false);
+        var delivery = await saveDelivery(chat).ConfigureAwait(false);
+        if (delivery == Guid.Empty) throw new ArgumentException("The first message needs a saved delivery ID.", nameof(saveDelivery));
         try { await server.RequestAsync("thread/name/set", new { threadId, name = title }, ct).ConfigureAwait(false); }
-        catch (Exception error) when (error is IOException or InvalidDataException) { } // the name is optional
+        catch (Exception error) when (error is IOException or InvalidDataException or TimeoutException) { } // the name is optional
 
-        var input = TurnInput(text, attachments);
-        if (beforeDispatch is not null) await beforeDispatch().ConfigureAwait(false);
-        ct.ThrowIfCancellationRequested();
-        using var admission = new CancellationTokenSource(TimeSpan.FromSeconds(15));
-        var turn = await server.RequestAsync("turn/start", new { threadId, input }, admission.Token).ConfigureAwait(false);
-        var turnId = turn.GetProperty("turn").GetProperty("id").GetString()
-            ?? throw new InvalidDataException("Codex Desktop did not report the turn ID.");
-        if (onTurnStarted is not null) await onTurnStarted(turnId).ConfigureAwait(false);
-        onAccepted?.Invoke();
-        progress.Report("Codex is working on it…");
-        var items = new CodexTurnEvents(null, answer, activity);
-        using var drain = new CancellationTokenSource();
-        using var stopping = new CancellationTokenSource();
-        using var stopRequest = ct.Register(() => stopping.Cancel());
-        var signal = Task.Delay(Timeout.InfiniteTimeSpan, stopping.Token);
-        var interrupted = false;
-        steer?.Invoke(Clarify(server, threadId, turnId, ct));
-        try
-        {
-            await using var events = server.ReadEventsAsync(drain.Token).GetAsyncEnumerator();
-            while (true)
-            {
-                var next = events.MoveNextAsync().AsTask();
-                if (!interrupted && await Task.WhenAny(next, signal).ConfigureAwait(false) == signal)
-                {
-                    interrupted = true;
-                    drain.CancelAfter(TimeSpan.FromSeconds(10));
-                    try { await server.RequestAsync("turn/interrupt", new { threadId, turnId }, drain.Token).ConfigureAwait(false); }
-                    catch (Exception error) when (error is IOException or OperationCanceledException or TimeoutException) { }
-                }
-                if (!await next.ConfigureAwait(false)) break;
-                var message = events.Current;
-                if (!message.TryGetProperty("params", out var data) || ReadString(data, "threadId") != threadId) continue;
-                var method = ReadString(message, "method") ?? "";
-                if (method == "turn/completed" && data.TryGetProperty("turn", out var done) && ReadString(done, "id") == turnId)
-                    return (chat, ReadString(done, "status") ?? "unknown", items.Answer);
-                if (ReadString(data, "turnId") == turnId && !items.Observe(method, data)) break;
-            }
-        }
-        catch (OperationCanceledException) when (ct.IsCancellationRequested) { }
-        finally
-        {
-            items.FlushAnswer();
-            steer?.Invoke(null);
-        }
-        return (chat, ct.IsCancellationRequested ? "detached" : "unknown", items.Answer);
+        // Queueing on an idle thread starts its turn. The user item keeps clientUserMessageId even if the reply to queue/add is lost.
+        var turn = await SubmitAsync(server, id, text, progress, ct, answer, TimeSpan.FromMinutes(10), delivery,
+            onAccepted, attachments, activity, beforeDispatch, observeEvents, steer, onTurnStarted).ConfigureAwait(false);
+        return (chat, turn);
     }
 
     private static Func<string, CancellationToken, Task> Clarify(ICodexConnection server, string threadId, string turnId, CancellationToken stopping) =>

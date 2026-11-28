@@ -5,6 +5,12 @@ namespace VoiceAgent.Codex;
 
 public enum CodexTurnStatus { Completed, Interrupted, Failed, Unknown }
 
+/// <summary>Dispatch was deferred before sending. Wait outside the shared turn slot.</summary>
+public sealed class CodexDispatchDeferredException(Task resume) : Exception
+{
+    public Task Resume { get; } = resume;
+}
+
 internal interface ICodexConnection : IAsyncDisposable
 {
     Task InitializeAsync(CancellationToken ct);
@@ -41,33 +47,37 @@ public sealed partial class CodexSession(string dataDirectory)
             throw new ArgumentException("Enter between 1 and 16,000 characters.");
         }
 
-        if (Interlocked.Increment(ref _queued) > 2 && !waitInQueue)
+        return await WithTurnSlotAsync(async () =>
         {
-            Interlocked.Decrement(ref _queued);
-            throw new InvalidOperationException("Codex already has a running request and a queued request.");
-        }
+            var revqora = useRevqora ? RevqoraExecutable() : null;
+            var (connection, home, workspace) = OpenConnection(revqora);
+            await using var ownedConnection = connection;
+            var file = Path.Combine(home, ThreadFileName(chatId));
 
-        try
+            using var emergency = emergencyStop.Register(connection.Abort);
+            return await RunTurnAsync(connection, workspace, file, text, output, cancel, reportTools, revqora, localResults, steps, attachments, onAccepted, activity, answer, steer, beforeDispatch).ConfigureAwait(false);
+        }, cancel, waitInQueue).ConfigureAwait(false);
+    }
+
+    internal async Task<CodexTurnStatus> WithTurnSlotAsync(Func<Task<CodexTurnStatus>> run, CancellationToken cancel, bool waitInQueue = false)
+    {
+        while (true)
         {
-            await _turn.WaitAsync(cancel).ConfigureAwait(false);
+            Task resume;
+            var waiting = Interlocked.Increment(ref _queued);
             try
             {
-                var revqora = useRevqora ? RevqoraExecutable() : null;
-                var (connection, home, workspace) = OpenConnection(revqora);
-                await using var ownedConnection = connection;
-                var file = Path.Combine(home, ThreadFileName(chatId));
+                if (waiting > 2 && !waitInQueue)
+                    throw new InvalidOperationException("Codex already has a running request and a queued request.");
 
-                using var emergency = emergencyStop.Register(connection.Abort);
-                return await RunTurnAsync(connection, workspace, file, text, output, cancel, reportTools, revqora, localResults, steps, attachments, onAccepted, activity, answer, steer, beforeDispatch).ConfigureAwait(false);
+                await _turn.WaitAsync(cancel).ConfigureAwait(false);
+                try { return await run().ConfigureAwait(false); }
+                finally { _turn.Release(); }
             }
-            finally
-            {
-                _turn.Release();
-            }
-        }
-        finally
-        {
-            Interlocked.Decrement(ref _queued);
+            catch (CodexDispatchDeferredException paused) { resume = paused.Resume; }
+            finally { Interlocked.Decrement(ref _queued); }
+
+            await resume.WaitAsync(cancel).ConfigureAwait(false);
         }
     }
 
