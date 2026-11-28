@@ -141,16 +141,22 @@ internal sealed class DesktopChatPanel : StackPanel
     public string Profile => _options.Profile;
 
     /// <summary>Creates a Codex Desktop chat in <paramref name="workspace"/> with its first message.</summary>
-    public Task<(DesktopChat Chat, string Status, string Answer)> StartChatAsync(string profile, string workspace, string title, string text, CancellationToken ct, ReplyStream stream) =>
+    public Task<(DesktopChat Chat, DesktopTurn? Turn)> StartChatAsync(string profile, string workspace, string title, string text,
+        CancellationToken ct, ReplyStream stream, IReadOnlyList<string> files, Func<DesktopChat, Task<Guid>> saveDelivery, Func<string, Task> onTurnStarted) =>
         _client.StartChatAsync(profile, workspace, title, text,
-            new ReplyStream.Reporter(status => stream.Activity(status)), new ReplyStream.Reporter(stream.Append), ct, stream.ConfirmReceipt);
+            new ReplyStream.Reporter(status => stream.Activity(status, record: false)), new ReplyStream.Reporter(stream.Replace), ct, saveDelivery,
+            stream.ConfirmReceipt, onTurnStarted, stream.BeforeDispatch, files, new ReplyStream.ActivityReporter(stream.Observe), callback => stream.Steer = callback);
 
     /// <summary>Sends to a specific Codex Desktop chat without changing the main-window selection.</summary>
     /// <remarks>Shows the reply while it is written and waits for it until the session is paused.</remarks>
-    public Task<DesktopTurn?> SubmitToAsync(DesktopDelivery delivery, string text, CancellationToken ct, ReplyStream stream) =>
+    public Task<DesktopTurn?> SubmitToAsync(DesktopDelivery delivery, string text, CancellationToken ct, ReplyStream stream, IReadOnlyList<string> files, Func<string, Task>? onTurnStarted = null) =>
         _client.SubmitAsync(delivery.Profile, delivery.ThreadId, text,
-            new ReplyStream.Reporter(status => stream.Activity(status)), ct,
-            new ReplyStream.Reporter(partial => stream.Replace(partial)), TimeSpan.FromMinutes(10), delivery.Id, stream.ConfirmReceipt);
+            new ReplyStream.Reporter(status => stream.Activity(status, record: false)), ct,
+            new ReplyStream.Reporter(stream.Replace), TimeSpan.FromMinutes(10), delivery.Id, stream.ConfirmReceipt,
+            files, new ReplyStream.ActivityReporter(stream.Observe), stream.BeforeDispatch, callback => stream.Steer = callback, onTurnStarted);
+
+    public Task<DesktopTurn?> CheckTurnAsync(string profile, Guid chat, string turnId, CancellationToken ct) =>
+        _client.CheckTurnAsync(profile, chat, turnId, ct);
 
     public Task<DesktopTurn?> CheckDeliveryAsync(string profile, Guid chat, Guid delivery, CancellationToken ct) =>
         _client.CheckDeliveryAsync(profile, chat, delivery, ct);

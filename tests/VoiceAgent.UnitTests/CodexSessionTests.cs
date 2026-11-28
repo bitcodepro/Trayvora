@@ -98,6 +98,39 @@ public sealed class CodexSessionTests : IDisposable
     }
 
     [Fact]
+    public async Task DeferredDispatchReleasesTheSharedSlotUntilItsRoomResumes()
+    {
+        using var bound = new CancellationTokenSource(TimeSpan.FromSeconds(8));
+        var session = new CodexSession(_folder.FullName);
+        var resume = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        var pausedServer = new FakeConnection(_folder.FullName);
+        var otherServer = new FakeConnection(_folder.FullName);
+        var attempts = 0;
+        var waiting = session.WithTurnSlotAsync(() => CodexSession.RunTurnAsync(pausedServer, _folder.FullName,
+            Path.Combine(_folder.FullName, "thread.txt"), "Paused room", new CollectedOutput(), bound.Token,
+            beforeDispatch: () =>
+            {
+                attempts++;
+                if (!resume.Task.IsCompleted) throw new CodexDispatchDeferredException(resume.Task);
+                return Task.CompletedTask;
+            }), bound.Token, waitInQueue: true);
+
+        Assert.DoesNotContain("turn/start", pausedServer.Methods);
+        Assert.False(waiting.IsCompleted);
+        otherServer.Finish("completed");
+        var other = session.WithTurnSlotAsync(() => RunAsync(otherServer, new CollectedOutput(), bound.Token), bound.Token);
+        Assert.Equal(CodexTurnStatus.Completed, await other.WaitAsync(bound.Token));
+        Assert.False(waiting.IsCompleted);
+        Assert.DoesNotContain("turn/start", pausedServer.Methods);
+
+        pausedServer.Finish("completed");
+        resume.SetResult();
+        Assert.Equal(CodexTurnStatus.Completed, await waiting.WaitAsync(bound.Token));
+        Assert.Equal(2, attempts);
+        Assert.Single(pausedServer.Methods, method => method == "turn/start");
+    }
+
+    [Fact]
     public async Task CancellationSendsInterruptForTheActiveTurnAndWaitsForTerminalStatus()
     {
         using var cancel = new CancellationTokenSource();

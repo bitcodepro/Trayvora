@@ -60,7 +60,7 @@ internal sealed partial class DiscussionWindow(
 
     private sealed record Delivery(DiscussionMember To, DiscussionMember From, string Text, DiscussionMember? ForwardedFrom, bool Relay = false, DiscussionPlan? Discuss = null, IReadOnlyList<string>? Files = null, UserPost? Post = null);
 
-    private enum DeliveryStage { Unconfirmed, Confirmed, NotSent }
+    private enum DeliveryStage { Pending, Unconfirmed, Confirmed, NotSent }
 
     private sealed class UserPost(DiscussionMessage message, Task<bool> saved)
     {
@@ -80,6 +80,9 @@ internal sealed partial class DiscussionWindow(
 
         /// <summary>Agents answering right now and the reply each is writing.</summary>
         public Dictionary<DiscussionMember, ReplyStream> Live { get; } = [];
+        public Dictionary<DiscussionMember, CancellationTokenSource> ActiveStops { get; } = [];
+        public TaskCompletionSource? QueueResume { get; set; }
+        public HashSet<Guid> RemovedPosts { get; } = [];
     }
 
     /// <summary>The bubble of a reply that is still being written.</summary>
@@ -91,6 +94,7 @@ internal sealed partial class DiscussionWindow(
         public TextBlock Activity { get; } = activity;
         public TextBlock Steps { get; } = steps;
         public Expander? Log { get; } = log;
+        public Button? Steer { get; init; }
         public TextBlock Waiting { get; } = waiting;
         public DateTime Started { get; } = DateTime.Now;
         public int Version { get; set; } = -1;
@@ -157,7 +161,8 @@ internal sealed partial class DiscussionWindow(
 
     private string AttachmentsFolder(DiscussionRoom room) => Path.Combine(store.Directory, "attachments", room.Id.ToString("N"));
     internal const double EditorMinHeight = 44, EditorDefaultMaxHeight = 160;
-    private readonly Button _pause = new() { Content = "Pause", IsVisible = false };
+    private readonly Button _pause = new() { Content = "Stop session", IsVisible = false };
+    private readonly Button _queuePause = new() { Content = "Pause queue", IsVisible = false };
     private readonly Button _mic = new();
     private readonly ComboBox _recognizer = new() { ItemsSource = new[] { "Recognition: default", "Recognition: Whisper", "Recognition: OpenAI" }, SelectedIndex = 0, IsVisible = false };
     private Action<bool?>? _recognitionChanged;
@@ -220,7 +225,6 @@ internal sealed partial class DiscussionWindow(
         _mic.Click += async (_, _) => await ToggleDictationAsync();
         UpdateMic();
         Avalonia.Automation.AutomationProperties.SetName(_send, "Send");
-        Avalonia.Automation.AutomationProperties.SetName(_pause, "Pause");
         TrayvoraTheme.Primary(_newRoom);
         TrayvoraTheme.StyleControls(_pause, _delete, _loadClaude, _loadDesktop, _codexChat, _claudeChat, _codexSearch, _claudeSearch);
         Avalonia.Automation.AutomationProperties.SetName(_codexSearch, "Search Codex chats");
@@ -252,6 +256,7 @@ internal sealed partial class DiscussionWindow(
         _codexSearch.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) _codexChat.IsDropDownOpen = true; };
         _claudeSearch.KeyDown += (_, e) => { if (e.Key == Avalonia.Input.Key.Enter) _claudeChat.IsDropDownOpen = true; };
         TrayvoraTheme.DangerButton(_pause);
+        TrayvoraTheme.Ghost(_queuePause);
         TrayvoraTheme.Ghost(_delete);
         _loadDesktop.IsVisible = desktopChats is not null;
         _editor.Classes.Add("bare");
@@ -286,6 +291,17 @@ internal sealed partial class DiscussionWindow(
             ? "Voice mode on: press the microphone, speak, press it again — the message is sent and replies are read aloud." : "Voice mode off.";
         _send.Click += async (_, _) => await PostAsync();
         _pause.Click += (_, _) => { if (Attachments.Copying) Attachments.CancelCopy(); else CurrentRun?.Cancel.Cancel(); };
+        _queuePause.Click += (_, _) =>
+        {
+            if (CurrentRun is not { } run) return;
+            if (run.QueueResume is { } resume)
+            {
+                run.QueueResume = null;
+                resume.TrySetResult();
+            }
+            else run.QueueResume = new(TaskCreationOptions.RunContinuationsAsynchronously);
+            UpdateComposer();
+        };
         _delete.Click += (_, _) => _confirm.IsVisible = true;
         _toCodex.Click += (_, _) => SetTarget(DiscussionTarget.Codex);
         _toClaude.Click += (_, _) => SetTarget(DiscussionTarget.Claude);
@@ -315,29 +331,40 @@ internal sealed partial class DiscussionWindow(
         }
         async Task NewCodexAsync(bool pick)
         {
-            if (_room is not { } room || await NewFolderAsync(pick, "Folder for the new Codex chat", room.Claude?.Workspace) is not { } folder) return;
+            if (_room is not { } room) return;
+            var selection = (room.CodexChatId, room.CodexDesktop, room.NewCodexFolder);
+            if (await NewFolderAsync(pick, "Folder for the new Codex chat", room.Claude?.Workspace) is not { } folder
+                || !_items.Contains(room) || _runs.ContainsKey(room.Id)
+                || selection != (room.CodexChatId, room.CodexDesktop, room.NewCodexFolder)) return;
             room.CodexDesktop = true;
             room.CodexChatId = Guid.Empty;
             room.CodexWorkspace = folder;
             room.NewCodexFolder = folder;
             room.CodexChatTitle = $"New Codex Desktop chat · {Path.GetFileName(folder)}";
             _ = Persist(room);
-            FillCodexChoices();
-            UpdateHeader();
-            _status.Text = "The Codex Desktop chat is created with your next message to Codex.";
+            if (ReferenceEquals(room, _room))
+            {
+                FillCodexChoices();
+                UpdateHeader();
+                _status.Text = "The Codex Desktop chat is created with your next message to Codex.";
+            }
         }
         async Task NewClaudeAsync(bool pick)
         {
-            if (_room is null) return;
+            if (_room is not { } room) return;
+            var previous = room.Claude;
             // Without a choice Claude shares the folder of this session's new Codex chat, or gets its own new chat folder.
-            var folder = !pick && _room.NewCodexFolder is { } shared && Directory.Exists(shared) ? shared
-                : await NewFolderAsync(pick, "Folder for the new Claude chat", _room.Claude?.Workspace ?? _room.NewCodexFolder);
-            if (_room is not { } room || folder is null) return;
+            var folder = !pick && room.NewCodexFolder is { } shared && Directory.Exists(shared) ? shared
+                : await NewFolderAsync(pick, "Folder for the new Claude chat", previous?.Workspace ?? room.NewCodexFolder);
+            if (folder is null || !_items.Contains(room) || _runs.ContainsKey(room.Id) || room.Claude != previous) return;
             room.Claude = new ClaudeChat(Guid.NewGuid(), folder, $"New Claude chat · {Path.GetFileName(folder)}");
             _ = Persist(room);
-            FillClaudeChoices();
-            UpdateHeader();
-            _status.Text = "The Claude chat is created with your next message to Claude.";
+            if (ReferenceEquals(room, _room))
+            {
+                FillClaudeChoices();
+                UpdateHeader();
+                _status.Text = "The Claude chat is created with your next message to Claude.";
+            }
         }
         Avalonia.Controls.Primitives.FlyoutBase ChooseMenu(Func<bool, Task> create) => new MenuFlyout { Items =
         {
@@ -356,7 +383,7 @@ internal sealed partial class DiscussionWindow(
         _newClaude.ContextFlyout = ChooseMenu(NewClaudeAsync);
         _terminal.Click += (_, _) => OpenCommandConsole(_commandAgent ?? DiscussionMember.Claude);
         _loadClaude.Click += async (_, _) => await LoadClaudeAsync();
-        _editor.TextChanged += (_, _) => UpdateComposer();
+        _editor.TextChanged += (_, _) => { UpdateComposer(); DraftChanged(); };
         _editor.AddHandler(KeyDownEvent, async (_, args) =>
         {
             if (args.Key != Key.Enter || args.KeyModifiers.HasFlag(KeyModifiers.Shift)) return;
@@ -367,7 +394,6 @@ internal sealed partial class DiscussionWindow(
         {
             if (args.Key == Key.Escape && InCommandMode) { CloseCommandMode(); args.Handled = true; }
             else if (args.Key == Key.Escape && _dictationCancel is { } dictation) { dictation.Cancel(); args.Handled = true; }
-            else if (args.Key == Key.Escape && CurrentRun is { } run) { run.Cancel.Cancel(); args.Handled = true; }
             else if (args.Key == Key.Escape) { BackRequested?.Invoke(); args.Handled = true; }
         };
 
@@ -386,19 +412,28 @@ internal sealed partial class DiscussionWindow(
         shell.Children.AddRange([sidebar, chat]);
         Content = shell;
 
+        _draftTimer.Tick += (_, _) => FlushDraft();
         SetTarget(DiscussionTarget.Codex);
         _ = ReloadRoomsAsync();
         AttachedToVisualTree += (_, _) => Dispatcher.UIThread.Post(() => _editor.Focus(), DispatcherPriority.Background);
     }
 
     public Action<string, string?, string?, Action<DiscussionTarget, string>>? PreviewFile { get; set; }
+    internal bool PreciseDeliveryStages { get; set; }
+    internal Func<string, Guid, string, CancellationToken, Task<DesktopTurn?>>? CheckRemoteTurn { get; set; }
     public Func<string, Guid, Guid, CancellationToken, Task<DesktopTurn?>>? CheckDelivery { get; set; }
 
-    public async Task<DesktopTurn?> SubmitDesktopDeliveryAsync(DiscussionRoom room, string profile, Func<DesktopDelivery, Task<DesktopTurn?>> submit)
+    public async Task<DesktopTurn?> SubmitDesktopDeliveryAsync(DiscussionRoom room, string profile, Func<DesktopDelivery, Task<DesktopTurn?>> submit, Guid? postId = null)
+    {
+        var delivery = await StartDesktopDeliveryAsync(room, profile, postId);
+        return await submit(delivery);
+    }
+
+    internal async Task<DesktopDelivery> StartDesktopDeliveryAsync(DiscussionRoom room, string profile, Guid? postId = null)
     {
         var delivery = new DesktopDelivery(profile, room.CodexChatId, Guid.NewGuid());
         var saved = await Append(room, new DiscussionMessage(DiscussionMember.Codex, DiscussionMember.Boss,
-            $"Submitting to {room.CodexChatTitle ?? "Codex Desktop"}…", DateTimeOffset.Now, DeliveryId: delivery.Id, DeliveryProfile: delivery.Profile));
+            $"Submitting to {room.CodexChatTitle ?? "Codex Desktop"}…", DateTimeOffset.Now, DeliveryId: delivery.Id, DeliveryProfile: delivery.Profile, DeliveryPostId: postId));
         if (!saved)
         {
             room.Messages.RemoveAll(message => message.DeliveryId == delivery.Id);
@@ -406,16 +441,28 @@ internal sealed partial class DiscussionWindow(
             if (ReferenceEquals(room, _room)) RefreshTimeline(room);
             throw new IOException("Could not save the delivery record. The request was not sent.");
         }
-        var turn = await submit(delivery);
-        if (turn is not null) FinishDelivery(room, delivery.Id, $"Codex Desktop · {turn.Status}");
-        return turn;
+        return delivery;
     }
 
-    private void FinishDelivery(DiscussionRoom room, Guid id, string status)
+    internal Task<bool> BindDesktopChatAsync(DiscussionRoom room, DesktopChat chat)
     {
-        var index = room.Messages.FindIndex(message => message.DeliveryId == id);
-        if (index < 0) return;
-        _ = ReplaceMessage(room, index, room.Messages[index] with { Text = status, DeliveryId = null });
+        room.CodexChatId = chat.Id;
+        room.CodexChatTitle = $"Codex Desktop · {chat.Title}";
+        room.CodexWorkspace = chat.Workspace;
+        room.NewCodexFolder = null;
+        if (ReferenceEquals(room, _room))
+        {
+            FillCodexChoices();
+            UpdateHeader();
+        }
+        return Persist(room);
+    }
+
+    internal Task<bool> RecordDesktopTurnAsync(DiscussionRoom room, Guid delivery, string turn)
+    {
+        var index = room.Messages.FindIndex(message => message.DeliveryId == delivery);
+        return index < 0 ? Task.FromResult(false)
+            : ReplaceMessage(room, index, room.Messages[index] with { RemoteTurnId = turn });
     }
 
     private Task<bool> ReplaceMessage(DiscussionRoom room, int index, DiscussionMessage message)
@@ -448,11 +495,43 @@ internal sealed partial class DiscussionWindow(
     public DiscussionRoom? CurrentRoom => _room;
 
     /// <summary>Stops every running session (used on shutdown).</summary>
-    public void Pause()
+    public void Pause(bool emergency = false)
     {
+        FlushDraft();
         _commandCancel?.Cancel();
-        foreach (var run in _runs.Values.ToArray()) run.Cancel.Cancel();
+        _dictationCancel?.Cancel();
+        if (Attachments.Copying) Attachments.CancelCopy();
+        foreach (var run in _runs.Values.ToArray())
+        {
+            if (emergency)
+                foreach (var stream in run.Live.Values.ToArray()) stream.Abort();
+            run.Cancel.Cancel();
+        }
     }
+
+    internal async Task StopAndSaveAsync()
+    {
+        Pause();
+        if (IsRunning)
+        {
+            var idle = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+            void CheckIdle() { if (!IsRunning) idle.TrySetResult(); }
+            RunningChanged += CheckIdle;
+            try
+            {
+                if (await Task.WhenAny(idle.Task, Task.Delay(TimeSpan.FromSeconds(26))) != idle.Task)
+                {
+                    Pause(emergency: true);
+                    await Task.WhenAny(idle.Task, Task.Delay(TimeSpan.FromSeconds(3)));
+                }
+            }
+            finally { RunningChanged -= CheckIdle; }
+        }
+        await Task.WhenAny(_saves, Task.Delay(TimeSpan.FromSeconds(3)));
+    }
+
+    internal event Action? RunningChanged;
+
 
     // "Claude:", "**Claude:**", "**Claude**:", "@Claude:" at the very start of a message.
     private static readonly System.Text.RegularExpressions.Regex Address = new(
@@ -642,7 +721,7 @@ internal sealed partial class DiscussionWindow(
         }
 
         var top = new Grid { ColumnDefinitions = new ColumnDefinitions("*,Auto"), ColumnSpacing = 12 };
-        var actions = openTerminal is null ? TrayvoraTheme.Row(_export, _pause, _delete, _collapse) : TrayvoraTheme.Row(_terminal, _export, _pause, _delete, _collapse);
+        var actions = openTerminal is null ? TrayvoraTheme.Row(_export, _queuePause, _pause, _delete, _collapse) : TrayvoraTheme.Row(_terminal, _export, _queuePause, _pause, _delete, _collapse);
         actions.VerticalAlignment = VerticalAlignment.Center;
         Grid.SetColumn(actions, 1);
         _title.Margin = new Thickness(-4, 0, 0, 0);
@@ -745,7 +824,7 @@ internal sealed partial class DiscussionWindow(
         Grid.SetColumn(_send, 4);
         input.Children.AddRange([_editor, _attachButton, templates, _mic, _send]);
         Attachments.Problem += problem => _status.Text = problem;
-        Attachments.Changed += UpdateComposer;
+        Attachments.Changed += () => { UpdateComposer(); DraftChanged(); };
         Attachments.HandlePaste(_editor);
         _voiceMode.IsVisible = dictate is not null;
         _voiceMode.FontSize = 11.5;
@@ -976,7 +1055,7 @@ internal sealed partial class DiscussionWindow(
         {
             var room = store.Create(defaultClaude());
             _items.Insert(0, room);
-            if (_room is null) _drafts[room.Id] = new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
+            if (_room is null) room.Draft = ReadDraft();
             Open(room);
             RefreshList();
             _title.Focus();
@@ -1003,22 +1082,43 @@ internal sealed partial class DiscussionWindow(
         catch (Exception error) { _status.Text = error.Message; }
     }
 
-    private sealed record Draft(string Text, string[] Files, DiscussionTarget To, bool RelayCodex, bool RelayClaude);
-    private readonly Dictionary<Guid, Draft> _drafts = [];
+    private readonly DispatcherTimer _draftTimer = new() { Interval = TimeSpan.FromMilliseconds(400) };
+    private bool _restoringDraft;
+
+    private DiscussionDraft ReadDraft() => new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
+
+    private void DraftChanged()
+    {
+        if (_restoringDraft || _room is not { } room) return;
+        room.Draft = ReadDraft();
+        _draftTimer.Stop();
+        _draftTimer.Start();
+    }
+
+    private void FlushDraft()
+    {
+        if (!_draftTimer.IsEnabled) return;
+        _draftTimer.Stop();
+        if (_room is { } room && _items.Contains(room)) _ = Persist(room);
+    }
 
     private void Open(DiscussionRoom? room)
     {
         _openVersion++;
         CloseCommandMode();
-        if (_room is { } previous && _items.Contains(previous))
-            _drafts[previous.Id] = new(_editor.Text ?? "", Attachments.Files.ToArray(), _target, _relayFromCodex, _relayFromClaude);
+        FlushDraft();
         _room = room;
-        var draft = room is null ? null : _drafts.GetValueOrDefault(room.Id);
-        _editor.Text = draft?.Text ?? "";
-        Attachments.Restore(draft?.Files ?? []);
-        _relayFromCodex = draft?.RelayCodex ?? false;
-        _relayFromClaude = draft?.RelayClaude ?? false;
-        SetTarget(draft?.To ?? DiscussionTarget.Codex);
+        _restoringDraft = true;
+        try
+        {
+            var draft = room?.Draft;
+            _editor.Text = draft?.Text ?? "";
+            Attachments.Restore(draft?.Files ?? []);
+            _relayFromCodex = draft?.RelayCodex ?? false;
+            _relayFromClaude = draft?.RelayClaude ?? false;
+            SetTarget(draft?.To ?? DiscussionTarget.Codex);
+        }
+        finally { _restoringDraft = false; }
         _confirm.IsVisible = false;
         _status.Text = "";
         _live.Clear();
@@ -1035,6 +1135,7 @@ internal sealed partial class DiscussionWindow(
         else RenderLatest(room);
         ShowRunState();
         ScrollToEnd(force: true);
+        if (room is not null) _ = RecoverSavedDesktopRepliesAsync(room);
     }
 
     private void RenderLatest(DiscussionRoom room)
@@ -1063,20 +1164,76 @@ internal sealed partial class DiscussionWindow(
         UpdateEarlier();
     }
 
-    private Task<bool> Persist(DiscussionRoom room)
+    private sealed class RecoveredReply(Guid roomId, Guid delivery, DiscussionMessage replacement, bool append)
     {
+        public Guid RoomId { get; } = roomId;
+        public bool Saved { get; set; }
+
+        public void Apply(DiscussionRoom room)
+        {
+            var index = room.Messages.FindIndex(message => message.DeliveryId == delivery);
+            if (index < 0) return;
+            if (room.Messages[index].DeliveryPostId is { } postId &&
+                room.Messages.FindIndex(message => message.PostId == postId) is var post && post >= 0)
+            {
+                var accepted = room.Messages[post];
+                room.Messages[post] = accepted with { UnconfirmedFor = accepted.UnconfirmedFor & ~DeliveryRecipients.Codex };
+            }
+            if (append)
+            {
+                room.Messages.RemoveAt(index);
+                room.Messages.Add(replacement);
+                if (room.Updated < replacement.Time) room.Updated = replacement.Time;
+            }
+            else room.Messages[index] = replacement;
+        }
+    }
+
+    private readonly Dictionary<Guid, RecoveredReply> _replyWrites = [];
+    private readonly HashSet<Guid> _replyChecks = [];
+
+    private async Task<bool> CommitDesktopReplyAsync(DiscussionRoom room, Guid delivery, DiscussionMessage replacement, bool append = false, bool preserveReply = false)
+    {
+        if (room.IsDeleted) return false;
+        var recovery = new RecoveredReply(room.Id, delivery, replacement, append);
+        if (!_replyWrites.TryAdd(delivery, recovery)) return false;
+        try
+        {
+            if (!await Persist(room, recovery, preserveReply) || room.IsDeleted) return false;
+            recovery.Apply(room);
+            if (ReferenceEquals(room, _room)) RefreshTimeline(room);
+            RefreshList();
+            return true;
+        }
+        finally { _replyWrites.Remove(delivery); }
+    }
+
+    private Task<bool> Persist(DiscussionRoom room, RecoveredReply? recovery = null, bool preserveReply = false)
+    {
+        // Writes already queued run before deletion. A late continuation must never enqueue a write after it.
+        if (room.IsDeleted) return Task.FromResult(false);
         var snapshot = new DiscussionRoom
         {
             Id = room.Id, Title = room.Title, Created = room.Created, Updated = room.Updated,
             CodexChatId = room.CodexChatId, CodexDesktop = room.CodexDesktop, CodexChatTitle = room.CodexChatTitle,
             ClaudeEffort = room.ClaudeEffort, ClaudeModel = room.ClaudeModel,
-            Claude = room.Claude, Messages = [.. room.Messages],
+            Claude = room.Claude, Draft = room.Draft, Messages = [.. room.Messages],
             ClaudePermissions = room.ClaudePermissions, NewCodexFolder = room.NewCodexFolder, CodexWorkspace = room.CodexWorkspace,
         };
-        return Enqueue(() => store.Save(snapshot), "Could not save this session. Check access to the settings folder.");
+        // Later snapshots may be queued before a successful recovery reaches the UI. Apply the same
+        // committed change to those snapshots so a draft or another agent's reply cannot restore the marker.
+        var pending = _replyWrites.Values.Where(write => write.RoomId == room.Id).ToArray();
+        return Enqueue(() =>
+        {
+            foreach (var previous in pending)
+                if (previous.Saved) previous.Apply(snapshot);
+            recovery?.Apply(snapshot);
+            store.Save(snapshot, preserveReply);
+            if (recovery is not null) recovery.Saved = true;
+        }, recovery is null ? "Could not save this session. Check access to the settings folder." : null);
     }
 
-    private Task<bool> Enqueue(Action write, string failure)
+    private Task<bool> Enqueue(Action write, string? failure)
     {
         var result = _saves.ContinueWith(_ =>
         {
@@ -1085,7 +1242,7 @@ internal sealed partial class DiscussionWindow(
             {
                 // Never silent: the reason goes to the Error log and the window says the session was not saved.
                 ErrorLog.Write(error, "Sessions · save");
-                Dispatcher.UIThread.Post(() => _status.Text = failure);
+                if (failure is not null) Dispatcher.UIThread.Post(() => _status.Text = failure);
                 return false;
             }
         }, CancellationToken.None, TaskContinuationOptions.None, TaskScheduler.Default);
@@ -1150,11 +1307,10 @@ internal sealed partial class DiscussionWindow(
 
     private void DeleteRoom()
     {
-        if (_room is not { } room || CurrentRun is not null) return;
-        var id = room.Id;
-        _ = Enqueue(() => store.Delete(id), "Could not delete this session.");
+        if (_room is not { IsDeleted: false } room || CurrentRun is not null) return;
+        room.IsDeleted = true;
         _items.Remove(room);
-        _drafts.Remove(room.Id);
+        _ = Enqueue(() => store.Delete(room.Id), "Could not delete this session.");
         RefreshList();
         _ = OpenSavedAsync(_items.FirstOrDefault());
     }
@@ -1341,6 +1497,7 @@ internal sealed partial class DiscussionWindow(
         _target = target;
         // Only the chosen recipient can pass its reply on: switching clears the other ⇄ toggle.
         (_relayFromCodex, _relayFromClaude) = RelayAfterSwitch(target, _relayFromCodex, _relayFromClaude);
+        DraftChanged();
         TrayvoraTheme.SetSelected(_toCodex, target == DiscussionTarget.Codex);
         TrayvoraTheme.SetSelected(_toClaude, target == DiscussionTarget.Claude);
         TrayvoraTheme.SetSelected(_toBoth, target == DiscussionTarget.Both);
@@ -1373,8 +1530,12 @@ internal sealed partial class DiscussionWindow(
         if (Attachments.Copying) _counter.Text = "Copying attachment…";
         _send.IsEnabled = !InCommandMode && _commandCancel is null && CurrentRun?.Cancel.IsCancellationRequested != true
             && !Attachments.Copying && length <= MaxTypedLength && (files > 0 || !string.IsNullOrWhiteSpace(_editor.Text));
-        _pause.Content = Attachments.Copying ? "Cancel copy" : "Pause";
+        _pause.Content = Attachments.Copying ? "Cancel copy" : "Stop session";
+        Avalonia.Automation.AutomationProperties.SetName(_pause, (string)_pause.Content);
         _pause.IsVisible = CurrentRun is not null || Attachments.Copying;
+        _queuePause.IsVisible = CurrentRun is not null;
+        _queuePause.IsEnabled = CurrentRun?.Cancel.IsCancellationRequested != true;
+        _queuePause.Content = CurrentRun?.QueueResume is null ? "Pause queue" : "Resume queue";
         _delete.IsEnabled = idle && open;
         var messageMode = !InCommandMode;
         _voiceMode.IsEnabled = _recognizer.IsEnabled = messageMode;
@@ -1461,9 +1622,9 @@ internal sealed partial class DiscussionWindow(
         if (_room is not { } origin) return;
         var target = _target;
         var relays = (_relayFromCodex, _relayFromClaude);
-        var codex = origin.CodexChatId;
-        var claude = origin.Claude?.Id;
-        var voiceSend = _voiceMode.IsChecked == true;
+        var codex = (origin.CodexChatId, origin.CodexDesktop, CurrentAgentProfile?.Invoke(origin, DiscussionMember.Codex));
+        var claude = (origin.Claude?.Id, CurrentAgentProfile?.Invoke(origin, DiscussionMember.Claude));
+        var voiceSend = _voiceMode.IsChecked == true && string.IsNullOrWhiteSpace(_editor.Text) && Attachments.Files.Count == 0;
         using var stopRecording = new CancellationTokenSource();
         using var cancel = new CancellationTokenSource();
         _dictationStop = stopRecording;
@@ -1490,6 +1651,7 @@ internal sealed partial class DiscussionWindow(
         try
         {
             var text = await dictate(stopRecording.Token, cancel.Token, level);
+            cancel.Token.ThrowIfCancellationRequested();
             if (string.IsNullOrWhiteSpace(text))
             {
                 _status.Text = "No speech detected.";
@@ -1499,8 +1661,9 @@ internal sealed partial class DiscussionWindow(
             {
                 if (_items.Contains(origin))
                 {
-                    var draft = _drafts.GetValueOrDefault(origin.Id) ?? new Draft("", [], target, false, false);
-                    _drafts[origin.Id] = draft with { Text = (draft.Text + " " + text).Trim() };
+                    var draft = origin.Draft ?? new DiscussionDraft("", [], target, false, false);
+                    origin.Draft = draft with { Text = (draft.Text + " " + text).Trim() };
+                    _ = Persist(origin);
                     _status.Text = $"Transcript saved in {origin.Title}.";
                 }
                 return;
@@ -1510,7 +1673,10 @@ internal sealed partial class DiscussionWindow(
             _editor.CaretIndex = _editor.Text.Length;
             _status.Text = "Transcript inserted. Edit it if needed, then press Enter to send.";
             _editor.Focus();
-            if (voiceSend && _send.IsEnabled && relays == (_relayFromCodex, _relayFromClaude) && target == _target && origin.CodexChatId == codex && origin.Claude?.Id == claude) await PostAsync();
+            if (voiceSend && _voiceMode.IsChecked == true && string.IsNullOrWhiteSpace(current) &&
+                Attachments.Files.Count == 0 && _send.IsEnabled && relays == (_relayFromCodex, _relayFromClaude) && target == _target &&
+                codex == (origin.CodexChatId, origin.CodexDesktop, CurrentAgentProfile?.Invoke(origin, DiscussionMember.Codex)) &&
+                claude == (origin.Claude?.Id, CurrentAgentProfile?.Invoke(origin, DiscussionMember.Claude))) await PostAsync();
         }
         catch (OperationCanceledException) when (cancel.IsCancellationRequested)
         { _status.Text = "Dictation cancelled."; }
@@ -1592,7 +1758,7 @@ internal sealed partial class DiscussionWindow(
         Attachments.Clear();
         var pending = targets.Count == 2 ? DeliveryRecipients.Codex | DeliveryRecipients.Claude : RecipientFlag(targets[0]);
         var message = new DiscussionMessage(DiscussionMember.Boss, targets.Count == 2 ? null : targets[0], text, DateTimeOffset.Now,
-            RelayTo: relayTo, DiscussWith: discuss?.Partner, PendingFor: pending);
+            RelayTo: relayTo, DiscussWith: discuss?.Partner, PendingFor: pending, PostId: Guid.NewGuid());
         var post = new UserPost(message, Append(room, message));
         await RunAsync(room, targets.Select(agent => new Delivery(agent, DiscussionMember.Boss, sent, null, relayTo is not null, discuss, attached, post)));
     }
@@ -1601,7 +1767,7 @@ internal sealed partial class DiscussionWindow(
     {
         if (_room is not { } room || CurrentRun?.Cancel.IsCancellationRequested == true || !Ready(room, [target])) return;
         var forwarded = new DiscussionMessage(DiscussionMember.Boss, target, message.Text, DateTimeOffset.Now, message.Sender,
-            PendingFor: RecipientFlag(target));
+            PendingFor: RecipientFlag(target), PostId: Guid.NewGuid());
         var post = new UserPost(forwarded, Append(room, forwarded));
         await RunAsync(room, [new Delivery(target, DiscussionMember.Boss, message.Text, message.Sender,
             Files: ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room)), Post: post)]);
@@ -1625,6 +1791,7 @@ internal sealed partial class DiscussionWindow(
         if (!_runs.TryGetValue(room.Id, out var run))
             _runs.Add(room.Id, run = new RoomRun(new CancellationTokenSource()));
         run.Chains++;
+        RunningChanged?.Invoke();
         var token = run.Cancel.Token;
         var claudeProfile = CurrentAgentProfile?.Invoke(room, DiscussionMember.Claude);
         var codexProfile = CurrentAgentProfile?.Invoke(room, DiscussionMember.Codex);
@@ -1650,16 +1817,19 @@ internal sealed partial class DiscussionWindow(
                 }
                 await Task.WhenAll(wave.Select(EnqueueDelivery));
             }
-            if (token.IsCancellationRequested) outcome = "Paused. Unsent messages are marked in the chat.";
+            if (token.IsCancellationRequested) outcome = "Session stopped. Unsent messages are marked in the chat.";
             else if (queue.Count > 0 && outcome is null) outcome = "Automatic round ended. Reply or forward to continue.";
         }
         finally
         {
+            foreach (var unsent in queue)
+                await SetPostDelivery(room, unsent, DeliveryStage.NotSent);
             if (outcome is not null) run.Outcome = outcome;
             if (--run.Chains == 0)
             {
                 _runs.Remove(room.Id);
                 run.Cancel.Dispose();
+                RunningChanged?.Invoke();
                 Changed(room);
                 RunFinished?.Invoke(room, run.Outcome);
                 if (ReferenceEquals(room, _room) && run.Outcome is not null) _status.Text = run.Outcome;
@@ -1676,7 +1846,12 @@ internal sealed partial class DiscussionWindow(
 
         async Task DeliverInOrderAsync(Task previous, Delivery delivery)
         {
-            try { await previous.WaitAsync(token); }
+            try
+            {
+                await previous.WaitAsync(token);
+                while (run.QueueResume is { } resume) await resume.Task.WaitAsync(token);
+                if (delivery.Post?.Message.PostId is { } id && run.RemovedPosts.Contains(id)) return;
+            }
             catch (OperationCanceledException) when (token.IsCancellationRequested)
             {
                 await SetPostDelivery(room, delivery, DeliveryStage.NotSent);
@@ -1688,28 +1863,56 @@ internal sealed partial class DiscussionWindow(
         async Task Deliver(Delivery delivery)
         {
             var agent = delivery.To;
-            var stream = new ReplyStream();
+            using var stop = CancellationTokenSource.CreateLinkedTokenSource(token);
+            using var emergency = new CancellationTokenSource();
+            var stream = new ReplyStream(emergency) { PostId = delivery.Post?.Message.PostId };
+            var turnToken = stop.Token;
+            run.ActiveStops[agent] = stop;
             run.Live[agent] = stream;
             Changed(room);
             string? answer;
             var dispatched = false;
             try
             {
-                token.ThrowIfCancellationRequested();
+                turnToken.ThrowIfCancellationRequested();
                 if (delivery.Post is { } post && !await post.Saved)
                     throw new IOException("Could not save the queued message. The request was not sent.");
                 var (body, file) = await Task.Run(() => ForAgentWithFile(delivery.Text, AttachmentsFolder(room), $"{delivery.From}-to-{agent}"));
                 // The agent gets the files themselves, not paths parsed back out of the text.
                 IReadOnlyList<string> files = file is null ? delivery.Files ?? [] : [file, .. delivery.Files ?? []];
                 var prompt = Envelope(room, agent, delivery.From, body, delivery.ForwardedFrom, delivery.Relay, delivery.Discuss);
-                if (!await SetPostDelivery(room, delivery, DeliveryStage.Unconfirmed))
-                    throw new IOException("Could not update the queued message. The request was not sent.");
-                token.ThrowIfCancellationRequested();
-                var profile = agent == DiscussionMember.Claude ? claudeProfile : codexProfile;
-                if (CurrentAgentProfile?.Invoke(room, agent) != profile)
-                    throw new IOException("The agent profile changed while the request was queued. Send the message again to use the selected profile.");
-                dispatched = true;
-                var turn = send(agent, prompt, room, stream, files, token);
+                async Task BeginDispatch()
+                {
+                    var releaseCodexSlotOnPause = PreciseDeliveryStages && agent == DiscussionMember.Codex && !room.CodexDesktop;
+                    var profile = agent == DiscussionMember.Claude ? claudeProfile : codexProfile;
+                    while (true)
+                    {
+                        while (run.QueueResume is { } paused)
+                        {
+                            if (releaseCodexSlotOnPause) throw new CodexDispatchDeferredException(paused.Task);
+                            await paused.Task.WaitAsync(turnToken);
+                        }
+                        if (delivery.Post?.Message.PostId is { } id && run.RemovedPosts.Contains(id))
+                            throw new AgentNotSentException("The queued message was removed.");
+                        turnToken.ThrowIfCancellationRequested();
+                        if (CurrentAgentProfile?.Invoke(room, agent) != profile)
+                            throw new AgentNotSentException("The agent profile changed while the request was queued.");
+                        if (!await SetPostDelivery(room, delivery, DeliveryStage.Unconfirmed))
+                            throw new AgentNotSentException("Could not update the queued message. The request was not sent.");
+                        if (run.QueueResume is null) break;
+                        if (!await SetPostDelivery(room, delivery, DeliveryStage.Pending))
+                            throw new AgentNotSentException("Could not save the paused message. The request was not sent.");
+                    }
+                    if (CurrentAgentProfile?.Invoke(room, agent) != profile)
+                        throw new AgentNotSentException("The agent profile changed before dispatch.");
+                    turnToken.ThrowIfCancellationRequested();
+                    dispatched = true;
+                }
+                // Transport callbacks can arrive off the UI thread.
+                if (PreciseDeliveryStages)
+                    stream.BeforeDispatch = () => Dispatcher.UIThread.InvokeAsync(BeginDispatch);
+                else await BeginDispatch();
+                var turn = send(agent, prompt, room, stream, files, turnToken);
                 var confirmed = false;
                 if (delivery.Post is not null)
                 {
@@ -1723,23 +1926,29 @@ internal sealed partial class DiscussionWindow(
             catch (Exception error)
             {
                 // Keep what the agent had already written, then record why it stopped (a pause is not a failure).
-                var partial = stream.Text.Trim();
-                var workLog = agent == DiscussionMember.Claude ? stream.WorkLog : null;
+                stream.FinishActivity(stream.StopConfirmed);
+                var partial = ErrorLog.Redact(stream.Text.Trim());
+                var workLog = stream.WorkLog;
+                var completedDesktop = stream.DesktopDeliveryFinished || !dispatched ? stream.DesktopDeliveryId : null;
                 // Claude Code prints its own error (for example a sign-in failure) as reply text; show it once, as the failure.
                 var echo = error is IOException && partial.Length > 0 && error.Message.Contains(partial, StringComparison.Ordinal);
                 if (partial.Length > 0 && !echo)
-                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.Notes,
-                        Interrupted: true, WorkLog: token.IsCancellationRequested ? workLog : null));
-                else if (token.IsCancellationRequested && workLog is not null)
-                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, "Claude turn stopped.", DateTimeOffset.Now,
-                        Interrupted: true, WorkLog: workLog));
-                if (!dispatched) await SetPostDelivery(room, delivery, DeliveryStage.NotSent);
-                if (!token.IsCancellationRequested)
+                {
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, partial, DateTimeOffset.Now, Note: stream.StopOutcome ?? stream.Notes,
+                        Interrupted: true, WorkLog: workLog), completedDesktop);
+                    completedDesktop = null;
+                }
+                else if (turnToken.IsCancellationRequested)
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, stream.StopOutcome ?? "Stop requested. Final status could not be confirmed.",
+                        DateTimeOffset.Now, Interrupted: true, WorkLog: workLog), completedDesktop);
+                if (!dispatched || error is AgentNotSentException) await SetPostDelivery(room, delivery, DeliveryStage.NotSent);
+                var removed = delivery.Post?.Message.PostId is { } removedId && run.RemovedPosts.Contains(removedId);
+                if (!turnToken.IsCancellationRequested && !removed)
                 {
                     var reason = error is IOException or ArgumentException or InvalidOperationException or UnauthorizedAccessException
                         or InvalidDataException or TimeoutException
-                        ? error.Message : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
-                    _ = Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true, WorkLog: workLog));
+                        ? ErrorLog.Redact(error.Message) : $"The request failed ({error.GetType().Name}). Check the selected chat, profile and sign-in.";
+                    _ = Append(room, new DiscussionMessage(agent, null, reason, DateTimeOffset.Now, Failed: true, WorkLog: workLog), completedDesktop);
                     ErrorLog.Write(error, $"Sessions · {agent}", $"room {room.Id}, chat {(agent == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId)}");
                 }
                 return;
@@ -1747,8 +1956,10 @@ internal sealed partial class DiscussionWindow(
             finally
             {
                 run.Live.Remove(agent);
+                run.ActiveStops.Remove(agent);
                 Changed(room);
             }
+            stream.FinishActivity(stream.StopConfirmed);
             if (answer is null)
             {
                 // Codex Desktop has not finished in time: say so in the session, not only in the status line.
@@ -1756,48 +1967,48 @@ internal sealed partial class DiscussionWindow(
                 var partial = stream.Text.Trim();
                 _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss,
                     partial.Length > 0 ? partial : $"Sent to {chatName}. It has not answered here yet; the reply will appear in Codex Desktop.",
-                    DateTimeOffset.Now, Note: $"Still running in Codex Desktop ({chatName}). Open that chat there to see the rest.", Interrupted: partial.Length > 0));
+                    DateTimeOffset.Now, Note: $"Still running in Codex Desktop ({chatName}). Open that chat there to see the rest.", Interrupted: partial.Length > 0, WorkLog: stream.WorkLog));
                 outcome = $"Codex is still working in Codex Desktop. Its reply will appear in {chatName}.";
                 return;
             }
-            Handle(delivery, answer.Trim(), stream.Notes, agent == DiscussionMember.Claude ? stream.WorkLog : null);
+            Handle(delivery, answer.Trim(), stream.Notes, stream.WorkLog, turnToken.IsCancellationRequested, stream);
         }
 
-        void Handle(Delivery delivery, string answer, string? note, string? workLog)
+        void Handle(Delivery delivery, string answer, string? note, string? workLog, bool stopped, ReplyStream stream)
         {
             var agent = delivery.To;
             var next = Recipient(answer);
             var body = next is null ? answer : StripAddress(answer);
-            if (token.IsCancellationRequested)
+            if (delivery.Discuss is null && !delivery.Relay) next = null;
+            var completedDesktop = stream.DesktopDeliveryFinished ? stream.DesktopDeliveryId : null;
+            if (stopped || token.IsCancellationRequested)
             {
-                _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
+                _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now,
+                    Note: stream.StopOutcome ?? note, Interrupted: stream.StopOutcome is not null, WorkLog: workLog), completedDesktop);
                 return;
             }
             if (delivery.Discuss is { } plan)
             {
                 if (agent == plan.Partner)
                 {
-                    // The partner always answers the lead.
-                    _ = Append(room, new DiscussionMessage(agent, plan.Lead, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
-                    queue.Enqueue(new Delivery(plan.Lead, agent, body, null, Discuss: plan));
+                    QueueHandoff(plan.Lead, plan);
                 }
                 else if (next == plan.Partner && plan.ExchangesLeft > 0)
                 {
                     if (plan.Partner == DiscussionMember.Claude && room.Claude is null)
                     {
                         outcome = "Codex wants to discuss with Claude, but this session has no Claude chat selected.";
-                        _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
+                        _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog), completedDesktop);
                         stop = true;
                         return;
                     }
-                    _ = Append(room, new DiscussionMessage(agent, plan.Partner, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
-                    queue.Enqueue(new Delivery(plan.Partner, agent, body, null, Discuss: plan with { ExchangesLeft = plan.ExchangesLeft - 1 }));
+                    QueueHandoff(plan.Partner, plan with { ExchangesLeft = plan.ExchangesLeft - 1 });
                     partnerAsked = true;
                 }
                 else
                 {
                     // The lead's answer to Boss (or anything after the last exchange) ends the discussion.
-                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Final: true, Note: note, WorkLog: workLog));
+                    _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Final: true, Note: note, WorkLog: workLog), completedDesktop);
                     outcome = partnerAsked
                         ? $"{plan.Lead} and {plan.Partner} finished the discussion. {plan.Lead} sent you the final answer."
                         : $"{plan.Lead} answered without asking {plan.Partner}.";
@@ -1806,15 +2017,27 @@ internal sealed partial class DiscussionWindow(
             }
             if (next == agent || next == DiscussionMember.Boss) next = null;
             if (delivery.Relay) next = agent == DiscussionMember.Codex ? DiscussionMember.Claude : DiscussionMember.Codex;
-            _ = Append(room, new DiscussionMessage(agent, next ?? DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog));
-            if (next is not { } handoff) return;
+            if (next is not { } handoff)
+            {
+                _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: note, WorkLog: workLog), completedDesktop);
+                return;
+            }
             if (handoff == DiscussionMember.Claude && room.Claude is null)
             {
                 outcome = "Codex addressed Claude, but this session has no Claude chat selected.";
+                _ = Append(room, new DiscussionMessage(agent, DiscussionMember.Boss, body, DateTimeOffset.Now, Note: outcome, WorkLog: workLog), completedDesktop);
                 stop = true;
                 return;
             }
-            queue.Enqueue(new Delivery(handoff, agent, body, null));
+            QueueHandoff(handoff, null);
+
+            void QueueHandoff(DiscussionMember target, DiscussionPlan? plan)
+            {
+                var handoffMessage = new DiscussionMessage(agent, target, body, DateTimeOffset.Now, Note: note, WorkLog: workLog,
+                    PendingFor: RecipientFlag(target), PostId: Guid.NewGuid());
+                var savedHandoff = Append(room, handoffMessage, completedDesktop);
+                queue.Enqueue(new Delivery(target, agent, body, null, Discuss: plan, Post: new UserPost(handoffMessage, savedHandoff)));
+            }
         }
     }
 
@@ -1825,12 +2048,12 @@ internal sealed partial class DiscussionWindow(
     {
         if (delivery.Post is not { } post) return Task.FromResult(true);
         var flag = RecipientFlag(delivery.To);
-        var previous = post.Message;
-        var index = room.Messages.FindIndex(item => ReferenceEquals(item, previous));
-        if (index < 0) return Task.FromResult(false);
+        var index = room.Messages.FindIndex(item => post.Message.PostId is { } id ? item.PostId == id : ReferenceEquals(item, post.Message));
+        if (index < 0) return Task.FromResult(stage == DeliveryStage.NotSent);
+        var previous = room.Messages[index];
         post.Message = previous with
         {
-            PendingFor = previous.PendingFor & ~flag,
+            PendingFor = stage == DeliveryStage.Pending ? previous.PendingFor | flag : previous.PendingFor & ~flag,
             UnconfirmedFor = stage == DeliveryStage.Unconfirmed ? previous.UnconfirmedFor | flag : previous.UnconfirmedFor & ~flag,
             NotSentTo = stage == DeliveryStage.NotSent ? previous.NotSentTo | flag : previous.NotSentTo,
         };
@@ -1891,18 +2114,20 @@ internal sealed partial class DiscussionWindow(
             ?? _desktopItems.FirstOrDefault(item => item.Id == room.CodexChatId)?.Workspace
         : Path.Combine(Environment.GetEnvironmentVariable("CODEX_HOME") ?? Path.Combine(AppContext.BaseDirectory, "codex-data"), "workspace");
 
-    private Task<bool> Append(DiscussionRoom room, DiscussionMessage message)
+    private Task<bool> Append(DiscussionRoom room, DiscussionMessage message, Guid? completedDelivery = null)
     {
-        if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed && !message.Interrupted
-            && message.Command is null && message.DeliveryId is null && message.Sender != DiscussionMember.Boss && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
-            _ = speak(message.Text);
+        var receivedReply = message.Command is null && message.Sender != DiscussionMember.Boss && message.DeliveryId is null;
         if (message.Command is null && message.Sender != DiscussionMember.Boss)
             message = message with { Workspace = WorkspaceFor(room, message.Sender),
                 DesktopThread = room.CodexDesktop && message.Sender == DiscussionMember.Codex,
                 ThreadId = message.Sender == DiscussionMember.Claude ? room.Claude?.Id : room.CodexChatId };
+        if (completedDelivery is { } id && room.Messages.Any(item => item.DeliveryId == id))
+            return SaveReceivedDesktopReplyAsync(room, id, message);
+
+        SpeakReply(room, message);
         room.Messages.Add(message);
         room.Updated = message.Time;
-        var saved = Persist(room);
+        var saved = Persist(room, preserveReply: receivedReply);
         if (ReferenceEquals(room, _room))
         {
             if (room.Messages.Count == 1) { _messages.Children.Clear(); _rendered.Clear(); }
@@ -1918,6 +2143,27 @@ internal sealed partial class DiscussionWindow(
 
     // ── Rendering ────────────────────────────────────────────────────────
 
+    private async Task<bool> SaveReceivedDesktopReplyAsync(DiscussionRoom room, Guid delivery, DiscussionMessage message)
+    {
+        if (await CommitDesktopReplyAsync(room, delivery, message, append: true, preserveReply: true))
+        {
+            SpeakReply(room, message);
+            return true;
+        }
+
+        if (!room.IsDeleted && ReferenceEquals(room, _room))
+            _status.Text = "Could not save the Codex Desktop reply. Trayvora will check for it when you open this session.";
+        return false;
+    }
+
+    private void SpeakReply(DiscussionRoom room, DiscussionMessage message)
+    {
+        if (_voiceMode.IsChecked == true && Speak is { } speak && ReferenceEquals(room, _room) && !message.Failed && !message.Interrupted
+            && message.Command is null && message.DeliveryId is null && message.Sender != DiscussionMember.Boss
+            && message.To is null or DiscussionMember.Boss && message.Text.Length > 0)
+            _ = speak(message.Text);
+    }
+
     private void SetPresence(DiscussionMember member, bool thinking)
     {
         if (!_presence.TryGetValue(member, out var item)) return;
@@ -1930,20 +2176,29 @@ internal sealed partial class DiscussionWindow(
         var view = new MarkdownView { IsVisible = false };
         var waiting = new TextBlock { Text = "•", FontSize = 18, Foreground = MemberColor(agent), LetterSpacing = 2 };
         var steps = new TextBlock { FontSize = 11.5, Foreground = TrayvoraTheme.Muted, TextWrapping = TextWrapping.Wrap, IsVisible = false, LineHeight = 17 };
-        var log = agent == DiscussionMember.Claude ? WorkLogPanel(steps, expanded: true) : null;
-        if (log is not null) log.IsVisible = false;
+        var log = WorkLogPanel(steps, expanded: true);
+        log.IsVisible = false;
+        var stop = new Button { Content = $"Stop {agent}" };
+        TrayvoraTheme.Ghost(stop);
+        stop.Click += (_, _) =>
+        {
+            if (CurrentRun is not { } run || !run.ActiveStops.TryGetValue(agent, out var request)) return;
+            stop.IsEnabled = false;
+            stream.Activity("Stop requested", record: false);
+            request.Cancel();
+        };
         var activity = new TextBlock { FontSize = 11, Foreground = TrayvoraTheme.Muted, VerticalAlignment = VerticalAlignment.Center, TextTrimming = TextTrimming.CharacterEllipsis };
         var meta = new StackPanel
         {
             Orientation = Orientation.Horizontal, Spacing = 8,
-            Children = { new TextBlock { Text = DisplayName(agent), FontWeight = FontWeight.SemiBold, FontSize = 12.5, Foreground = MemberColor(agent) }, activity },
+            Children = { new TextBlock { Text = DisplayName(agent), FontWeight = FontWeight.SemiBold, FontSize = 12.5, Foreground = MemberColor(agent) }, activity, stop },
         };
         var bubble = new Border
         {
             Background = TrayvoraTheme.Surface, BorderBrush = MemberColor(agent), BorderThickness = new Thickness(1),
             CornerRadius = new CornerRadius(4, 14, 14, 14), Padding = new Thickness(14, 10), MaxWidth = BubbleWidth,
             HorizontalAlignment = HorizontalAlignment.Left,
-            Child = new StackPanel { Spacing = 6, Children = { (Control?)log ?? steps, waiting, view } },
+            Child = new StackPanel { Spacing = 6, Children = { log, waiting, view } },
         };
         var avatar = TrayvoraTheme.Avatar(Initials(agent), MemberColor(agent), 32);
         avatar.VerticalAlignment = VerticalAlignment.Top;
@@ -1951,7 +2206,32 @@ internal sealed partial class DiscussionWindow(
         var row = new Grid { ColumnDefinitions = new ColumnDefinitions("Auto,*"), ColumnSpacing = 10, Margin = new Thickness(0, 0, 80, 0) };
         Grid.SetColumn(column, 1);
         row.Children.AddRange([avatar, column]);
-        _live[agent] = new LiveBubble(stream, row, view, activity, waiting, steps, log);
+        Button? steer = null;
+        if (agent == DiscussionMember.Codex)
+        {
+            steer = new Button { Content = "Clarify current task", IsVisible = false };
+            TrayvoraTheme.Ghost(steer);
+            ToolTip.SetTip(steer, "Send the text in the editor to this active Codex turn.");
+            steer.Click += async (_, _) =>
+            {
+                if (_room is not { } room || stream.Steer is not { } sendClarification || _editor.Text is not { } draft
+                    || string.IsNullOrWhiteSpace(draft) || draft.Length > MaxLength || Attachments.Files.Count > 0) return;
+                steer.IsEnabled = false;
+                try
+                {
+                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(12));
+                    await sendClarification(draft, timeout.Token);
+                    _ = Append(room, new DiscussionMessage(DiscussionMember.Boss, DiscussionMember.Codex, draft, DateTimeOffset.Now,
+                        Note: "Clarification in the active turn."));
+                    if (ReferenceEquals(room, _room) && _editor.Text == draft) _editor.Clear();
+                }
+                catch (Exception error) when (error is IOException or InvalidDataException or InvalidOperationException or OperationCanceledException or TimeoutException)
+                { _status.Text = "Clarification could not be confirmed. " + ErrorLog.Redact(error.Message); }
+                finally { steer.IsEnabled = true; }
+            };
+            meta.Children.Add(steer);
+        }
+        _live[agent] = new LiveBubble(stream, row, view, activity, waiting, steps, log) { Steer = steer };
         _messages.Children.Add(row);
         UpdateLive();
         ScrollToEnd();
@@ -1963,16 +2243,14 @@ internal sealed partial class DiscussionWindow(
         var grew = false;
         foreach (var bubble in _live.Values)
         {
+            if (bubble.Steer is { } steer) steer.IsVisible = bubble.Stream.Steer is not null;
             var (text, activity, version) = bubble.Stream.Snapshot();
             var seconds = (int)(DateTime.Now - bubble.Started).TotalSeconds;
             var doing = activity ?? (text.Length == 0 ? "is working" : "is writing");
             bubble.Activity.Text = seconds < 1 ? doing + "…" : $"{doing}… · {seconds} s";
             if (text.Length == 0) bubble.Waiting.Text = new string('•', 1 + (int)(DateTime.Now - bubble.Started).TotalMilliseconds / 380 % 3);
             if (version == bubble.Version) continue;
-            var (recent, total) = bubble.Stream.Steps;
-            var steps = bubble.Log is null
-                ? ReplyStream.FormatSteps(recent, total, running: activity is not null)
-                : ReplyStream.FormatWorkLog(recent, total);
+            var steps = bubble.Stream.WorkLog ?? "";
             if (bubble.Steps.Text != steps)
             {
                 bubble.Steps.Text = steps;
@@ -2283,28 +2561,23 @@ internal sealed partial class DiscussionWindow(
             _status.Text = "Message copied.";
         });
         if (message.DeliveryProfile is { } profile && message.DeliveryId is { } delivery && message.ThreadId is { } thread && _room is { } room && CheckDelivery is { } check)
-            Add("↻", "Check reply", "Check delivery without sending again", async () =>
-            {
-                try
-                {
-                    using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
-                    var turn = await check(profile, thread, delivery, timeout.Token);
-                    if (turn?.Status is not ("completed" or "failed"))
-                    { _status.Text = turn is null ? "No matching reply yet. Open the Desktop chat to check." : $"Delivery · {turn.Status}"; return; }
-                    if (room.Messages.All(item => item.DeliveryId != delivery) || _runs.ContainsKey(room.Id)) return;
-                    var index = room.Messages.FindIndex(item => item.DeliveryId == delivery);
-                    room.Messages[index] = message with { DeliveryId = null, Text = string.IsNullOrEmpty(turn.Answer) ? turn.Status : turn.Answer,
-                        Failed = turn.Status == "failed" };
-                    _ = Persist(room);
-                    if (ReferenceEquals(room, _room)) RefreshTimeline(room);
-                }
-                catch (Exception error) { _status.Text = error.Message; }
-            });
+            Add("↻", "Check reply", "Check delivery without sending again", () => CheckDesktopReplyAsync(room, message, delivery, profile, thread, check));
         if (message.ThreadId is { } id && id != Guid.Empty && message.Sender == DiscussionMember.Codex && message.DesktopThread)
             Add("↗", "Open chat", "Open this thread in Codex Desktop", async () =>
             {
                 if (TopLevel.GetTopLevel(this)?.Launcher is { } launcher) await launcher.LaunchUriAsync(new Uri($"codex://threads/{id}"));
             });
+        if (message.PendingFor != DeliveryRecipients.None && message.PostId is not null)
+        {
+            Add("×", "Remove from queue", "Keep the message in history and cancel its waiting deliveries",
+                () => ChangeQueuedAsync(message, edit: false));
+            if (message.Sender == DiscussionMember.Boss)
+                Add("", "Edit queued message", "Move the waiting message to the editor", () => ChangeQueuedAsync(message, edit: true));
+        }
+        if (message.NotSentTo != DeliveryRecipients.None && message.PendingFor == DeliveryRecipients.None
+            && message.UnconfirmedFor == DeliveryRecipients.None && message.Sender == DiscussionMember.Boss)
+            Add("↻", "Retry unsent message", "Load the message into the editor with its original recipients",
+                () => { RestorePostDraft(message, message.NotSentTo); return Task.CompletedTask; });
         if (!message.Failed)
         {
             // Reply: the message is quoted in the text box, where you can edit it and add your answer before sending.
@@ -2332,6 +2605,77 @@ internal sealed partial class DiscussionWindow(
         return new ContextMenu { ItemsSource = items };
     }
 
+    private async Task RecoverSavedDesktopRepliesAsync(DiscussionRoom room)
+    {
+        if (CheckDelivery is not { } check) return;
+        foreach (var message in room.Messages.Where(message => message.DeliveryId is not null).ToArray())
+        {
+            if (room.IsDeleted || !ReferenceEquals(room, _room)) return;
+            if (message is { DeliveryId: { } delivery, DeliveryProfile: { } profile, ThreadId: { } thread })
+                await CheckDesktopReplyAsync(room, message, delivery, profile, thread, check, automatic: true);
+        }
+    }
+
+    private async Task CheckDesktopReplyAsync(DiscussionRoom room, DiscussionMessage message, Guid delivery, string profile, Guid thread,
+        Func<string, Guid, Guid, CancellationToken, Task<DesktopTurn?>> check, bool automatic = false)
+    {
+        bool DesktopDeliveryIsLive() => _runs.TryGetValue(room.Id, out var run)
+            && run.Live.TryGetValue(DiscussionMember.Codex, out var live) && live.DesktopDeliveryId == delivery;
+
+        if (room.IsDeleted) return;
+        if (DesktopDeliveryIsLive())
+        {
+            if (!automatic) _status.Text = "Trayvora is already following this delivery.";
+            return;
+        }
+        if (_replyWrites.ContainsKey(delivery) || !_replyChecks.Add(delivery)) return;
+        try
+        {
+            using var timeout = new CancellationTokenSource(TimeSpan.FromSeconds(30));
+            var turn = message.RemoteTurnId is { } turnId && CheckRemoteTurn is { } checkTurn
+                ? await checkTurn(profile, thread, turnId, timeout.Token)
+                : await check(profile, thread, delivery, timeout.Token);
+            if (room.IsDeleted || DesktopDeliveryIsLive() || _replyWrites.ContainsKey(delivery)) return;
+            var marker = room.Messages.Find(item => item.DeliveryId == delivery);
+            if (marker is null) return;
+            if (turn is null)
+            {
+                if (!automatic && ReferenceEquals(room, _room)) _status.Text = "No matching reply yet. Open the Desktop chat to check.";
+                return;
+            }
+            if (automatic && !turn.IsTerminal) return;
+
+            var replacement = turn.Id.Length == 0 ? marker : marker with { RemoteTurnId = turn.Id };
+            if (turn.IsTerminal)
+            {
+                var work = new ReplyStream();
+                foreach (var entry in turn.Activity) work.Observe(entry);
+                work.FinishActivity(turn.Status == "interrupted");
+                replacement = replacement with
+                {
+                    DeliveryId = null, Text = string.IsNullOrEmpty(turn.Answer) ? turn.Status : turn.Answer,
+                    Failed = turn.Status == "failed", Interrupted = turn.Status == "interrupted", WorkLog = work.WorkLog,
+                };
+            }
+
+            if (!await CommitDesktopReplyAsync(room, delivery, replacement, preserveReply: automatic))
+            {
+                if (!automatic && !room.IsDeleted && ReferenceEquals(room, _room))
+                    _status.Text = "Could not save the recovered reply. Check access to the settings folder, then use Check reply again.";
+                return;
+            }
+            if (!ReferenceEquals(room, _room)) return;
+            _status.Text = turn.IsTerminal ? "Saved the Codex Desktop reply."
+                : turn.Status == "interrupted" ? "Codex has yet to confirm the stop. Use Check reply again or open the chat."
+                : $"Delivery · {turn.Status}";
+        }
+        catch (Exception error)
+        {
+            if (!automatic && !room.IsDeleted && ReferenceEquals(room, _room)) _status.Text = ErrorLog.Redact(error.Message);
+        }
+        finally { _replyChecks.Remove(delivery); }
+    }
+
     /// <summary>The message as a Markdown quote ("> " before each line) with who wrote it.</summary>
     internal static string Quote(DiscussionMessage message) =>
         $"> {DisplayName(message.Sender)} wrote:\n" + string.Join("\n", message.Text.Trim().ReplaceLineEndings("\n").Split('\n').Select(line => "> " + line)) + "\n\n";
@@ -2348,13 +2692,48 @@ internal sealed partial class DiscussionWindow(
         _status.Text = $"Quoted. Edit it, add your answer and press Enter to send to {(to == DiscussionTarget.Claude ? "Claude" : "Codex")}.";
     }
 
+    private async Task ChangeQueuedAsync(DiscussionMessage message, bool edit)
+    {
+        if (_room is not { } room || CurrentRun is not { } run || message.PostId is not { } post) return;
+        var index = room.Messages.FindIndex(item => item.PostId == post);
+        if (index < 0 || room.Messages[index] is not { PendingFor: not DeliveryRecipients.None } current) return;
+        if (edit && (!string.IsNullOrWhiteSpace(_editor.Text) || Attachments.Files.Count > 0))
+        {
+            _status.Text = "Clear or send the current draft before editing the queued message.";
+            return;
+        }
+        run.RemovedPosts.Add(post);
+        var queued = current.PendingFor;
+        await ReplaceMessage(room, index, current with { PendingFor = DeliveryRecipients.None, NotSentTo = current.NotSentTo | queued });
+        if (edit && ReferenceEquals(room, _room)) RestorePostDraft(current, queued);
+    }
+
+    private void RestorePostDraft(DiscussionMessage message, DeliveryRecipients targets)
+    {
+        if (!string.IsNullOrWhiteSpace(_editor.Text) || Attachments.Files.Count > 0)
+        {
+            _status.Text = "Clear or send the current draft first.";
+            return;
+        }
+        if (_room is not { } room) return;
+        var files = ComposerAttachments.FilesIn(message.Text, AttachmentsFolder(room));
+        _editor.Text = ComposerAttachments.WithoutFiles(message.Text);
+        Attachments.Restore(files);
+        _relayFromCodex = targets == DeliveryRecipients.Codex && message.RelayTo == DiscussionMember.Claude;
+        _relayFromClaude = targets == DeliveryRecipients.Claude && message.RelayTo == DiscussionMember.Codex;
+        SetTarget(targets == DeliveryRecipients.Claude ? DiscussionTarget.Claude
+            : targets == (DeliveryRecipients.Claude | DeliveryRecipients.Codex) ? DiscussionTarget.Both : DiscussionTarget.Codex);
+        _editor.CaretIndex = _editor.Text.Length;
+        _editor.Focus();
+    }
+
     /// <summary>Removes a message from Trayvora's saved view only; the agents keep their own chat history.</summary>
     private void DeleteMessage(DiscussionMessage message)
     {
         if (_room is not { } room) return;
         if (message.PendingFor != DeliveryRecipients.None)
         {
-            _status.Text = "Pause the session before removing a queued message.";
+            _status.Text = "Use Remove from queue before deleting a waiting message.";
             return;
         }
         var index = room.Messages.FindIndex(item => ReferenceEquals(item, message));

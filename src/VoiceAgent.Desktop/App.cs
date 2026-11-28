@@ -171,6 +171,7 @@ internal sealed class App : Avalonia.Application
         var exit = new NativeMenuItem("Exit");
         async Task ExitAsync()
         {
+            if (exiting) return;
             exiting = true;
             await overlay.CancelAndWaitAsync();
             desktop.Shutdown();

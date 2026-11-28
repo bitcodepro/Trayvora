@@ -52,9 +52,16 @@ public sealed class DesktopEventsTests
                 VerifyDiscussWith();
                 VerifyStreamingSession();
                 VerifySessionQueues();
+                VerifyPausedRoomDoesNotBlockAnotherRoom();
+                VerifyDraftSurvivesVoiceModeChange();
                 VerifyMarkdown();
                 VerifyAttachments();
                 VerifyDesktopDelivery();
+                VerifyDesktopRecoveryCanRetryAfterASaveFailure();
+                VerifyLiveDesktopReplySurvivesLockedSessionAndRestart();
+                VerifyDesktopReplyRecoversWhenASavedSessionOpens();
+                VerifyDeletedSessionIgnoresLateDesktopReply();
+                VerifyRestoredDraftUsesItsOwnRelay();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
                 VerifyFloatingAgent();
@@ -689,24 +696,22 @@ public sealed class DesktopEventsTests
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Second question");
             Assert.DoesNotContain(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Other topic");
 
-            // Both agents: Codex hands off to Claude, Claude fails. Each failure is shown and saved; nothing else is lost.
+            // Both agents get the user's message. An address in the resulting text does not create a third request.
             claudeFails = true;
             sent.Clear();
             view.GetLogicalDescendants().OfType<Button>().Single(button => Equals(button.Content, "Both"))
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             editor.Text = "Say hello to Claude";
             send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
-            PumpUntil(() => sent.Count >= 3 && Stored().Single(item => item.Title == "First question").Messages.Count(message => message.Failed) >= 2);
+            PumpUntil(() => Stored().Single(item => item.Title == "First question").Messages.Count >= 7);
             Pump(Task.Delay(50));
             Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], sent.Take(2).Select(item => item.Agent).Order());
-            Assert.Equal(DiscussionMember.Claude, sent[2].Agent);
-            Assert.Contains("hello from Codex", sent[2].Text);
-            Assert.StartsWith("Codex wrote:", sent[2].Text);
-            var saved = Stored().Single(item => item.Title == "First question").Messages.TakeLast(4).ToArray();
+            Assert.Equal(2, sent.Count);
+            var saved = Stored().Single(item => item.Title == "First question").Messages.TakeLast(3).ToArray();
             Assert.Equal("Say hello to Claude", saved[0].Text);
-            var handoff = Assert.Single(saved[1..], message => message.Sender == DiscussionMember.Codex);
-            Assert.Equal(((DiscussionMember?)DiscussionMember.Claude, "hello from Codex"), (handoff.To, handoff.Text));
-            Assert.Equal(2, saved[1..].Count(message => message.Failed && message.Sender == DiscussionMember.Claude));
+            var reply = Assert.Single(saved[1..], message => message.Sender == DiscussionMember.Codex);
+            Assert.Equal(((DiscussionMember?)DiscussionMember.Boss, "hello from Codex"), (reply.To, reply.Text));
+            Assert.Single(saved[1..], message => message.Failed && message.Sender == DiscussionMember.Claude);
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Claude Code was not found.");
 
             // Relay toggle on the Claude chip: Claude's plain reply is passed on to Codex automatically.
@@ -753,10 +758,7 @@ public sealed class DesktopEventsTests
             // Delete removes the message from the saved session only.
             var before = Stored().Single(item => item.Title == "First question").Messages.Count;
             // Hover the message so its toolbar is built, then press its own Delete.
-            Control row = view.GetLogicalDescendants().OfType<SelectableTextBlock>().Single(block => block.Text == "First question");
-            while (row.GetLogicalParent() is Control parent && parent is not StackPanel { Spacing: 14 }) row = parent;
-            row.RaiseEvent(new PointerEventArgs(InputElement.PointerEnteredEvent, row, new Pointer(0, PointerType.Mouse, true),
-                window, default, 0, new PointerPointProperties(), KeyModifiers.None));
+            var row = HoverMessage(view, window, "First question");
             row.GetLogicalDescendants().OfType<Button>().Single(button => AutomationProperties.GetName(button) == "Delete from this session")
                 .RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Pump(Task.Delay(100));
@@ -895,14 +897,14 @@ public sealed class DesktopEventsTests
             Pump(Task.Delay(250));
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Inlines?.Any(inline => inline is Avalonia.Controls.Documents.Span) == true);
             Assert.Contains(view.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Codex says");
-            var liveLog = view.GetLogicalDescendants().OfType<Expander>().Single(log => Equals(log.Header, "Work log"));
+            var liveLog = view.GetLogicalDescendants().OfType<Expander>().Single(log => log.IsVisible && Equals(log.Header, "Work log"));
             Assert.True(liveLog.IsExpanded);
             liveLog.IsExpanded = false;
 
             // Codex finishes, Claude is paused: Codex's answer and Claude's partial text are both kept.
             replies[DiscussionMember.Codex].SetResult("Codex final answer");
             Pump(Task.Delay(100));
-            Named("Pause").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Named("Stop session").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             Pump(Task.Delay(200));
             var messages = store.Load().Single().Messages;
             Assert.Equal("Codex final answer", messages[1].Text);
@@ -914,7 +916,148 @@ public sealed class DesktopEventsTests
             savedLog.IsExpanded = true;
             Assert.Contains(savedLog.GetLogicalDescendants().OfType<SelectableTextBlock>(), block => block.Text == "Read · Sample.cs");
             Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text == "⏸ interrupted");
-            Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text?.StartsWith("Paused", StringComparison.Ordinal) == true);
+            Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(), block => block.Text?.StartsWith("Session stopped", StringComparison.Ordinal) == true);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyPausedRoomDoesNotBlockAnotherRoom()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-paused-room-");
+        var window = new Window { Width = 1000, Height = 700 };
+        var allowDispatch = new TaskCompletionSource(TaskCreationOptions.RunContinuationsAsynchronously);
+        DiscussionWindow? view = null;
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var first = store.Create(null);
+            first.Title = "First local room";
+            store.Save(first);
+            var second = store.Create(null);
+            second.Title = "Second local room";
+            store.Save(second);
+
+            var codex = new CodexSession(folder.FullName);
+            var firstHasSlot = false;
+            var sent = new List<Guid>();
+            view = new DiscussionWindow(store, async (_, _, room, stream, _, token) =>
+            {
+                await codex.WithTurnSlotAsync(async () =>
+                {
+                    if (room.Id == first.Id)
+                    {
+                        firstHasSlot = true;
+                        await allowDispatch.Task.WaitAsync(token);
+                    }
+                    await stream.BeforeDispatch!();
+                    sent.Add(room.Id);
+                    return CodexTurnStatus.Completed;
+                }, token, waitInQueue: true);
+                return "Reply";
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                PreciseDeliveryStages = true,
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom is not null);
+
+            void Select(DiscussionRoom room)
+            {
+                if (view.CurrentRoom?.Id != room.Id)
+                    WaitForButton(view, room.Title).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+                Assert.Equal(room.Id, view.CurrentRoom?.Id);
+            }
+
+            void Post(string text)
+            {
+                view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true).Text = text;
+                var sendButton = view.GetLogicalDescendants().OfType<Button>().Single(b => AutomationProperties.GetName(b) == "Send");
+                PumpUntil(() => sendButton.IsEnabled);
+                Assert.True(sendButton.IsEnabled);
+                sendButton.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+
+            void Click(string label) => view.GetLogicalDescendants().OfType<Button>()
+                .Single(b => b.IsVisible && Equals(b.Content, label)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            Select(first);
+            Post("First request");
+            PumpUntil(() => firstHasSlot);
+            Assert.True(firstHasSlot);
+            Click("Pause queue");
+            allowDispatch.SetResult();
+            Select(second);
+            Post("Second request");
+            PumpUntil(() => view.CurrentRoom!.Messages.Any(m => m.Sender == DiscussionMember.Codex));
+            Assert.Equal([second.Id], sent);
+            Assert.Equal(DeliveryRecipients.Codex, store.ReadRoom(first.Id).Messages.Single().PendingFor);
+
+            Select(first);
+            Click("Resume queue");
+            PumpUntil(() => !view.IsRunning);
+            Pump(view.PendingSaves);
+            Assert.Equal([second.Id, first.Id], sent);
+            Assert.Equal("Reply", store.ReadRoom(first.Id).Messages.Last().Text);
+        }
+        finally
+        {
+            if (view is not null) Pump(view.StopAndSaveAsync());
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyDraftSurvivesVoiceModeChange()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-voice-draft-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            var transcript = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            var recording = false;
+            var sent = false;
+            string? originalDraft = null;
+            var view = new DiscussionWindow(store, (_, text, _, _, _, _) =>
+                {
+                    sent = true;
+                    originalDraft = text;
+                    return Task.FromResult<string?>("Unexpected");
+                },
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null,
+                (_, _, _) => { recording = true; return transcript.Task; });
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            var voice = view.GetLogicalDescendants().OfType<Avalonia.Controls.Primitives.ToggleButton>().Single(b => Equals(b.Content, "Voice mode"));
+            var mic = view.GetLogicalDescendants().OfType<Button>().Single(b => AutomationProperties.GetName(b) == "Dictate a message");
+            var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+            voice.IsChecked = true;
+            mic.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            Assert.True(recording);
+            voice.IsChecked = false;
+            editor.Text = "Existing notes";
+            transcript.SetResult("recognized text");
+            PumpUntil(() => editor.Text == "Existing notes recognized text");
+            Pump(view.StopAndSaveAsync());
+            Assert.False(sent, originalDraft);
+            Assert.Equal("Existing notes recognized text", store.ReadRoom(room.Id).Draft?.Text);
+
+            var restored = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+            restored.Initialize();
+            window.Content = restored;
+            PumpUntil(() => restored.CurrentRoom?.Id == room.Id);
+            Assert.Contains(restored.GetLogicalDescendants().OfType<TextBox>(), box => box.Text == "Existing notes recognized text");
         }
         finally
         {
@@ -1005,7 +1148,15 @@ public sealed class DesktopEventsTests
             var queued = store.ReadRoom(room.Id).Messages.Where(m => m.PendingFor == DeliveryRecipients.Codex);
             Assert.Equal(["Codex second", "Codex third"], queued.Select(m => m.Text));
 
-            opened[0].Reply.SetResult("Codex first reply");
+            Button VisibleButton(string label) => view.GetLogicalDescendants().OfType<Button>()
+                .Single(button => button.IsVisible && Equals(button.Content, label));
+            VisibleButton("Pause queue").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            VisibleButton("Stop Codex").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => store.ReadRoom(room.Id).Messages.Any(message => message.Text == "Codex has started answering" && message.Interrupted));
+            Assert.Equal(2, opened.Count);
+            Assert.False(opened[1].Reply.Task.IsCompleted);
+            Assert.Equal(DeliveryRecipients.Codex, Message("Codex second").PendingFor);
+            VisibleButton("Resume queue").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             PumpUntil(() => opened.Count == 3);
             Assert.Contains("Codex second", opened[2].Prompt);
             Assert.False(opened[1].Reply.Task.IsCompleted);
@@ -1022,7 +1173,7 @@ public sealed class DesktopEventsTests
                 PumpUntil(() => view.CurrentRoom!.Messages.Single(m => m.Text == "Codex third").UnconfirmedFor == DeliveryRecipients.None);
                 Assert.Equal(DeliveryRecipients.None, view.CurrentRoom!.Messages.Single(m => m.Text == "Codex third").UnconfirmedFor);
                 Assert.False(view.PendingSaves.IsCompleted);
-                Named("Pause").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                Named("Stop session").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
             }
             PumpUntil(() => !view.IsRunning);
             Pump(view.PendingSaves);
@@ -1101,6 +1252,333 @@ public sealed class DesktopEventsTests
             Assert.NotEqual(selectedProfile, room.Messages.Single().DeliveryProfile);
         }
         finally { folder.Delete(true); }
+    }
+
+    private static void VerifyDesktopRecoveryCanRetryAfterASaveFailure()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-recovery-write-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var thread = Guid.NewGuid();
+            var delivery = Guid.NewGuid();
+            var post = Guid.NewGuid();
+            var room = new DiscussionRoom { CodexDesktop = true, CodexChatId = thread };
+            room.Messages.Add(new(DiscussionMember.Boss, DiscussionMember.Codex, "Find a reply", DateTimeOffset.Now,
+                PostId: post, UnconfirmedFor: DeliveryRecipients.Codex | DeliveryRecipients.Claude));
+            room.Messages.Add(new(DiscussionMember.Codex, DiscussionMember.Boss, "Waiting", DateTimeOffset.Now,
+                ThreadId: thread, DesktopThread: true, DeliveryId: delivery, DeliveryProfile: "test-profile", DeliveryPostId: post));
+            store.Save(room);
+
+            var checks = 0;
+            var manualChecks = false;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (_, _, _, _) => Task.FromResult<DesktopTurn?>(!manualChecks ? null : ++checks == 1
+                    ? new("exact-turn", "interrupted", "", "Partial", [])
+                    : new("exact-turn", "completed", "", "Recovered reply", [])),
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            manualChecks = true;
+            void Check()
+            {
+                HoverMessage(view, window, "Waiting");
+                WaitForButton(view, "Check delivery without sending again").RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            }
+
+            Check();
+            PumpUntil(() => view.CurrentRoom?.Messages[1].RemoteTurnId == "exact-turn");
+            Assert.Equal(delivery, view.CurrentRoom!.Messages[1].DeliveryId);
+            Assert.Equal("Waiting", view.CurrentRoom.Messages[1].Text);
+            Assert.Equal(DeliveryRecipients.Claude, view.CurrentRoom.Messages[0].UnconfirmedFor);
+
+            var file = Path.Combine(store.Directory, $"{room.Id:N}.json");
+            using (File.Open(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Check();
+                WaitForButton(view, "Check delivery without sending again");
+                Pump(view.PendingSaves);
+                PumpUntil(() => view.GetLogicalDescendants().OfType<TextBlock>()
+                    .Any(t => t.Text?.StartsWith("Could not save the recovered reply", StringComparison.Ordinal) == true));
+                Assert.Contains(view.GetLogicalDescendants().OfType<TextBlock>(),
+                    t => t.Text?.StartsWith("Could not save the recovered reply", StringComparison.Ordinal) == true);
+                Assert.Equal(delivery, view.CurrentRoom.Messages[1].DeliveryId);
+                Assert.Equal(delivery, store.ReadRoom(room.Id).Messages[1].DeliveryId);
+            }
+
+            Task laterSave;
+            using (File.Open(file, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                Check();
+                var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+                editor.Text = "Draft changed while the reply is being saved";
+                PumpUntil(() => view.CurrentRoom.Draft?.Text == editor.Text);
+                laterSave = view.StopAndSaveAsync();
+            }
+            Pump(laterSave);
+            PumpUntil(() => view.CurrentRoom.Messages[1].DeliveryId is null);
+            var saved = store.ReadRoom(room.Id);
+            Assert.Equal(3, checks);
+            Assert.Null(saved.Messages[1].DeliveryId);
+            Assert.Equal("Recovered reply", saved.Messages[1].Text);
+            Assert.Equal(DeliveryRecipients.Claude, saved.Messages[0].UnconfirmedFor);
+            Assert.Equal("Draft changed while the reply is being saved", saved.Draft?.Text);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyLiveDesktopReplySurvivesLockedSessionAndRestart()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-live-reply-restart-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            room.CodexDesktop = true;
+            room.CodexChatId = Guid.NewGuid();
+            store.Save(room);
+
+            var answer = new TaskCompletionSource<string?>(TaskCreationOptions.RunContinuationsAsynchronously);
+            DiscussionWindow? view = null;
+            view = new DiscussionWindow(store, async (_, _, selected, stream, _, token) =>
+            {
+                var delivery = await view!.StartDesktopDeliveryAsync(selected, "test-profile", stream.PostId);
+                stream.DesktopDeliveryId = delivery.Id;
+                stream.ConfirmReceipt();
+                var reply = await answer.Task.WaitAsync(token);
+                stream.DesktopDeliveryFinished = true;
+                return reply;
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+            var editor = view.GetLogicalDescendants().OfType<TextBox>().Single(t => t.PlaceholderText?.StartsWith("Message Codex") == true);
+            editor.Text = "Test question";
+            var send = WaitForButton(view, "Send");
+            PumpUntil(() => send.IsEnabled);
+            send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+            PumpUntil(() => view.CurrentRoom!.Messages.Count == 2 && view.CurrentRoom.Messages[0].UnconfirmedFor == DeliveryRecipients.None);
+            Pump(view.PendingSaves);
+            Assert.Contains(store.ReadRoom(room.Id).Messages, item => item.DeliveryId is not null);
+
+            var primary = Path.Combine(store.Directory, $"{room.Id:N}.json");
+            var recovery = Path.Combine(store.Directory, $"{room.Id:N}.recovery");
+            using (var locked = File.Open(primary, FileMode.Open, FileAccess.Read, FileShare.Read))
+            {
+                answer.SetResult("Exact finished reply");
+                PumpUntil(() => view.CurrentRoom!.Messages.Any(item => item.Text == "Exact finished reply"));
+                Assert.True(File.Exists(recovery));
+                using var diskBeforeRecovery = System.Text.Json.JsonDocument.Parse(locked);
+                Assert.Contains(diskBeforeRecovery.RootElement.GetProperty("Messages").EnumerateArray(),
+                    item => item.GetProperty("DeliveryId").ValueKind == System.Text.Json.JsonValueKind.String);
+
+                editor.Text = "Draft saved while the main file is still locked";
+                PumpUntil(() => view.CurrentRoom!.Draft?.Text == editor.Text);
+                Pump(view.StopAndSaveAsync());
+
+                var reopened = new DiscussionWindow(new DiscussionStore(folder.FullName), (_, _, _, _, _, _) => throw new NotSupportedException(),
+                    () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+                reopened.Initialize();
+                window.Content = reopened;
+                PumpUntil(() => reopened.CurrentRoom?.Id == room.Id);
+                var messages = reopened.CurrentRoom!.Messages;
+                Assert.Single(messages, item => item.Text == "Exact finished reply");
+                Assert.DoesNotContain(messages, item => item.DeliveryId is not null);
+                Assert.Equal("Draft saved while the main file is still locked", reopened.CurrentRoom.Draft?.Text);
+            }
+
+            Assert.Single(new DiscussionStore(folder.FullName).ReadRoom(room.Id).Messages, item => item.Text == "Exact finished reply");
+            Assert.False(File.Exists(recovery));
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyDesktopReplyRecoversWhenASavedSessionOpens()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-auto-reply-recovery-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            var chat = Guid.NewGuid();
+            var delivery = Guid.NewGuid();
+            room.Messages.Add(new(DiscussionMember.Codex, DiscussionMember.Boss, "Pending desktop delivery", DateTimeOffset.Now,
+                ThreadId: chat, DesktopThread: true, DeliveryId: delivery, DeliveryProfile: "original-profile"));
+            store.Save(room);
+
+            var didRead = 0;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (profile, thread, clientMessage, _) =>
+                {
+                    Assert.Equal("original-profile", profile);
+                    Assert.Equal(chat, thread);
+                    Assert.Equal(delivery, clientMessage);
+                    didRead++;
+                    return Task.FromResult<DesktopTurn?>(new("saved-turn", "completed", "", "Recovered automatically", [delivery.ToString()]));
+                },
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom?.Messages.Any(message => message.Text == "Recovered automatically") == true);
+            Assert.Equal(1, didRead);
+            var recovered = Assert.Single(new DiscussionStore(folder.FullName).ReadRoom(room.Id).Messages);
+            Assert.Equal("Recovered automatically", recovered.Text);
+            Assert.Null(recovered.DeliveryId);
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyDeletedSessionIgnoresLateDesktopReply()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-delete-pending-reply-");
+        var window = new Window { Width = 1000, Height = 700 };
+        var delayed = new TaskCompletionSource<DesktopTurn?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            var delivery = Guid.NewGuid();
+            room.Messages.Add(new(DiscussionMember.Codex, DiscussionMember.Boss, "Pending Desktop reply", DateTimeOffset.Now,
+                ThreadId: Guid.NewGuid(), DesktopThread: true, DeliveryId: delivery, DeliveryProfile: "original-profile"));
+            store.Save(room);
+            var primary = Path.Combine(store.Directory, $"{room.Id:N}.json");
+            var recovery = Path.Combine(store.Directory, $"{room.Id:N}.recovery");
+
+            var checking = false;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (_, _, clientMessage, _) =>
+                {
+                    Assert.Equal(delivery, clientMessage);
+                    checking = true;
+                    return delayed.Task;
+                },
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => checking);
+            Assert.True(checking);
+            Assert.Equal(room.Id, view.CurrentRoom?.Id);
+
+            Click("Delete");
+            Click("Delete session");
+            var deletion = view.PendingSaves;
+            Pump(deletion);
+            Assert.Null(view.CurrentRoom);
+            Assert.False(File.Exists(primary));
+
+            delayed.SetResult(new DesktopTurn("saved-turn", "completed", "", "Answer arriving after deletion", [delivery.ToString()]));
+            // Let the queued UI continuation run before checking whether it scheduled another disk write.
+            Pump(Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle).GetTask());
+            Pump(view.PendingSaves);
+            Assert.False(File.Exists(primary), "A late Desktop reply recreated the deleted session file.");
+            Assert.False(File.Exists(recovery));
+            Assert.Empty(new DiscussionStore(folder.FullName).Load());
+            Assert.Same(deletion, view.PendingSaves);
+
+            void Click(string label) => view.GetLogicalDescendants().OfType<Button>()
+                .Single(button => Equals(button.Content, label)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }
+        finally
+        {
+            if (!delayed.Task.IsCompleted) delayed.TrySetCanceled();
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyRestoredDraftUsesItsOwnRelay()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-retry-relay-");
+        var window = new Window { Width = 1000, Height = 700 };
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var chat = new ClaudeChat(Guid.NewGuid(), folder.FullName, "Claude test chat");
+            var ordinary = CreateRoom("Ordinary draft", null);
+            var routed = CreateRoom("Routed draft", DiscussionMember.Claude);
+            var sent = new List<DiscussionMember>();
+            var view = new DiscussionWindow(store, (agent, _, _, _, _, _) =>
+            {
+                sent.Add(agent);
+                return Task.FromResult<string?>("Reply");
+            }, () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => chat);
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => view.CurrentRoom is not null);
+
+            Select(ordinary);
+            Click("Pass the reply on to Claude");
+            RestoreAndSend();
+            Assert.Equal([DiscussionMember.Codex], sent);
+
+            Select(routed);
+            sent.Clear();
+            RestoreAndSend();
+            Assert.Equal([DiscussionMember.Codex, DiscussionMember.Claude], sent);
+
+            DiscussionRoom CreateRoom(string title, DiscussionMember? relay)
+            {
+                var room = store.Create(chat);
+                room.Title = title;
+                room.Messages.Add(new(DiscussionMember.Boss, DiscussionMember.Codex, "Question", DateTimeOffset.Now,
+                    RelayTo: relay, PostId: Guid.NewGuid(), NotSentTo: DeliveryRecipients.Codex));
+                store.Save(room);
+                return room;
+            }
+
+            void Click(string name) => WaitForButton(view, name).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+
+            void Select(DiscussionRoom room)
+            {
+                if (view.CurrentRoom?.Id != room.Id) Click(room.Title);
+                PumpUntil(() => view.CurrentRoom?.Id == room.Id);
+                Assert.Equal(room.Id, view.CurrentRoom?.Id);
+            }
+
+            void RestoreAndSend()
+            {
+                HoverMessage(view, window, "Question");
+                Click("Load the message into the editor with its original recipients");
+                var send = WaitForButton(view, "Send");
+                PumpUntil(() => send.IsEnabled);
+                Assert.True(send.IsEnabled);
+                send.RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+                PumpUntil(() => !view.IsRunning);
+                Pump(view.PendingSaves);
+            }
+        }
+        finally
+        {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
     }
 
     private static void VerifyAttachments()
@@ -1409,6 +1887,15 @@ public sealed class DesktopEventsTests
     }
 
     /// <summary>Runs the UI loop until <paramref name="done"/> is true (at most 8 seconds).</summary>
+    private static Control HoverMessage(Control view, Window window, string text)
+    {
+        Control row = view.GetLogicalDescendants().OfType<SelectableTextBlock>().Single(block => block.Text == text);
+        while (row.GetLogicalParent() is Control parent && parent is not StackPanel { Spacing: 14 }) row = parent;
+        row.RaiseEvent(new PointerEventArgs(InputElement.PointerEnteredEvent, row, new Pointer(0, PointerType.Mouse, true),
+            window, default, 0, new PointerPointProperties(), KeyModifiers.None));
+        return row;
+    }
+
     private static void PumpUntil(Func<bool> done)
     {
         var deadline = DateTime.UtcNow.AddSeconds(8);

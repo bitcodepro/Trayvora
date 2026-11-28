@@ -123,8 +123,13 @@ internal sealed class ComposerAttachments
         }
     }
 
-    /// <summary>The message text with the list of attached files the agents should open.</summary>
     private const string ListHeader = "[Attached files — open them before answering:]";
+
+    public static string WithoutFiles(string text)
+    {
+        var marker = text.LastIndexOf("\n\n" + ListHeader, StringComparison.Ordinal);
+        return marker >= 0 ? text[..marker] : text;
+    }
 
     public static string WithFiles(string text, IReadOnlyList<string> files) =>
         files.Count == 0 ? text
@@ -192,7 +197,11 @@ internal sealed class ComposerAttachments
     {
         _files.Clear();
         CancelCopy();
-        _files.AddRange(files);
+        if (_folder() is { } folder)
+        {
+            var root = Root(folder);
+            _files.AddRange(files.Where(file => Inside(file, root)).Distinct(StringComparer.OrdinalIgnoreCase));
+        }
         Redraw();
     }
 

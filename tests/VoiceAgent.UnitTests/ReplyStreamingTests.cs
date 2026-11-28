@@ -135,12 +135,16 @@ public sealed class ReplyStreamingTests
         parser.Accept("""{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash","elapsed_time_seconds":12}""");
         Assert.Equal("Running · Bash · 12 s", stream.Snapshot().Activity);
         parser.Accept("""{"type":"tool_progress","tool_use_id":"toolu_1","tool_name":"Bash","elapsed_time_seconds":15}""");
-        Assert.Equal("Bash", stream.WorkLog);
+        Assert.Contains("Bash · running", stream.WorkLog);
+        Assert.Single(stream.WorkLog!.Split('\n'));
         parser.Accept("""{"type":"user","parent_tool_use_id":"outer","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_1","is_error":true,"content":"secret result"}]}}""");
         Assert.Equal("Waiting for Claude", stream.Snapshot().Activity);
         parser.Accept("""{"type":"assistant","message":{"content":[{"type":"tool_use","id":"toolu_2","name":"Read","input":{"file_path":"E:/working/Example.cs"}}]}}""");
         parser.Accept("""{"type":"user","message":{"content":[{"type":"tool_result","tool_use_id":"toolu_2","content":"file contents"}]}}""");
-        Assert.Equal("Bash\nFailed · Bash\nRead · Example.cs\nCompleted · Read · Example.cs", stream.WorkLog);
+        Assert.Contains("Bash · failed", stream.WorkLog);
+        Assert.Contains("Read · Example.cs · completed", stream.WorkLog);
+        Assert.DoesNotContain("secret", stream.WorkLog);
+        Assert.DoesNotContain("thinking", stream.WorkLog);
         Assert.Equal("", stream.Text);
     }
 

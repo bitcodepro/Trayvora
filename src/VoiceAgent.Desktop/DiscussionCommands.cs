@@ -256,6 +256,7 @@ internal sealed partial class DiscussionWindow
 
         using var operation = new CancellationTokenSource();
         _commandCancel = operation;
+        RunningChanged?.Invoke();
         _runCommand.IsEnabled = _commandInput.IsEnabled = _commandChoices.IsEnabled = false;
         UpdateComposer();
         _status.Text = $"Running {name}…";
@@ -367,6 +368,7 @@ internal sealed partial class DiscussionWindow
         finally
         {
             _commandCancel = null;
+            RunningChanged?.Invoke();
             _runCommand.IsEnabled = _commandInput.IsEnabled = _commandChoices.IsEnabled = true;
             UpdateComposer();
             if (InCommandMode) _commandInput.Focus();
