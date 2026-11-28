@@ -60,6 +60,7 @@ public sealed class DesktopEventsTests
                 VerifyDesktopRecoveryCanRetryAfterASaveFailure();
                 VerifyLiveDesktopReplySurvivesLockedSessionAndRestart();
                 VerifyDesktopReplyRecoversWhenASavedSessionOpens();
+                VerifyDeletedSessionIgnoresLateDesktopReply();
                 VerifyRestoredDraftUsesItsOwnRelay();
                 VerifyAudioEngineSwitch();
                 VerifyAccounts();
@@ -1271,15 +1272,19 @@ public sealed class DesktopEventsTests
             store.Save(room);
 
             var checks = 0;
+            var manualChecks = false;
             var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
-                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null);
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (_, _, _, _) => Task.FromResult<DesktopTurn?>(!manualChecks ? null : ++checks == 1
+                    ? new("exact-turn", "interrupted", "", "Partial", [])
+                    : new("exact-turn", "completed", "", "Recovered reply", [])),
+            };
             view.Initialize();
             window.Content = view;
             window.Show();
             PumpUntil(() => view.CurrentRoom?.Id == room.Id);
-            view.CheckDelivery = (_, _, _, _) => Task.FromResult<DesktopTurn?>(++checks == 1
-                ? new("exact-turn", "interrupted", "", "Partial", [])
-                : new("exact-turn", "completed", "", "Recovered reply", []));
+            manualChecks = true;
             void Check()
             {
                 HoverMessage(view, window, "Waiting");
@@ -1441,6 +1446,67 @@ public sealed class DesktopEventsTests
         }
         finally
         {
+            window.Close();
+            folder.Delete(recursive: true);
+        }
+    }
+
+    private static void VerifyDeletedSessionIgnoresLateDesktopReply()
+    {
+        var folder = Directory.CreateTempSubdirectory("trayvora-delete-pending-reply-");
+        var window = new Window { Width = 1000, Height = 700 };
+        var delayed = new TaskCompletionSource<DesktopTurn?>(TaskCreationOptions.RunContinuationsAsynchronously);
+        try
+        {
+            var store = new DiscussionStore(folder.FullName);
+            var room = store.Create(null);
+            var delivery = Guid.NewGuid();
+            room.Messages.Add(new(DiscussionMember.Codex, DiscussionMember.Boss, "Pending Desktop reply", DateTimeOffset.Now,
+                ThreadId: Guid.NewGuid(), DesktopThread: true, DeliveryId: delivery, DeliveryProfile: "original-profile"));
+            store.Save(room);
+            var primary = Path.Combine(store.Directory, $"{room.Id:N}.json");
+            var recovery = Path.Combine(store.Directory, $"{room.Id:N}.recovery");
+
+            var checking = false;
+            var view = new DiscussionWindow(store, (_, _, _, _, _, _) => throw new NotSupportedException(),
+                () => [], null, () => Task.FromResult<IReadOnlyList<ClaudeChat>>([]), () => null)
+            {
+                CheckDelivery = (_, _, clientMessage, _) =>
+                {
+                    Assert.Equal(delivery, clientMessage);
+                    checking = true;
+                    return delayed.Task;
+                },
+            };
+            view.Initialize();
+            window.Content = view;
+            window.Show();
+            PumpUntil(() => checking);
+            Assert.True(checking);
+            Assert.Equal(room.Id, view.CurrentRoom?.Id);
+
+            Click("Delete");
+            Click("Delete session");
+            var deletion = view.PendingSaves;
+            Pump(deletion);
+            Assert.Null(view.CurrentRoom);
+            Assert.False(File.Exists(primary));
+
+            delayed.SetResult(new DesktopTurn("saved-turn", "completed", "", "Answer arriving after deletion", [delivery.ToString()]));
+            // Let the queued UI continuation run before checking whether it scheduled another disk write.
+            Pump(Dispatcher.UIThread.InvokeAsync(() => { }, DispatcherPriority.ApplicationIdle).GetTask());
+            Pump(view.PendingSaves);
+            Assert.False(File.Exists(primary), "A late Desktop reply recreated the deleted session file.");
+            Assert.False(File.Exists(recovery));
+            Assert.Empty(new DiscussionStore(folder.FullName).Load());
+            Assert.Same(deletion, view.PendingSaves);
+
+            void Click(string label) => view.GetLogicalDescendants().OfType<Button>()
+                .Single(button => Equals(button.Content, label)).RaiseEvent(new RoutedEventArgs(Button.ClickEvent));
+        }
+        finally
+        {
+            if (!delayed.Task.IsCompleted) delayed.TrySetCanceled();
             window.Close();
             folder.Delete(recursive: true);
         }

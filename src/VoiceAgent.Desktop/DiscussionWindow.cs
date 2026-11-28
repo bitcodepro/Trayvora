@@ -1194,11 +1194,12 @@ internal sealed partial class DiscussionWindow(
 
     private async Task<bool> CommitDesktopReplyAsync(DiscussionRoom room, Guid delivery, DiscussionMessage replacement, bool append = false, bool preserveReply = false)
     {
+        if (room.IsDeleted) return false;
         var recovery = new RecoveredReply(room.Id, delivery, replacement, append);
         if (!_replyWrites.TryAdd(delivery, recovery)) return false;
         try
         {
-            if (!await Persist(room, recovery, preserveReply)) return false;
+            if (!await Persist(room, recovery, preserveReply) || room.IsDeleted) return false;
             recovery.Apply(room);
             if (ReferenceEquals(room, _room)) RefreshTimeline(room);
             RefreshList();
@@ -1209,6 +1210,8 @@ internal sealed partial class DiscussionWindow(
 
     private Task<bool> Persist(DiscussionRoom room, RecoveredReply? recovery = null, bool preserveReply = false)
     {
+        // Writes already queued run before deletion. A late continuation must never enqueue a write after it.
+        if (room.IsDeleted) return Task.FromResult(false);
         var snapshot = new DiscussionRoom
         {
             Id = room.Id, Title = room.Title, Created = room.Created, Updated = room.Updated,
@@ -1304,10 +1307,10 @@ internal sealed partial class DiscussionWindow(
 
     private void DeleteRoom()
     {
-        if (_room is not { } room || CurrentRun is not null) return;
-        var id = room.Id;
-        _ = Enqueue(() => store.Delete(id), "Could not delete this session.");
+        if (_room is not { IsDeleted: false } room || CurrentRun is not null) return;
+        room.IsDeleted = true;
         _items.Remove(room);
+        _ = Enqueue(() => store.Delete(room.Id), "Could not delete this session.");
         RefreshList();
         _ = OpenSavedAsync(_items.FirstOrDefault());
     }
@@ -2148,7 +2151,7 @@ internal sealed partial class DiscussionWindow(
             return true;
         }
 
-        if (ReferenceEquals(room, _room))
+        if (!room.IsDeleted && ReferenceEquals(room, _room))
             _status.Text = "Could not save the Codex Desktop reply. Trayvora will check for it when you open this session.";
         return false;
     }
@@ -2607,7 +2610,7 @@ internal sealed partial class DiscussionWindow(
         if (CheckDelivery is not { } check) return;
         foreach (var message in room.Messages.Where(message => message.DeliveryId is not null).ToArray())
         {
-            if (!ReferenceEquals(room, _room)) return;
+            if (room.IsDeleted || !ReferenceEquals(room, _room)) return;
             if (message is { DeliveryId: { } delivery, DeliveryProfile: { } profile, ThreadId: { } thread })
                 await CheckDesktopReplyAsync(room, message, delivery, profile, thread, check, automatic: true);
         }
@@ -2619,6 +2622,7 @@ internal sealed partial class DiscussionWindow(
         bool DesktopDeliveryIsLive() => _runs.TryGetValue(room.Id, out var run)
             && run.Live.TryGetValue(DiscussionMember.Codex, out var live) && live.DesktopDeliveryId == delivery;
 
+        if (room.IsDeleted) return;
         if (DesktopDeliveryIsLive())
         {
             if (!automatic) _status.Text = "Trayvora is already following this delivery.";
@@ -2631,7 +2635,7 @@ internal sealed partial class DiscussionWindow(
             var turn = message.RemoteTurnId is { } turnId && CheckRemoteTurn is { } checkTurn
                 ? await checkTurn(profile, thread, turnId, timeout.Token)
                 : await check(profile, thread, delivery, timeout.Token);
-            if (DesktopDeliveryIsLive() || _replyWrites.ContainsKey(delivery)) return;
+            if (room.IsDeleted || DesktopDeliveryIsLive() || _replyWrites.ContainsKey(delivery)) return;
             var marker = room.Messages.Find(item => item.DeliveryId == delivery);
             if (marker is null) return;
             if (turn is null)
@@ -2656,7 +2660,7 @@ internal sealed partial class DiscussionWindow(
 
             if (!await CommitDesktopReplyAsync(room, delivery, replacement, preserveReply: automatic))
             {
-                if (!automatic && ReferenceEquals(room, _room))
+                if (!automatic && !room.IsDeleted && ReferenceEquals(room, _room))
                     _status.Text = "Could not save the recovered reply. Check access to the settings folder, then use Check reply again.";
                 return;
             }
@@ -2667,7 +2671,7 @@ internal sealed partial class DiscussionWindow(
         }
         catch (Exception error)
         {
-            if (!automatic && ReferenceEquals(room, _room)) _status.Text = ErrorLog.Redact(error.Message);
+            if (!automatic && !room.IsDeleted && ReferenceEquals(room, _room)) _status.Text = ErrorLog.Redact(error.Message);
         }
         finally { _replyChecks.Remove(delivery); }
     }
